@@ -1,6 +1,6 @@
 import numpy as np
 
-from binding_lang.diagnose import (
+from mdagent.diagnose import (
     ResidueReport,
     assign_states,
     count_transitions,

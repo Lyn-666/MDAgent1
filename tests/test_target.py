@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from binding_lang.target import Target, parse_residue_spec, resolve_target
+from mdagent.target import Target, parse_residue_spec, resolve_target
 
 PDB = Path(__file__).resolve().parents[1] / "examples" / "181L.pdb"
 

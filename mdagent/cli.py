@@ -1,9 +1,9 @@
 """Command line entry point.
 
 Examples:
-  python -m binding_lang run --pdb examples/181L.pdb --around-ligand BNZ \\
+  python -m mdagent run --pdb examples/181L.pdb --around-ligand BNZ \\
       --replicas 3 --ns 1 --out runs/181L
-  python -m binding_lang diagnose --run runs/181L
+  python -m mdagent diagnose --run runs/181L
 """
 
 from __future__ import annotations
@@ -69,7 +69,7 @@ def cmd_diagnose(args) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(prog="binding_lang")
+    p = argparse.ArgumentParser(prog="mdagent")
     sub = p.add_subparsers(dest="command", required=True)
 
     r = sub.add_parser("run", help="Build the system, run MD, and diagnose the target side chains.")

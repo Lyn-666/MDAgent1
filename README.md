@@ -26,11 +26,11 @@ python -m venv .venv && . .venv/bin/activate
 pip install -e ".[test]"
 
 # T4 溶菌酶 L99A：苯周围 5 Å 内的口袋残基，3 条轨迹，每条 1 ns
-python -m binding_lang run --pdb examples/181L.pdb --around-ligand BNZ \
+python -m mdagent run --pdb examples/181L.pdb --around-ligand BNZ \
     --replicas 3 --ns 1 --out runs/181L
 
 # 对已有的运行结果重新诊断
-python -m binding_lang diagnose --run runs/181L
+python -m mdagent diagnose --run runs/181L
 
 pytest -q tests
 ```
