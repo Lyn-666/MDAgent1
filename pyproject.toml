@@ -7,7 +7,7 @@ name = "mdagent"
 version = "0.1.0"
 description = "MD agent that finds and fixes poorly sampled side chains in a target region"
 requires-python = ">=3.10"
-dependencies = ["openmm>=8.1", "pdbfixer", "mdtraj", "numpy"]
+dependencies = ["openmm>=8.1", "pdbfixer", "mdtraj", "numpy", "propka>=3.5"]
 
 [project.optional-dependencies]
 test = ["pytest"]

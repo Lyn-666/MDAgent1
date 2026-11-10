@@ -53,6 +53,7 @@ class RunState:
     loop: LoopSettings
     rounds_ns: list[float] = field(default_factory=list)
     pending_round_ns: float = 0.0  # Length of a round that started but did not finish.
+    setup: dict = field(default_factory=dict)  # The SetupOptions used to build the system.
 
     @property
     def ns_done(self) -> float:

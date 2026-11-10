@@ -76,12 +76,12 @@ def test_decide_respects_budget():
 def test_run_resume_and_finish_interrupted_round(tmp_path):
     """A tiny peptide on CPU: run, extend the budget, and recover from a stopped round."""
     from mdagent.agent import RunState, run_loop
-    from mdagent.build import build_system
+    from mdagent.build import SetupOptions, build_system
     from mdagent.diagnose import load_run
     from mdagent.simulate import MDSettings, SystemFiles, write_inputs
 
     pdb = DATA / "fragment_108-114.pdb"
-    built = build_system(pdb, padding_nm=0.6)
+    built = build_system(pdb, SetupOptions(forcefield="amber14", padding_nm=0.8))  # Amber is faster on CPU.
     write_inputs(built, tmp_path)
     state = RunState(
         pdb=str(pdb), target_description="test", target=[("A", 111), ("A", 114)],

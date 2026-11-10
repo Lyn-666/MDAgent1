@@ -7,6 +7,10 @@ Examples:
   # Continue a stopped run, or give a finished run a larger budget.
   python -m mdagent resume --run runs/181L --max-ns 40
 
+  # Check protonation with PROPKA, use Amber ff19SB + OPC, 0.1 M KCl; build only.
+  python -m mdagent run --pdb examples/181L.pdb --around-ligand BNZ --out runs/181L_b \\
+      --check-protonation --forcefield amber19 --ion-conc 0.1 --cation K+ --setup-only
+
   # Show the latest ranked diagnosis.
   python -m mdagent diagnose --run runs/181L
 """
@@ -36,8 +40,11 @@ def _print_decisions(decisions) -> None:
 
 
 def cmd_run(args) -> int:
+    from dataclasses import asdict
+
     from .agent import LoopSettings, RunState, run_loop
-    from .build import build_system
+    from .build import SetupOptions, build_system
+    from .protonation import parse_overrides
     from .simulate import MDSettings, SystemFiles, write_inputs
 
     out = Path(args.out)
@@ -51,11 +58,32 @@ def cmd_run(args) -> int:
     print(f"Target: {target.describe()}")
     print(f"        {len(keys)} residues: " + ", ".join(f"{c}:{n}" for c, n in keys))
 
-    print("Building the system ...")
-    built = build_system(args.pdb, ph=args.ph, padding_nm=args.padding_nm)
-    for note in built.notes:
-        print("  " + note)
+    if not target.ligand:
+        asked = {(c, n) for c, n in target.residues}
+        missing = sorted(n for c, n in asked if not any(k[1] == n and (c is None or k[0] == c) for k in keys))
+        if missing:
+            print("WARNING: these target residues have no coordinates in the PDB file and are "
+                  "left out of the target: " + ", ".join(map(str, missing)))
+
+    setup = SetupOptions(
+        forcefield=args.forcefield,
+        ph=args.ph,
+        ion_conc_molar=args.ion_conc,
+        cation=args.cation,
+        padding_nm=args.padding_nm,
+        box_shape=args.box_shape,
+        check_protonation=args.check_protonation,
+        protonation={f"{c + ':' if c else ''}{n}": v
+                     for (c, n), v in parse_overrides(args.protonation or "").items()},
+    )
+    setup.validate()
+    print("Building the system" + (" (checking protonation states with PROPKA)" if setup.check_protonation else "")
+          + " ...")
+    built = build_system(args.pdb, setup, keys)
+    report = built.report()
+    print("\n".join("  " + line for line in report.splitlines()))
     write_inputs(built, out)
+    (out / "setup_report.txt").write_text(report + "\n")
 
     loop = LoopSettings(
         first_ns=min(args.first_ns, args.max_ns),
@@ -71,8 +99,13 @@ def cmd_run(args) -> int:
         base_seed=args.seed,
         md=MDSettings(save_interval_ps=args.save_ps, platform=args.platform),
         loop=loop,
+        setup=asdict(setup),
     )
     state.save(out)
+    if args.setup_only:
+        print(f"\nThe system is ready in {out}. Check the report above (also in setup_report.txt).")
+        print(f"To start MD: python -m mdagent resume --run {out}")
+        return 0
     print(f"Plan: {args.replicas} replicas. Round 1 is {loop.first_ns:g} ns per replica. "
           f"Later rounds add {loop.extend_ns:g} ns. Budget: {loop.max_ns:g} ns per replica.")
     files = SystemFiles(built.topology, built.positions, built.system)
@@ -129,8 +162,23 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--no-flip-patience-ns", type=float, default=10.0,
                    help="Send a residue to enhanced sampling if it has not flipped after this (ns).")
     r.add_argument("--save-ps", type=float, default=5.0, help="Save a frame every this many ps.")
+    r.add_argument("--forcefield", default="charmm36m", choices=["charmm36m", "amber14", "amber19"],
+                   help="charmm36m: CHARMM36m + CHARMM TIP3P (default). amber14: ff14SB + TIP3P. "
+                        "amber19: ff19SB + OPC.")
     r.add_argument("--ph", type=float, default=7.0)
-    r.add_argument("--padding-nm", type=float, default=1.0)
+    r.add_argument("--check-protonation", action="store_true",
+                   help="Predict pKa values with PROPKA and use the predicted protonation states.")
+    r.add_argument("--protonation", default=None,
+                   help="Set protonation states by hand, for example 'A:31=HIP,A:70=ASH'. "
+                        "Applied after --check-protonation.")
+    r.add_argument("--ion-conc", type=float, default=0.15, help="Salt concentration in M (default 0.15).")
+    r.add_argument("--cation", default="Na+", choices=["Na+", "K+"])
+    r.add_argument("--padding-nm", type=float, default=1.0,
+                   help="Minimum distance from the protein to each face of the water box (nm).")
+    r.add_argument("--box-shape", default="cube", choices=["cube", "dodecahedron", "octahedron"],
+                   help="A dodecahedron needs about 30%% fewer waters than a cube.")
+    r.add_argument("--setup-only", action="store_true",
+                   help="Build the system and stop. Start MD later with 'resume'.")
     r.add_argument("--platform", default=None, help="OpenMM platform: CUDA, OpenCL or CPU.")
     r.add_argument("--seed", type=int, default=1)
     r.add_argument("--out", required=True)

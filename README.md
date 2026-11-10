@@ -5,7 +5,7 @@
 ## 工作流程
 
 1. **读入目标区域。** 可以直接给出残基（如 `A:99-120`），或者给出"某个配体周围 N Å 内的残基"。
-2. **搭体系。** 用 PDBFixer 去掉配体和晶体水，补缺失原子，按 pH 加氢，再加水盒子和 0.15 M NaCl。力场为 Amber14 + TIP3P。
+2. **搭体系。** 每项设置都有默认值，用户可以改成别的。见下面的"搭体系的选项"。
 3. **分轮跑 MD。** 几条独立的轨迹同时推进，它们只有随机种子不同。第 1 轮默认每条 1 ns，以后每轮每条加 5 ns。
 4. **每轮结束后诊断。** 统计每个目标残基的 chi1 二面角在 g+、t、g- 三个状态之间翻转了几次，然后按"卡住程度"排序。
 5. **每轮结束后决定。** agent 对每个残基做出以下决定之一，并写下理由：
@@ -30,6 +30,26 @@
 
 **排序方法：** 按"平均多久翻转一次"排序，越慢越靠前。这个时间等于总模拟时间除以翻转次数。没有翻转时，只能知道它大于总模拟时间，表里写成 `>`。时间相同时，轨迹之间越不一致的越靠前。
 
+## 搭体系的选项
+
+| 选项 | 默认值 | 说明 |
+|---|---|---|
+| `--forcefield` | `charmm36m` | `charmm36m`：CHARMM36m + CHARMM TIP3P，范德华截断 1.2 nm，从 1.0 nm 开始平滑减小，不加长程色散修正。`amber14`：ff14SB + TIP3P。`amber19`：ff19SB + OPC。每个选项都是一整套匹配好的力场、水模型和截断设置，不能拆开混用。 |
+| `--ph` | 7 | 决定可滴定残基的默认质子化状态。 |
+| `--check-protonation` | 关 | 打开后，先用 PROPKA 根据蛋白环境预测每个 Asp、Glu、Lys、His 的 pKa，再按预测结果设定质子化状态，然后才开始 MD。报告里会列出所有被改变的残基，并标出哪些在目标区域里。 |
+| `--protonation` | 无 | 手动指定，例如 `A:31=HIP,A:70=ASH`。在 PROPKA 之后生效，所以会覆盖 PROPKA 的结果。链两端的残基不能改。 |
+| `--ion-conc` | 0.15 | 盐浓度（M）。体系总是先被中和。 |
+| `--cation` | `Na+` | `Na+` 或 `K+`。阴离子是 Cl⁻。 |
+| `--padding-nm` | 1.0 | 蛋白到水盒子每个面的最小距离。盒子是周期性的，所以蛋白和相邻盒子里的镜像至少隔两倍这个距离。 |
+| `--box-shape` | `cube` | `cube`、`dodecahedron` 或 `octahedron`。菱形十二面体盒子的水比立方体少约 30%，模拟更快。 |
+| `--setup-only` | 关 | 只搭体系，然后停下，方便先检查报告。确认后用 `resume` 开始 MD。 |
+
+**缺失残基：** 程序会逐段列出缺了哪些残基。链两端缺的不补，因为通常是无序区；链中间缺的由 PDBFixer 补上。补的这一段超过 5 个残基、或者离目标区域 4 个残基以内时，会给出警告。如果 PDB 文件没有序列记录（SEQRES），PDBFixer 发现不了缺失；这时程序会检查相邻残基的肽键长度，发现断链时给出警告。
+
+搭体系的完整报告会显示在屏幕上，并保存为 `setup_report.txt`。所有选项也记录在 `run.json` 里。
+
+**关于速度：** CHARMM 的部分范德华参数在 OpenMM 里要用较慢的方式计算，所以 CHARMM36m 比 Amber 慢一些。
+
 ## 用法
 
 ```bash
@@ -40,6 +60,11 @@ pip install -e ".[test]"
 
 # 开始。agent 自己决定跑多久，每条轨迹最多 20 ns。
 python -m mdagent run --pdb examples/181L.pdb --around-ligand BNZ --out runs/181L
+
+# 先用 PROPKA 检查质子化状态，改用 Amber ff19SB + OPC 和 0.1 M KCl，只搭体系不跑 MD。
+python -m mdagent run --pdb examples/181L.pdb --around-ligand BNZ --out runs/181L_b \
+    --check-protonation --forcefield amber19 --ion-conc 0.1 --cation K+ --setup-only
+python -m mdagent resume --run runs/181L_b   # 看过报告后，开始 MD。
 
 # 接着跑：可以继续一个中断的运行，也可以给已结束的运行更大的预算。
 python -m mdagent resume --run runs/181L --max-ns 40
@@ -59,7 +84,8 @@ pytest -q tests -m "not slow"  # 不跑 MD 的测试，约 1 秒
 
 | 文件 | 内容 |
 |---|---|
-| `run.json` | 设置、目标残基、每轮的长度。续跑时从这里读取。 |
+| `run.json` | 搭体系的选项、MD 设置、目标残基、每轮的长度。续跑时从这里读取。 |
+| `setup_report.txt` | 搭体系的报告：力场、缺失残基、质子化、水盒子、离子和警告。 |
 | `decisions.log` | 每轮的决定和理由，纯文本。 |
 | `status.json` | 最新的诊断和决定，供其他程序读取。 |
 | `replica_<i>_part<k>.dcd` | 第 i 条轨迹第 k 轮的轨迹，只含蛋白原子。 |
@@ -75,7 +101,7 @@ pytest -q tests -m "not slow"  # 不跑 MD 的测试，约 1 秒
 ## 当前限制
 
 - 配体会被去掉，只模拟蛋白本身。
-- 质子化使用 PDBFixer 的默认规则，不预测蛋白内部的 pKa 变化。
+- PROPKA 只在用户要求时运行，预测的是去掉配体后的蛋白。
 - 平衡阶段没有对蛋白加位置约束。
 - 只看 chi1，还没有看 chi2。
 

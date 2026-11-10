@@ -14,7 +14,8 @@
 
 MDAgent1 是一个 MD agent。用户给出蛋白 PDB 和一个目标区域。agent 自动搭体系、跑 MD，找出目标区域里没有采样好的侧链，并对它们做增强采样。
 
-- 代码在 `mdagent/`：`target.py`（目标区域）、`build.py`（搭体系）、`simulate.py`（分段跑 MD，可续跑）、`diagnose.py`（侧链诊断和排序）、`agent.py`（多轮循环，决定续跑或停止）、`cli.py`（命令行：`run`、`resume`、`diagnose`）。
+- 代码在 `mdagent/`：`target.py`（目标区域）、`build.py`（搭体系，所有选项在 `SetupOptions` 里）、`protonation.py`（PROPKA 和手动质子化）、`simulate.py`（分段跑 MD，可续跑）、`diagnose.py`（侧链诊断和排序）、`agent.py`（多轮循环，决定续跑或停止）、`cli.py`（命令行：`run`、`resume`、`diagnose`）。
+- 设计原则：每项设置都有默认值。影响科学结论的选择（力场、离子、pH、质子化）由用户决定；用户提出非默认要求时，agent 先执行（例如先跑 PROPKA），再开始 MD。以后的对话框也填同一个 `SetupOptions`。
 - 测试体系是 `examples/181L.pdb`（T4 溶菌酶 L99A 与苯）。口袋里的 Val111 侧链在常规 MD 中很难翻转。
 - 运行测试：`pytest -q tests`（约 1 分钟，含一个在 CPU 上跑小肽段的测试）；`pytest -q tests -m "not slow"` 只跑快速测试。
 - 用户在自己的电脑上用 GPU 跑 MD（约每天 470 ns）。云端会话通常没有 GPU，只适合跑很短的流程测试。
