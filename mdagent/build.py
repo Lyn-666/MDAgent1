@@ -29,11 +29,12 @@ class BuiltSystem:
     system: openmm.System
     notes: list[str] = field(default_factory=list)
 
-    def protein_atom_indices(self) -> list[int]:
-        return [a.index for a in self.topology.atoms() if a.residue.name in _PROTEIN]
-
 
 _PROTEIN = set(proteinResidues)
+
+
+def protein_atom_indices(topology: app.Topology) -> list[int]:
+    return [a.index for a in topology.atoms() if a.residue.name in _PROTEIN]
 
 
 def build_system(
