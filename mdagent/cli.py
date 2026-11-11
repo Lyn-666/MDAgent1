@@ -11,7 +11,10 @@ Examples:
   python -m mdagent run --pdb examples/181L.pdb --around-ligand BNZ --out runs/181L_b \\
       --check-protonation --forcefield amber19 --ion-conc 0.1 --cation K+ --setup-only
 
-  # Show the latest ranked diagnosis.
+  # A run that stopped after plain MD: add 10 ns more enhanced sampling.
+  python -m mdagent resume --run runs/181L --enhanced-ns 30
+
+  # Show the latest ranked diagnosis (and enhanced sampling results, if any).
   python -m mdagent diagnose --run runs/181L
 """
 
@@ -30,27 +33,55 @@ def _target_from_args(args) -> Target:
     return Target(residues=parse_residue_spec(args.residues))
 
 
-def _print_decisions(decisions) -> None:
+def _print_summary(decisions, results) -> None:
     enhanced = [d.residue for d in decisions if d.action == "enhanced_sampling"]
-    print("\nThe agent stopped plain MD.")
-    if enhanced:
-        print("Residues that need enhanced sampling, slowest first: " + ", ".join(enhanced))
-    else:
-        print("All target side chains are sampled well.")
+    print("\nSummary")
+    if not enhanced:
+        print("Plain MD sampled all target side chains well. No enhanced sampling was needed.")
+        return
+    print("Plain MD could not sample: " + ", ".join(enhanced) + ".")
+    if not results:
+        print("Enhanced sampling did not run.")
+        return
+    groups = {"multiple_states": [], "single_state": [], "not_converged": []}
+    for r in results:
+        groups[r.verdict].append(r.label)
+    if groups["multiple_states"]:
+        print("More than one populated state (plain MD was trapped): " + ", ".join(groups["multiple_states"]) + ".")
+    if groups["single_state"]:
+        print("One stable state (plain MD was right): " + ", ".join(groups["single_state"]) + ".")
+    if groups["not_converged"]:
+        print("Not converged yet (run 'resume --enhanced-ns' with a larger value): "
+              + ", ".join(groups["not_converged"]) + ".")
+
+
+def _check_env(platform, forcefield_files=()) -> bool:
+    from .envcheck import check_environment
+
+    notes, problems = check_environment(platform, forcefield_files)
+    for line in notes:
+        print(line)
+    for line in problems:
+        print("error: " + line, file=sys.stderr)
+    return not problems
 
 
 def cmd_run(args) -> int:
     from dataclasses import asdict
 
-    from .agent import LoopSettings, RunState, run_loop
+    from .agent import LoopSettings, RunState, run_all
     from .build import SetupOptions, build_system
     from .protonation import parse_overrides
     from .simulate import MDSettings, SystemFiles, write_inputs
+
+    from .build import FORCEFIELDS
 
     out = Path(args.out)
     if (out / "run.json").exists():
         print(f"error: {out} already has a run. Use 'resume --run {out}' to continue it.",
               file=sys.stderr)
+        return 2
+    if not _check_env(args.platform, FORCEFIELDS[args.forcefield].files):
         return 2
 
     target = _target_from_args(args)
@@ -100,6 +131,8 @@ def cmd_run(args) -> int:
         md=MDSettings(save_interval_ps=args.save_ps, platform=args.platform),
         loop=loop,
         setup=asdict(setup),
+        enhanced={"enabled": not args.no_enhanced_sampling,
+                  "settings": {"length_ns": args.enhanced_ns, "n_replicas": args.enhanced_replicas}},
     )
     state.save(out)
     if args.setup_only:
@@ -108,13 +141,16 @@ def cmd_run(args) -> int:
         return 0
     print(f"Plan: {args.replicas} replicas. Round 1 is {loop.first_ns:g} ns per replica. "
           f"Later rounds add {loop.extend_ns:g} ns. Budget: {loop.max_ns:g} ns per replica.")
+    if state.enhanced["enabled"]:
+        print(f"After plain MD, residues that still need it get enhanced sampling: "
+              f"{args.enhanced_replicas} replicas x {args.enhanced_ns:g} ns.")
     files = SystemFiles(built.topology, built.positions, built.system)
-    _print_decisions(run_loop(out, state, files))
+    _print_summary(*run_all(out, state, files))
     return 0
 
 
 def cmd_resume(args) -> int:
-    from .agent import RunState, run_loop
+    from .agent import RunState, run_all
 
     run = Path(args.run)
     state = RunState.load(run)
@@ -122,10 +158,16 @@ def cmd_resume(args) -> int:
         state.loop.max_ns = args.max_ns
     if args.platform is not None:
         state.md.platform = args.platform
+    if args.enhanced_sampling is not None:
+        state.enhanced["enabled"] = args.enhanced_sampling
+    if args.enhanced_ns is not None:
+        state.enhanced.setdefault("settings", {})["length_ns"] = args.enhanced_ns
+    if not _check_env(state.md.platform):
+        return 2
     state.save(run)
-    print(f"Resuming {run}: {state.ns_done:g} ns per replica done. "
+    print(f"Resuming {run}: {state.ns_done:g} ns of plain MD per replica done. "
           f"Budget: {state.loop.max_ns:g} ns per replica.")
-    _print_decisions(run_loop(run, state))
+    _print_summary(*run_all(run, state))
     return 0
 
 
@@ -142,6 +184,9 @@ def cmd_diagnose(args) -> int:
         load_run(run, state.target, len(state.rounds_ns)), state.target, state.ns_done,
         min_flips_per_replica=state.loop.min_flips_per_replica)
     print(format_report(reports))
+    results = run / "enhanced" / "results.txt"
+    if results.exists():
+        print("\n" + results.read_text())
     return 0
 
 
@@ -181,6 +226,11 @@ def main(argv: list[str] | None = None) -> int:
                    help="Build the system and stop. Start MD later with 'resume'.")
     r.add_argument("--platform", default=None, help="OpenMM platform: CUDA, OpenCL or CPU.")
     r.add_argument("--seed", type=int, default=1)
+    r.add_argument("--enhanced-ns", type=float, default=20.0,
+                   help="Length of each enhanced sampling replica (ns).")
+    r.add_argument("--enhanced-replicas", type=int, default=2)
+    r.add_argument("--no-enhanced-sampling", action="store_true",
+                   help="Stop after plain MD. Enhanced sampling can still run later with resume.")
     r.add_argument("--out", required=True)
     r.set_defaults(func=cmd_run)
 
@@ -188,6 +238,11 @@ def main(argv: list[str] | None = None) -> int:
     u.add_argument("--run", required=True)
     u.add_argument("--max-ns", type=float, default=None, help="New budget per replica (ns).")
     u.add_argument("--platform", default=None)
+    u.add_argument("--enhanced-ns", type=float, default=None,
+                   help="New length of each enhanced sampling replica (ns). A larger value continues it.")
+    es = u.add_mutually_exclusive_group()
+    es.add_argument("--enhanced-sampling", dest="enhanced_sampling", action="store_true", default=None)
+    es.add_argument("--no-enhanced-sampling", dest="enhanced_sampling", action="store_false")
     u.set_defaults(func=cmd_resume)
 
     d = sub.add_parser("diagnose", help="Print the ranked diagnosis of a run.")

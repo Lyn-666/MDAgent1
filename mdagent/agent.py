@@ -54,6 +54,9 @@ class RunState:
     rounds_ns: list[float] = field(default_factory=list)
     pending_round_ns: float = 0.0  # Length of a round that started but did not finish.
     setup: dict = field(default_factory=dict)  # The SetupOptions used to build the system.
+    # Enhanced sampling: {"enabled": bool, "settings": MetadSettings fields,
+    # "residues": [[chain, number], ...], "resnames": {"A:111": "VAL"}}
+    enhanced: dict = field(default_factory=lambda: {"enabled": True})
 
     @property
     def ns_done(self) -> float:
@@ -76,6 +79,7 @@ class Decision:
     residue: str
     action: str
     reason: str
+    key: tuple = ()  # (chain, residue number)
 
 
 def decide(reports: list[ResidueReport], ns_done: float, loop: LoopSettings) -> tuple[list[Decision], float]:
@@ -103,6 +107,8 @@ def decide(reports: list[ResidueReport], ns_done: float, loop: LoopSettings) -> 
             decisions.append(Decision(
                 r.label, "extend", f"Plain MD sees flips, but not enough yet. {r.reason}"))
 
+    for d, r in zip(decisions, reports):
+        d.key = (r.chain, r.resseq)
     if any(d.action == "extend" for d in decisions):
         return decisions, min(loop.extend_ns, room)
     return decisions, 0.0
@@ -191,3 +197,55 @@ def _diagnose_and_decide(run_dir: Path, state: RunState):
         min_flips_per_replica=state.loop.min_flips_per_replica)
     decisions, next_ns = decide(reports, state.ns_done, state.loop)
     return reports, decisions, next_ns
+
+
+def run_all(
+    run_dir: Path,
+    state: RunState,
+    files: SystemFiles | None = None,
+    log: Callable[[str], None] = print,
+) -> tuple[list[Decision], list]:
+    """Plain MD until the agent stops it, then enhanced sampling where it is needed."""
+    from .enhanced import MetadSettings, analyze, format_results, run_replica, save_results
+
+    files = files or load_inputs(run_dir)
+    decisions = run_loop(run_dir, state, files, log)
+    wanted = [d for d in decisions if d.action == "enhanced_sampling"]
+    if not wanted:
+        return decisions, []
+    if not state.enhanced.get("enabled", True):
+        log("Enhanced sampling is switched off for this run. Use 'resume --enhanced-sampling' to run it.")
+        return decisions, []
+
+    es = state.enhanced
+    if es.get("residues"):
+        residues = [tuple(k) for k in es["residues"]]  # Keep the set that was started before.
+        if sorted(residues) != sorted(d.key for d in wanted):
+            log("Note: enhanced sampling already started for "
+                + ", ".join(f"{c}:{n}" for c, n in residues) + ". It continues with these residues.")
+    else:
+        residues = [d.key for d in wanted]
+        es["residues"] = [list(k) for k in residues]
+        es["resnames"] = {f"{d.key[0]}:{d.key[1]}": d.residue.rstrip("0123456789") for d in wanted}
+    settings = MetadSettings(**es.get("settings", {}))
+    es["settings"] = asdict(settings)
+    n_rep = min(settings.n_replicas, state.n_replicas)
+    state.save(run_dir)
+
+    names = ", ".join(f"{es['resnames'][f'{c}:{n}']}{n}" for c, n in residues)
+    log(f"\nEnhanced sampling (well-tempered metadynamics on chi1) for {names}: "
+        f"{n_rep} replicas x {settings.length_ns:g} ns, starting from the end of plain MD.")
+    last = len(state.rounds_ns) - 1
+    for r in range(n_rep):
+        start = part_path(run_dir, r, last, ".state.xml")
+        run_replica(files, run_dir, r, start, residues, settings, state.md,
+                    seed=state.base_seed + 50000 + r, log=log)
+
+    resnames = {(c, n): es["resnames"][f"{c}:{n}"] for c, n in residues}
+    results = analyze(run_dir, residues, resnames, settings, state.md.temperature_k)
+    text = format_results(results, settings.length_ns, n_rep)
+    save_results(run_dir, results, text)
+    log("\n" + text)
+    with open(run_dir / "decisions.log", "a") as f:
+        f.write(time.strftime("[%Y-%m-%d %H:%M:%S] ") + "Enhanced sampling finished.\n" + text + "\n\n")
+    return decisions, results

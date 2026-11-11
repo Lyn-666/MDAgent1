@@ -66,6 +66,21 @@ def load_inputs(out_dir: Path) -> SystemFiles:
     return SystemFiles(pdb.topology, pdb.positions, system)
 
 
+def make_simulation(files: SystemFiles, s: MDSettings, seed: int, extra_forces=()) -> app.Simulation:
+    """NPT simulation with a Langevin thermostat and a Monte Carlo barostat."""
+    system = openmm.XmlSerializer.deserialize(openmm.XmlSerializer.serialize(files.system))
+    barostat = openmm.MonteCarloBarostat(s.pressure_bar * unit.bar, s.temperature_k * unit.kelvin)
+    barostat.setRandomNumberSeed(seed)
+    system.addForce(barostat)
+    for force in extra_forces:
+        system.addForce(force)
+    integrator = openmm.LangevinMiddleIntegrator(
+        s.temperature_k * unit.kelvin, 1.0 / unit.picosecond, s.timestep_fs * unit.femtosecond)
+    integrator.setRandomNumberSeed(seed)
+    platform = openmm.Platform.getPlatformByName(s.platform) if s.platform else None
+    return app.Simulation(files.topology, system, integrator, platform)
+
+
 def part_path(out_dir: Path, replica: int, part: int, suffix: str) -> Path:
     return out_dir / f"replica_{replica}_part{part:03d}{suffix}"
 
@@ -85,16 +100,7 @@ def run_segment(
     resume = part > 0
     state_path = part_path(out_dir, replica, part, ".state.xml")
     steps_per_ps = round(1000.0 / s.timestep_fs)
-
-    system = openmm.XmlSerializer.deserialize(openmm.XmlSerializer.serialize(files.system))
-    barostat = openmm.MonteCarloBarostat(s.pressure_bar * unit.bar, s.temperature_k * unit.kelvin)
-    barostat.setRandomNumberSeed(seed)
-    system.addForce(barostat)
-    integrator = openmm.LangevinMiddleIntegrator(
-        s.temperature_k * unit.kelvin, 1.0 / unit.picosecond, s.timestep_fs * unit.femtosecond)
-    integrator.setRandomNumberSeed(seed)
-    platform = openmm.Platform.getPlatformByName(s.platform) if s.platform else None
-    sim = app.Simulation(files.topology, system, integrator, platform)
+    sim = make_simulation(files, s, seed)
 
     if resume:
         sim.loadState(str(part_path(out_dir, replica, part - 1, ".state.xml")))
