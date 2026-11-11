@@ -51,7 +51,7 @@ def _print_summary(decisions, results) -> None:
     if groups["single_state"]:
         print("One stable state (plain MD was right): " + ", ".join(groups["single_state"]) + ".")
     if groups["not_converged"]:
-        print("Not converged yet (run 'resume --enhanced-ns' with a larger value): "
+        print("Not converged within the time limit (to try longer: resume --enhanced-max-ns 100): "
               + ", ".join(groups["not_converged"]) + ".")
 
 
@@ -132,7 +132,8 @@ def cmd_run(args) -> int:
         loop=loop,
         setup=asdict(setup),
         enhanced={"enabled": not args.no_enhanced_sampling,
-                  "settings": {"length_ns": args.enhanced_ns, "n_replicas": args.enhanced_replicas}},
+                  "settings": {"length_ns": args.enhanced_ns, "max_length_ns": args.enhanced_max_ns,
+                               "n_replicas": args.enhanced_replicas}},
     )
     state.save(out)
     if args.setup_only:
@@ -162,6 +163,8 @@ def cmd_resume(args) -> int:
         state.enhanced["enabled"] = args.enhanced_sampling
     if args.enhanced_ns is not None:
         state.enhanced.setdefault("settings", {})["length_ns"] = args.enhanced_ns
+    if args.enhanced_max_ns is not None:
+        state.enhanced.setdefault("settings", {})["max_length_ns"] = args.enhanced_max_ns
     if not _check_env(state.md.platform):
         return 2
     state.save(run)
@@ -228,6 +231,8 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--seed", type=int, default=1)
     r.add_argument("--enhanced-ns", type=float, default=20.0,
                    help="Length of each enhanced sampling replica (ns).")
+    r.add_argument("--enhanced-max-ns", type=float, default=60.0,
+                   help="The agent extends unconverged enhanced sampling up to this length (ns per replica).")
     r.add_argument("--enhanced-replicas", type=int, default=2)
     r.add_argument("--no-enhanced-sampling", action="store_true",
                    help="Stop after plain MD. Enhanced sampling can still run later with resume.")
@@ -240,6 +245,8 @@ def main(argv: list[str] | None = None) -> int:
     u.add_argument("--platform", default=None)
     u.add_argument("--enhanced-ns", type=float, default=None,
                    help="New length of each enhanced sampling replica (ns). A larger value continues it.")
+    u.add_argument("--enhanced-max-ns", type=float, default=None,
+                   help="New limit for the automatic extension of enhanced sampling (ns per replica).")
     es = u.add_mutually_exclusive_group()
     es.add_argument("--enhanced-sampling", dest="enhanced_sampling", action="store_true", default=None)
     es.add_argument("--no-enhanced-sampling", dest="enhanced_sampling", action="store_false")

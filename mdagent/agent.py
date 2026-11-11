@@ -227,25 +227,46 @@ def run_all(
         residues = [d.key for d in wanted]
         es["residues"] = [list(k) for k in residues]
         es["resnames"] = {f"{d.key[0]}:{d.key[1]}": d.residue.rstrip("0123456789") for d in wanted}
-    settings = MetadSettings(**es.get("settings", {}))
+    settings = MetadSettings.from_dict(es.get("settings", {}))
     es["settings"] = asdict(settings)
     n_rep = min(settings.n_replicas, state.n_replicas)
     state.save(run_dir)
 
-    names = ", ".join(f"{es['resnames'][f'{c}:{n}']}{n}" for c, n in residues)
+    resnames = {(c, n): es["resnames"][f"{c}:{n}"] for c, n in residues}
+    names = ", ".join(f"{resnames[k]}{k[1]}" for k in residues)
     log(f"\nEnhanced sampling (well-tempered metadynamics on chi1) for {names}: "
         f"{n_rep} replicas x {settings.length_ns:g} ns, starting from the end of plain MD.")
     last = len(state.rounds_ns) - 1
-    for r in range(n_rep):
-        start = part_path(run_dir, r, last, ".state.xml")
-        run_replica(files, run_dir, r, start, residues, settings, state.md,
-                    seed=state.base_seed + 50000 + r, log=log)
+    while True:
+        for r in range(n_rep):
+            start = part_path(run_dir, r, last, ".state.xml")
+            run_replica(files, run_dir, r, start, residues, settings, state.md,
+                        seed=state.base_seed + 50000 + r, log=log)
 
-    resnames = {(c, n): es["resnames"][f"{c}:{n}"] for c, n in residues}
-    results = analyze(run_dir, residues, resnames, settings, state.md.temperature_k)
-    text = format_results(results, settings.length_ns, n_rep)
-    save_results(run_dir, results, text)
-    log("\n" + text)
-    with open(run_dir / "decisions.log", "a") as f:
-        f.write(time.strftime("[%Y-%m-%d %H:%M:%S] ") + "Enhanced sampling finished.\n" + text + "\n\n")
+        results = analyze(run_dir, residues, resnames, settings, state.md.temperature_k)
+        text = format_results(results, settings.length_ns, n_rep)
+        save_results(run_dir, results, text)
+        log("\n" + text)
+        waiting = [r.label for r in results if r.verdict == "not_converged"]
+        if waiting and settings.length_ns < settings.max_length_ns - 1e-9:
+            new_length = min(settings.length_ns + settings.extend_ns, settings.max_length_ns)
+            decision = (f"Decision: {', '.join(waiting)} not converged. Extend enhanced sampling "
+                        f"from {settings.length_ns:g} to {new_length:g} ns per replica.")
+        elif waiting:
+            decision = (f"Decision: stop. {', '.join(waiting)} did not converge within the limit of "
+                        f"{settings.max_length_ns:g} ns per replica. These side chains are probably coupled "
+                        "to another slow motion that the chi1 bias does not push.")
+            new_length = None
+        else:
+            decision = "Decision: stop. All biased side chains are converged."
+            new_length = None
+        log(decision)
+        with open(run_dir / "decisions.log", "a") as f:
+            f.write(time.strftime("[%Y-%m-%d %H:%M:%S] ") + "Enhanced sampling analyzed.\n"
+                    + text + "\n" + decision + "\n\n")
+        if new_length is None:
+            break
+        settings.length_ns = new_length
+        es["settings"] = asdict(settings)
+        state.save(run_dir)
     return decisions, results

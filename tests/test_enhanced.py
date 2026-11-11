@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 from mdagent.enhanced import (
-    KB_KJ, ChiBiases, EnhancedResult, MetadSettings, free_energy, judge, populations,
+    KB_KJ, ChiBiases, EnhancedResult, MetadSettings, free_energy, judge, reweighted_populations,
 )
 
 DATA = Path(__file__).resolve().parent / "data"
@@ -29,14 +29,23 @@ def test_deposit_is_periodic_and_well_tempered():
     assert added < first  # Later Gaussians are lower where the bias is already high.
 
 
-def test_populations_from_free_energy():
-    flat = np.zeros_like(GRID)
-    p = populations(flat, GRID, T)
-    assert all(v == pytest.approx(1 / 3, abs=0.01) for v in p.values())
-    # A free energy with a deep well at 180° (t) only.
-    well = 30.0 * (1 - np.exp(-((np.abs(GRID) - math.pi) ** 2) / 0.1))
-    p = populations(well, GRID, T)
-    assert p["t"] > 0.99
+def test_reweighting_recovers_populations_and_couples_residues():
+    kt = KB_KJ * T
+    rng = np.random.default_rng(0)
+    # Residue 0 visits t and g- equally under bias. The bias is 3 kT higher in g-,
+    # so after reweighting g- must be e^3 = 20 times more populated than t.
+    chi0 = np.where(rng.random(4000) < 0.5, math.pi - 0.1, -math.pi / 3)
+    chi1 = np.full(4000, math.pi / 3)       # Residue 1 sits in g+ and has a flat bias.
+    chi = np.stack([chi0, chi1], axis=1)
+    bias = np.zeros((2, GRID.size))
+    bias[0] = np.where(np.degrees(GRID) < 0, 3 * kt, 0.0)
+    bias[0, -1] = bias[0, 0]
+    p, ess = reweighted_populations(chi, bias, 0, GRID, T)
+    assert p["g-"] / p["t"] == pytest.approx(math.e ** 3, rel=0.15)
+    assert ess < 4000
+    # The weights use the bias of residue 0 too, so they also apply to residue 1.
+    p1, _ = reweighted_populations(chi, bias, 1, GRID, T)
+    assert p1["g+"] == pytest.approx(1.0)
 
 
 def test_free_energy_from_bias():
@@ -47,21 +56,28 @@ def test_free_energy_from_bias():
     assert f.min() == 0 and f.max() == pytest.approx(10.0)
 
 
-def _result(pops, half=None, crossings=(10, 10)):
-    r = EnhancedResult("A", 111, "VAL", pops, half or pops, list(crossings))
+def _result(pops, halves=None, crossings=(10, 10)):
+    r = EnhancedResult("A", 111, "VAL", pops, halves or [[p, p] for p in pops], list(crossings))
     judge(r, MetadSettings(), T)
     return r
 
 
 def test_judge_verdicts():
     one = {"g+": 0.01, "t": 0.98, "g-": 0.01}
+    one_b = {"g+": 0.03, "t": 0.96, "g-": 0.01}   # Minor states below 5%: treated as negligible.
     two = {"g+": 0.02, "t": 0.60, "g-": 0.38}
-    assert _result([one, one]).verdict == "single_state"
+    two_b = {"g+": 0.02, "t": 0.55, "g-": 0.43}   # Within 2.5 kJ/mol of "two".
+    assert _result([one, one_b]).verdict == "single_state"
     assert "kJ/mol" in _result([one, one]).reason
-    assert _result([two, two]).verdict == "multiple_states"
-    assert _result([one, two]).verdict == "not_converged"                  # Replicas disagree.
-    assert _result([two, two], half=[one, one]).verdict == "not_converged"  # Still drifting.
-    assert _result([one, one], crossings=(1, 9)).verdict == "not_converged"  # Bias too weak or too short.
+    assert _result([two, two_b]).verdict == "multiple_states"
+    assert _result([one, two]).verdict == "not_converged"                        # Replicas disagree.
+    assert _result([two, two], halves=[[one, two], [two, two]]).verdict == "not_converged"  # Halves differ.
+    assert _result([one, one], crossings=(1, 9)).verdict == "not_converged"      # Too few crossings.
+
+
+def test_settings_ignore_old_keys():
+    s = MetadSettings.from_dict({"length_ns": 20.0, "agreement_tolerance": 0.1})
+    assert s.length_ns == 20.0 and s.max_length_ns == 60.0
 
 
 def test_old_run_json_enables_enhanced_sampling(tmp_path):
@@ -85,7 +101,10 @@ def test_plain_md_then_enhanced_sampling_and_resume(tmp_path):
     opts = SetupOptions(forcefield="amber14", padding_nm=0.8)
     built = build_system(pdb, opts)
     write_inputs(built, tmp_path)
-    metad = dict(length_ns=0.002, n_replicas=2, pace_ps=0.1, chunk_ns=0.001, height_kj=2.0)
+    # min_crossings is impossible to reach, so every result is "not_converged" and the agent
+    # must extend the run by itself: 2 ps, then 3 ps (the limit).
+    metad = dict(length_ns=0.002, max_length_ns=0.003, extend_ns=0.001, n_replicas=2, pace_ps=0.1,
+                 chunk_ns=0.001, height_kj=2.0, min_crossings=10**6)
     state = RunState(
         pdb=str(pdb), target_description="test", target=[("A", 111), ("A", 114)],
         n_replicas=2, base_seed=1,
@@ -104,12 +123,16 @@ def test_plain_md_then_enhanced_sampling_and_resume(tmp_path):
     assert all(abs(sum(r.mean_populations.values()) - 1) < 1e-6 for r in results)
     d = tmp_path / "enhanced"
     assert (d / "results.txt").exists() and (d / "results.json").exists()
-    assert np.load(d / "replica_0_chi.npy").shape == (20, 2)  # 2 ps / 0.1 ps, 2 residues.
+    assert np.load(d / "replica_0_chi.npy").shape == (30, 2)  # Extended to 3 ps / 0.1 ps, 2 residues.
+    assert any("Extend enhanced sampling from 2 to 3 ns" in line or "from 0.002 to 0.003" in line
+               for line in logs)
+    assert any("did not converge within the limit" in line for line in logs)
+    assert RunState.load(tmp_path).enhanced["settings"]["length_ns"] == 0.003
 
-    # Resume with a longer enhanced sampling: it continues from the saved bias and state.
+    # Resume with a higher limit: it continues from the saved bias and state.
     state = RunState.load(tmp_path)
-    state.enhanced["settings"]["length_ns"] = 0.003
+    state.enhanced["settings"]["max_length_ns"] = 0.004
     logs.clear()
     run_all(tmp_path, state, log=logs.append)
-    assert np.load(d / "replica_0_chi.npy").shape == (30, 2)
-    assert any("enhanced replica 0: 0.003 of 0.003 ns" in line for line in logs)
+    assert np.load(d / "replica_0_chi.npy").shape == (40, 2)
+    assert any("enhanced replica 0: 0.004 of 0.004 ns" in line for line in logs)

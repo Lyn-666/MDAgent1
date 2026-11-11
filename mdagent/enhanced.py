@@ -16,10 +16,10 @@ Each replica starts from the final state of a plain MD replica. It runs in
 chunks. After each chunk the state, the bias and the chi1 samples are saved,
 so a stopped run can resume.
 
-Limitation: each residue's free energy comes from its own bias only. If two
-biased side chains are strongly coupled, the result for each one is less
-accurate. The two-replica check and the first-half/second-half check catch
-many such cases as "not_converged".
+Populations are computed by reweighting with all biases together (see the
+analysis section below). A result counts as converged only when both
+replicas and both halves of each replica agree. If not, the agent extends
+the run, up to max_length_ns.
 """
 
 from __future__ import annotations
@@ -45,17 +45,27 @@ ResidueKey = tuple[str, int]
 
 @dataclass
 class MetadSettings:
-    length_ns: float = 20.0       # Per replica.
+    length_ns: float = 20.0       # Per replica, for the first pass.
+    max_length_ns: float = 60.0   # The agent extends unconverged runs up to this length.
+    extend_ns: float = 10.0       # Each extension adds this much per replica.
     n_replicas: int = 2
     bias_factor: float = 10.0     # gamma. Larger pushes harder over barriers.
     height_kj: float = 1.2        # Initial height of each Gaussian.
     sigma_deg: float = 12.0       # Width of each Gaussian.
-    pace_ps: float = 1.0          # Time between Gaussians.
+    pace_ps: float = 1.0          # Time between Gaussians (and between chi1 samples).
     grid_points: int = 361        # Grid on chi1 from -180° to 180° (both ends included).
     chunk_ns: float = 1.0         # Save progress after each chunk.
+    transient_fraction: float = 0.2     # Skip this first part of each replica in the analysis.
     single_state_cutoff: float = 0.95   # Main state above this population: one stable state.
-    agreement_tolerance: float = 0.10   # Max population difference between replicas and halves.
+    agreement_kj: float = 2.5           # Max free energy difference between estimates (about 1 kT).
+    population_floor: float = 0.05      # States below this population count as negligible.
     min_crossings: int = 4               # Min chi1 state changes per replica under bias.
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "MetadSettings":
+        """Ignore keys from older versions."""
+        names = set(cls.__dataclass_fields__)
+        return cls(**{k: v for k, v in d.items() if k in names})
 
 
 def chi1_quads(topology: openmm.app.Topology, residues: list[ResidueKey]) -> dict[ResidueKey, tuple]:
@@ -125,7 +135,6 @@ def _paths(run_dir: Path, replica: int) -> dict[str, Path]:
         "progress": d / f"replica_{replica}.json",
         "state": d / f"replica_{replica}.state.xml",
         "bias": d / f"replica_{replica}_bias.npy",
-        "bias_half": d / f"replica_{replica}_bias_half.npy",
         "chi": d / f"replica_{replica}_chi.npy",
     }
 
@@ -178,9 +187,6 @@ def run_replica(
             biases.push(sim.context)
         before = progress["ns_done"]
         progress["ns_done"] = round(before + chunk_ns, 9)
-        half = s.length_ns / 2
-        if before < half <= progress["ns_done"]:
-            _save_npy(p["bias_half"], biases.bias)
         tmp = p["state"].with_suffix(".tmp")
         sim.saveState(str(tmp))
         os.replace(tmp, p["state"])
@@ -193,6 +199,17 @@ def run_replica(
 
 
 # ---------------------------------------------------------------- analysis
+#
+# Populations come from reweighting. Every pace_ps we saved the chi1 angle of
+# every biased residue. Each saved moment gets the weight exp(V_total / kT),
+# where V_total is the sum of all final biases at that moment. This removes
+# the effect of all biases together, so it also accounts for side chains that
+# push on each other. The first transient_fraction of each replica is skipped,
+# because the bias was still far from its final shape.
+#
+# The free energy curve along chi1 still comes from each residue's own bias:
+# F(chi) = -(gamma / (gamma - 1)) * V(chi). It is saved for plotting.
+
 
 def free_energy(bias: np.ndarray, s: MetadSettings, temperature_k: float) -> np.ndarray:
     """F(chi) in kJ/mol, with minimum 0, from a well-tempered bias."""
@@ -201,15 +218,33 @@ def free_energy(bias: np.ndarray, s: MetadSettings, temperature_k: float) -> np.
     return f - f.min()
 
 
-def populations(f: np.ndarray, grid: np.ndarray, temperature_k: float) -> dict[str, float]:
-    """Population of g+, t and g-. Each grid point belongs to the nearest state center."""
-    kt = KB_KJ * temperature_k
-    deg = np.degrees(grid[:-1])  # The last point repeats the first.
-    w = np.exp(-f[:-1] / kt)
+def nearest_state(chi_rad: np.ndarray) -> np.ndarray:
+    deg = np.degrees(chi_rad)
     dist = np.stack([angular_distance_deg(deg, c) for c in STATE_CENTERS_DEG.values()])
-    nearest = dist.argmin(axis=0)
+    return dist.argmin(axis=0)
+
+
+def reweighted_populations(chi: np.ndarray, bias: np.ndarray, j: int, grid: np.ndarray,
+                           temperature_k: float) -> tuple[dict[str, float], float]:
+    """Populations of residue j from samples chi (n_samples x n_residues) and final biases.
+
+    Returns the populations and the effective number of samples.
+    """
+    kt = KB_KJ * temperature_k
+    v = sum(np.interp(chi[:, i], grid, bias[i]) for i in range(chi.shape[1]))
+    w = np.exp((v - v.max()) / kt)
+    states = nearest_state(chi[:, j])
     total = w.sum()
-    return {name: float(w[nearest == i].sum() / total) for i, name in enumerate(STATE_NAMES)}
+    pops = {name: float(w[states == k].sum() / total) for k, name in enumerate(STATE_NAMES)}
+    ess = float(total ** 2 / (w ** 2).sum())
+    return pops, ess
+
+
+def state_free_energies(p: dict[str, float], floor: float, temperature_k: float) -> dict[str, float]:
+    """-kT ln(p), relative to the main state. Populations below floor are raised to floor."""
+    kt = KB_KJ * temperature_k
+    top = max(p.values())
+    return {n: -kt * math.log(max(p[n], floor) / top) for n in STATE_NAMES}
 
 
 @dataclass
@@ -217,10 +252,12 @@ class EnhancedResult:
     chain: str
     resseq: int
     resname: str
-    populations: list[dict[str, float]]      # Per replica, at the end.
-    populations_half: list[dict[str, float]]  # Per replica, at half time.
+    populations: list[dict[str, float]]          # Per replica, after the transient.
+    half_populations: list[list[dict[str, float]]]  # Per replica: [first half, second half].
     crossings: list[int]
+    effective_samples: list[float] = field(default_factory=list)
     free_energy: list[list[float]] = field(repr=False, default_factory=list)  # Per replica, on the grid.
+    spread_kj: float = 0.0
     verdict: str = ""
     reason: str = ""
 
@@ -235,70 +272,75 @@ class EnhancedResult:
 
 def judge(r: EnhancedResult, s: MetadSettings, temperature_k: float) -> None:
     kt = KB_KJ * temperature_k
+    estimates = list(r.populations) + [h for halves in r.half_populations for h in halves]
+    fes = [state_free_energies(p, s.population_floor, temperature_k) for p in estimates]
+    r.spread_kj = max(max(f[n] for f in fes) - min(f[n] for f in fes) for n in STATE_NAMES)
     mean = r.mean_populations
-    between = max(abs(a[n] - b[n]) for n in STATE_NAMES
-                  for i, a in enumerate(r.populations) for b in r.populations[i + 1:]) \
-        if len(r.populations) > 1 else 0.0
-    drift = max(abs(a[n] - b[n]) for n in STATE_NAMES for a, b in zip(r.populations, r.populations_half)) \
-        if r.populations_half else 0.0
     pops = ", ".join(f"{n} {mean[n]:.0%}" for n in STATE_NAMES)
 
     if min(r.crossings) < s.min_crossings:
         r.verdict = "not_converged"
         r.reason = (f"Even with the bias, chi1 changed state only {r.crossings} times per replica. "
-                    "Run the enhanced sampling longer.")
-    elif between > s.agreement_tolerance or drift > s.agreement_tolerance:
+                    "The enhanced sampling needs to run longer.")
+    elif r.spread_kj > s.agreement_kj:
         r.verdict = "not_converged"
-        r.reason = (f"Populations still change: replicas differ by up to {between:.0%}, and the "
-                    f"populations changed by up to {drift:.0%} in the second half. Current estimate: {pops}.")
+        r.reason = (f"The replicas, or the two halves of a replica, disagree by up to {r.spread_kj:.1f} kJ/mol "
+                    f"(the limit is {s.agreement_kj:g}). Current estimate: {pops}.")
     else:
         main = max(mean, key=mean.get)
         others = [n for n in STATE_NAMES if n != main]
-        gaps = {n: -kt * math.log(max(mean[n], 1e-12) / mean[main]) for n in others}
+        gaps = {n: -kt * math.log(max(mean[n], 1e-6) / mean[main]) for n in others}
+        agree = f"Replicas and halves agree within {r.spread_kj:.1f} kJ/mol."
         if mean[main] >= s.single_state_cutoff:
             r.verdict = "single_state"
             r.reason = (f"chi1 has one stable state: {main} ({mean[main]:.0%}). The other states are "
                         + " and ".join(f"{n} {gaps[n]:.1f} kJ/mol" for n in others)
-                        + " higher. Plain MD was not trapped; this side chain is sampled.")
+                        + f" higher. Plain MD was not trapped; this side chain is sampled. {agree}")
         else:
             r.verdict = "multiple_states"
             r.reason = (f"chi1 has more than one populated state: {pops}. If plain MD stayed in one "
-                        "state, it was trapped and its populations are wrong.")
+                        f"state, it was trapped and its populations are wrong. {agree}")
 
 
 def analyze(run_dir: Path, residues: list[ResidueKey], resnames: dict[ResidueKey, str],
             s: MetadSettings, temperature_k: float) -> list[EnhancedResult]:
     grid = np.linspace(-math.pi, math.pi, s.grid_points)
     replicas = sorted(int(p.stem.split("_")[1]) for p in (run_dir / "enhanced").glob("replica_*.json"))
-    loaded = [(np.load(_paths(run_dir, i)["bias"]),
-               np.load(_paths(run_dir, i)["bias_half"]) if _paths(run_dir, i)["bias_half"].exists() else None,
-               np.load(_paths(run_dir, i)["chi"])) for i in replicas]
+    loaded = [(np.load(_paths(run_dir, i)["bias"]), np.load(_paths(run_dir, i)["chi"])) for i in replicas]
     results = []
     for j, key in enumerate(residues):
-        pops, half, cross, fes = [], [], [], []
-        for bias, bias_half, chi in loaded:
-            f = free_energy(bias[j], s, temperature_k)
-            fes.append(f.round(3).tolist())
-            pops.append(populations(f, grid, temperature_k))
-            if bias_half is not None:
-                half.append(populations(free_energy(bias_half[j], s, temperature_k), grid, temperature_k))
+        pops, halves, cross, ess, fes = [], [], [], [], []
+        for bias, chi in loaded:
+            post = chi[int(len(chi) * s.transient_fraction):]
+            mid = len(post) // 2
+            p, e = reweighted_populations(post, bias, j, grid, temperature_k)
+            pops.append(p)
+            ess.append(round(e, 1))
+            halves.append([reweighted_populations(post[:mid], bias, j, grid, temperature_k)[0],
+                           reweighted_populations(post[mid:], bias, j, grid, temperature_k)[0]])
             cross.append(count_transitions(assign_states(np.degrees(chi[:, j]))))
-        r = EnhancedResult(key[0], key[1], resnames.get(key, "?"), pops, half, cross, fes)
+            fes.append(free_energy(bias[j], s, temperature_k).round(3).tolist())
+        r = EnhancedResult(key[0], key[1], resnames.get(key, "?"), pops, halves, cross, ess, fes)
         judge(r, s, temperature_k)
         results.append(r)
     return results
 
 
 def format_results(results: list[EnhancedResult], ns: float, n_replicas: int) -> str:
-    lines = [f"Enhanced sampling of chi1: {n_replicas} replicas x {ns:g} ns.", "",
-             f"{'residue':<10}{'verdict':<18}{'g+':>6}{'t':>6}{'g-':>6}   crossings"]
+    lines = [f"Enhanced sampling of chi1: {n_replicas} replicas x {ns:g} ns. Populations are reweighted "
+             "with all biases together.", "",
+             f"{'residue':<10}{'verdict':<18}{'g+':>6}{'t':>6}{'g-':>6}{'spread':>10}   crossings"]
     order = {"multiple_states": 0, "not_converged": 1, "single_state": 2}
-    for r in sorted(results, key=lambda r: (order[r.verdict], r.resseq)):
+    ranked = sorted(results, key=lambda r: (order[r.verdict], r.resseq))
+    for r in ranked:
         m = r.mean_populations
-        lines.append(f"{r.label:<10}{r.verdict:<18}{m['g+']:>6.0%}{m['t']:>6.0%}{m['g-']:>6.0%}   "
-                     + ",".join(map(str, r.crossings)))
+        lines.append(f"{r.label:<10}{r.verdict:<18}{m['g+']:>6.0%}{m['t']:>6.0%}{m['g-']:>6.0%}"
+                     f"{r.spread_kj:>7.1f} kJ   " + ",".join(map(str, r.crossings)))
     lines.append("")
-    lines += [f"- {r.label}: {r.reason}" for r in sorted(results, key=lambda r: (order[r.verdict], r.resseq))]
+    lines.append("spread: the largest free energy difference between the replicas and the halves of each "
+                 "replica. Below 2.5 kJ/mol counts as converged.")
+    lines.append("")
+    lines += [f"- {r.label}: {r.reason}" for r in ranked]
     return "\n".join(lines)
 
 
