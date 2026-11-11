@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -192,7 +193,17 @@ def diagnose_trajectories(
 
 @contextlib.contextmanager
 def _quiet_c_output():
-    """Hide messages that the DCD reader prints from C code."""
+    """Hide messages that the DCD reader prints from C code.
+
+    C code keeps its messages in a buffer. We flush that buffer while the
+    output still goes to /dev/null. Otherwise the messages appear when the
+    program exits.
+    """
+    import ctypes
+
+    libc = ctypes.CDLL(None)
+    sys.stdout.flush()
+    sys.stderr.flush()
     saved = os.dup(1), os.dup(2)
     with open(os.devnull, "w") as null:
         os.dup2(null.fileno(), 1)
@@ -200,6 +211,7 @@ def _quiet_c_output():
         try:
             yield
         finally:
+            libc.fflush(None)
             os.dup2(saved[0], 1)
             os.dup2(saved[1], 2)
             os.close(saved[0])
