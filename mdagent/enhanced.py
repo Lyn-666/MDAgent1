@@ -16,8 +16,8 @@ Each replica starts from the final state of a plain MD replica. It runs in
 chunks. After each chunk the state, the bias and the chi1 samples are saved,
 so a stopped run can resume.
 
-Populations are computed by reweighting with all biases together (see the
-analysis section below). A result counts as converged only when both
+Populations are computed by reweighting with each residue's own bias and the
+biases of the side chains coupled to it (see the analysis section below). A result counts as converged only when both
 replicas and both halves of each replica agree. If not, the agent extends
 the run, up to max_length_ns.
 """
@@ -60,6 +60,8 @@ class MetadSettings:
     agreement_kj: float = 2.5           # Max free energy difference between estimates (about 1 kT).
     population_floor: float = 0.05      # States below this population count as negligible.
     min_crossings: int = 4               # Min chi1 state changes per replica under bias.
+    coupling_threshold: float = 0.2     # Cramer's V above this: two side chains affect each other.
+    min_effective_samples: float = 200.0  # Fewer effective samples than this: estimate not trusted.
 
     @classmethod
     def from_dict(cls, d: dict) -> "MetadSettings":
@@ -201,10 +203,13 @@ def run_replica(
 # ---------------------------------------------------------------- analysis
 #
 # Populations come from reweighting. Every pace_ps we saved the chi1 angle of
-# every biased residue. Each saved moment gets the weight exp(V_total / kT),
-# where V_total is the sum of all final biases at that moment. This removes
-# the effect of all biases together, so it also accounts for side chains that
-# push on each other. The first transient_fraction of each replica is skipped,
+# every biased residue. For residue j, each saved moment gets the weight
+# exp(V / kT), where V is the sum of the final biases of residue j and of the
+# residues coupled to it. Coupled means that their chi1 states are
+# statistically dependent (Cramer's V above coupling_threshold). We do not use
+# all biases: with eight large biases summed, the weights differ by many orders
+# of magnitude, and only a handful of samples would count. This happened in
+# the first 181L test. The first transient_fraction of each replica is skipped,
 # because the bias was still far from its final shape.
 #
 # The free energy curve along chi1 still comes from each residue's own bias:
@@ -225,19 +230,48 @@ def nearest_state(chi_rad: np.ndarray) -> np.ndarray:
 
 
 def reweighted_populations(chi: np.ndarray, bias: np.ndarray, j: int, grid: np.ndarray,
-                           temperature_k: float) -> tuple[dict[str, float], float]:
+                           temperature_k: float, use: list[int] | None = None
+                           ) -> tuple[dict[str, float], float]:
     """Populations of residue j from samples chi (n_samples x n_residues) and final biases.
 
-    Returns the populations and the effective number of samples.
+    The weight of each sample is exp(V / kT), where V is the sum of the biases of the
+    residues in `use` (default: residue j only). Returns the populations and the
+    effective number of samples, (sum w)^2 / sum w^2.
     """
     kt = KB_KJ * temperature_k
-    v = sum(np.interp(chi[:, i], grid, bias[i]) for i in range(chi.shape[1]))
+    use = [j] if use is None else use
+    v = sum(np.interp(chi[:, i], grid, bias[i]) for i in use)
     w = np.exp((v - v.max()) / kt)
     states = nearest_state(chi[:, j])
     total = w.sum()
     pops = {name: float(w[states == k].sum() / total) for k, name in enumerate(STATE_NAMES)}
     ess = float(total ** 2 / (w ** 2).sum())
     return pops, ess
+
+
+def cramers_v(a: np.ndarray, b: np.ndarray) -> float:
+    """Strength of the statistical dependence between two state sequences (0: none, 1: full)."""
+    table = np.zeros((3, 3))
+    np.add.at(table, (a, b), 1)
+    table = table[table.sum(axis=1) > 0][:, table.sum(axis=0) > 0]
+    if min(table.shape) < 2:
+        return 0.0
+    n = table.sum()
+    expected = np.outer(table.sum(axis=1), table.sum(axis=0)) / n
+    chi2 = ((table - expected) ** 2 / expected).sum()
+    return float(math.sqrt(chi2 / (n * (min(table.shape) - 1))))
+
+
+def coupled_partners(chi: np.ndarray, j: int, threshold: float) -> list[int]:
+    """Other residues whose chi1 state depends on the chi1 state of residue j.
+
+    Reweighting residue j must also undo the biases of these residues, because
+    their bias changes the environment of residue j. Including every residue
+    makes the weights so uneven that only a few samples count.
+    """
+    states = [nearest_state(chi[:, i]) for i in range(chi.shape[1])]
+    return [k for k in range(chi.shape[1])
+            if k != j and cramers_v(states[j], states[k]) > threshold]
 
 
 def state_free_energies(p: dict[str, float], floor: float, temperature_k: float) -> dict[str, float]:
@@ -256,6 +290,7 @@ class EnhancedResult:
     half_populations: list[list[dict[str, float]]]  # Per replica: [first half, second half].
     crossings: list[int]
     effective_samples: list[float] = field(default_factory=list)
+    coupled_with: list[str] = field(default_factory=list)
     free_energy: list[list[float]] = field(repr=False, default_factory=list)  # Per replica, on the grid.
     spread_kj: float = 0.0
     verdict: str = ""
@@ -278,7 +313,11 @@ def judge(r: EnhancedResult, s: MetadSettings, temperature_k: float) -> None:
     mean = r.mean_populations
     pops = ", ".join(f"{n} {mean[n]:.0%}" for n in STATE_NAMES)
 
-    if min(r.crossings) < s.min_crossings:
+    if r.effective_samples and min(r.effective_samples) < s.min_effective_samples:
+        r.verdict = "not_converged"
+        r.reason = (f"Too few effective samples after reweighting ({min(r.effective_samples):.0f}; "
+                    f"at least {s.min_effective_samples:.0f} are needed). Current estimate: {pops}.")
+    elif min(r.crossings) < s.min_crossings:
         r.verdict = "not_converged"
         r.reason = (f"Even with the bias, chi1 changed state only {r.crossings} times per replica. "
                     "The enhanced sampling needs to run longer.")
@@ -298,8 +337,10 @@ def judge(r: EnhancedResult, s: MetadSettings, temperature_k: float) -> None:
                         + f" higher. Plain MD was not trapped; this side chain is sampled. {agree}")
         else:
             r.verdict = "multiple_states"
-            r.reason = (f"chi1 has more than one populated state: {pops}. If plain MD stayed in one "
-                        f"state, it was trapped and its populations are wrong. {agree}")
+            minor = " and ".join(f"{n} {gaps[n]:.1f} kJ/mol" for n in others if mean[n] >= 0.01)
+            r.reason = (f"chi1 has more than one populated state: {pops}. The minor states are {minor} "
+                        f"above {main}. If plain MD stayed in {main}, it missed {1 - mean[main]:.0%} of the "
+                        f"population. {agree}")
 
 
 def analyze(run_dir: Path, residues: list[ResidueKey], resnames: dict[ResidueKey, str],
@@ -307,38 +348,48 @@ def analyze(run_dir: Path, residues: list[ResidueKey], resnames: dict[ResidueKey
     grid = np.linspace(-math.pi, math.pi, s.grid_points)
     replicas = sorted(int(p.stem.split("_")[1]) for p in (run_dir / "enhanced").glob("replica_*.json"))
     loaded = [(np.load(_paths(run_dir, i)["bias"]), np.load(_paths(run_dir, i)["chi"])) for i in replicas]
+    posts = [chi[int(len(chi) * s.transient_fraction):] for _, chi in loaded]
+    all_post = np.concatenate(posts)
+    labels = [f"{resnames.get(k, '?')}{k[1]}" for k in residues]
     results = []
     for j, key in enumerate(residues):
+        partners = coupled_partners(all_post, j, s.coupling_threshold)
+        use = [j] + partners
         pops, halves, cross, ess, fes = [], [], [], [], []
-        for bias, chi in loaded:
-            post = chi[int(len(chi) * s.transient_fraction):]
+        for (bias, chi), post in zip(loaded, posts):
             mid = len(post) // 2
-            p, e = reweighted_populations(post, bias, j, grid, temperature_k)
+            p, e = reweighted_populations(post, bias, j, grid, temperature_k, use)
             pops.append(p)
             ess.append(round(e, 1))
-            halves.append([reweighted_populations(post[:mid], bias, j, grid, temperature_k)[0],
-                           reweighted_populations(post[mid:], bias, j, grid, temperature_k)[0]])
+            halves.append([reweighted_populations(post[:mid], bias, j, grid, temperature_k, use)[0],
+                           reweighted_populations(post[mid:], bias, j, grid, temperature_k, use)[0]])
             cross.append(count_transitions(assign_states(np.degrees(chi[:, j]))))
             fes.append(free_energy(bias[j], s, temperature_k).round(3).tolist())
-        r = EnhancedResult(key[0], key[1], resnames.get(key, "?"), pops, halves, cross, ess, fes)
+        r = EnhancedResult(key[0], key[1], resnames.get(key, "?"), pops, halves, cross, ess,
+                           [labels[k] for k in partners], fes)
         judge(r, s, temperature_k)
         results.append(r)
     return results
 
 
 def format_results(results: list[EnhancedResult], ns: float, n_replicas: int) -> str:
-    lines = [f"Enhanced sampling of chi1: {n_replicas} replicas x {ns:g} ns. Populations are reweighted "
-             "with all biases together.", "",
-             f"{'residue':<10}{'verdict':<18}{'g+':>6}{'t':>6}{'g-':>6}{'spread':>10}   crossings"]
+    lines = [f"Enhanced sampling of chi1: {n_replicas} replicas x {ns:g} ns. Each residue is reweighted "
+             "with its own bias and the biases of the side chains coupled to it.", "",
+             f"{'residue':<10}{'verdict':<18}{'g+':>6}{'t':>6}{'g-':>6}{'spread':>10}{'eff. samples':>15}"
+             "   coupled with"]
     order = {"multiple_states": 0, "not_converged": 1, "single_state": 2}
     ranked = sorted(results, key=lambda r: (order[r.verdict], r.resseq))
     for r in ranked:
         m = r.mean_populations
+        ess = f"{min(r.effective_samples):.0f}" if r.effective_samples else "-"
         lines.append(f"{r.label:<10}{r.verdict:<18}{m['g+']:>6.0%}{m['t']:>6.0%}{m['g-']:>6.0%}"
-                     f"{r.spread_kj:>7.1f} kJ   " + ",".join(map(str, r.crossings)))
+                     f"{r.spread_kj:>7.1f} kJ{ess:>15}   {', '.join(r.coupled_with) or '-'}")
     lines.append("")
     lines.append("spread: the largest free energy difference between the replicas and the halves of each "
                  "replica. Below 2.5 kJ/mol counts as converged.")
+    lines.append("eff. samples: the smallest effective number of samples after reweighting (replica minimum). "
+                 "Below 200, the estimate is not trusted.")
+    lines.append("coupled with: biased side chains whose chi1 state depends on this one.")
     lines.append("")
     lines += [f"- {r.label}: {r.reason}" for r in ranked]
     return "\n".join(lines)

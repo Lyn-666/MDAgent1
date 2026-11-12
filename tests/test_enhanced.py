@@ -5,7 +5,8 @@ import numpy as np
 import pytest
 
 from mdagent.enhanced import (
-    KB_KJ, ChiBiases, EnhancedResult, MetadSettings, free_energy, judge, reweighted_populations,
+    KB_KJ, ChiBiases, EnhancedResult, MetadSettings, coupled_partners, cramers_v, free_energy, judge,
+    reweighted_populations,
 )
 
 DATA = Path(__file__).resolve().parent / "data"
@@ -43,9 +44,36 @@ def test_reweighting_recovers_populations_and_couples_residues():
     p, ess = reweighted_populations(chi, bias, 0, GRID, T)
     assert p["g-"] / p["t"] == pytest.approx(math.e ** 3, rel=0.15)
     assert ess < 4000
-    # The weights use the bias of residue 0 too, so they also apply to residue 1.
-    p1, _ = reweighted_populations(chi, bias, 1, GRID, T)
+    # Residue 1 reweighted together with residue 0's bias: still all g+.
+    p1, _ = reweighted_populations(chi, bias, 1, GRID, T, use=[1, 0])
     assert p1["g+"] == pytest.approx(1.0)
+
+
+def test_summing_many_biases_collapses_effective_samples():
+    """The problem seen in the first 181L test: 8 large biases summed leave few useful samples."""
+    rng = np.random.default_rng(1)
+    n, k = 20000, 8
+    chi = rng.choice([math.pi / 3, math.pi - 0.1, -math.pi / 3], size=(n, k))
+    bias = np.zeros((k, GRID.size))
+    for i in range(k):
+        bias[i] = 25.0 * np.cos(3 * GRID) ** 2 + rng.uniform(0, 15, 3).repeat(121)[:GRID.size]
+        bias[i, -1] = bias[i, 0]
+    _, ess_all = reweighted_populations(chi, bias, 0, GRID, T, use=list(range(k)))
+    _, ess_own = reweighted_populations(chi, bias, 0, GRID, T)
+    assert ess_all < 0.02 * n
+    assert ess_own > 10 * ess_all
+
+
+def test_cramers_v_and_coupled_partners():
+    rng = np.random.default_rng(2)
+    a = rng.integers(0, 3, 5000)
+    assert cramers_v(a, a) == pytest.approx(1.0)
+    assert cramers_v(a, rng.integers(0, 3, 5000)) < 0.05
+    centers = np.radians([60.0, 180.0, -60.0])
+    follow = np.where(rng.random(5000) < 0.9, a, rng.integers(0, 3, 5000))  # Mostly copies residue 0.
+    chi = np.stack([centers[a], centers[follow], centers[rng.integers(0, 3, 5000)]], axis=1)
+    assert coupled_partners(chi, 0, 0.2) == [1]
+    assert coupled_partners(chi, 2, 0.2) == []
 
 
 def test_free_energy_from_bias():
@@ -62,6 +90,13 @@ def _result(pops, halves=None, crossings=(10, 10)):
     return r
 
 
+def test_too_few_effective_samples_is_not_trusted():
+    one = {"g+": 0.01, "t": 0.98, "g-": 0.01}
+    r = EnhancedResult("A", 111, "VAL", [one, one], [[one, one], [one, one]], [10, 10], [50.0, 5000.0])
+    judge(r, MetadSettings(), T)
+    assert r.verdict == "not_converged" and "effective samples" in r.reason
+
+
 def test_judge_verdicts():
     one = {"g+": 0.01, "t": 0.98, "g-": 0.01}
     one_b = {"g+": 0.03, "t": 0.96, "g-": 0.01}   # Minor states below 5%: treated as negligible.
@@ -69,6 +104,7 @@ def test_judge_verdicts():
     two_b = {"g+": 0.02, "t": 0.55, "g-": 0.43}   # Within 2.5 kJ/mol of "two".
     assert _result([one, one_b]).verdict == "single_state"
     assert "kJ/mol" in _result([one, one]).reason
+    assert "missed 43% of the population" in _result([two, two_b]).reason
     assert _result([two, two_b]).verdict == "multiple_states"
     assert _result([one, two]).verdict == "not_converged"                        # Replicas disagree.
     assert _result([two, two], halves=[[one, two], [two, two]]).verdict == "not_converged"  # Halves differ.
