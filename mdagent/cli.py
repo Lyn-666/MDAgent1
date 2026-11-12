@@ -11,10 +11,10 @@ Examples:
   python -m mdagent run --pdb examples/181L.pdb --around-ligand BNZ --out runs/181L_b \\
       --check-protonation --forcefield amber19 --ion-conc 0.1 --cation K+ --setup-only
 
-  # A run that stopped after plain MD: add 10 ns more enhanced sampling.
+  # Run enhanced sampling longer: 30 ns per replica instead of 20.
   python -m mdagent resume --run runs/181L --enhanced-ns 30
 
-  # Show the latest ranked diagnosis (and enhanced sampling results, if any).
+  # Show the latest ranked diagnosis of plain MD.
   python -m mdagent diagnose --run runs/181L
 """
 
@@ -33,26 +33,23 @@ def _target_from_args(args) -> Target:
     return Target(residues=parse_residue_spec(args.residues))
 
 
-def _print_summary(decisions, results) -> None:
-    enhanced = [d.residue for d in decisions if d.action == "enhanced_sampling"]
+def _print_summary(decisions, enhanced_labels, run_dir) -> None:
+    flagged = [d.residue for d in decisions if d.action == "enhanced_sampling"]
     print("\nSummary")
-    if not enhanced:
+    if not flagged:
         print("Plain MD sampled all target side chains well. No enhanced sampling was needed.")
         return
-    print("Plain MD could not sample: " + ", ".join(enhanced) + ".")
-    if not results:
+    print("Plain MD could not sample: " + ", ".join(flagged) + ".")
+    if not enhanced_labels:
         print("Enhanced sampling did not run.")
         return
-    groups = {"multiple_states": [], "single_state": [], "not_converged": []}
-    for r in results:
-        groups[r.verdict].append(r.label)
-    if groups["multiple_states"]:
-        print("More than one populated state (plain MD was trapped): " + ", ".join(groups["multiple_states"]) + ".")
-    if groups["single_state"]:
-        print("One stable state (plain MD was right): " + ", ".join(groups["single_state"]) + ".")
-    if groups["not_converged"]:
-        print("Not converged within the time limit (to try longer: resume --enhanced-max-ns 100): "
-              + ", ".join(groups["not_converged"]) + ".")
+    d = Path(run_dir) / "enhanced"
+    print(f"Enhanced sampling finished for: {', '.join(enhanced_labels)}.")
+    print(f"Output files in {d}:")
+    print("  replica_<i>_chunk<k>.dcd   protein trajectory of each 1 ns chunk (topology: protein.pdb)")
+    print("  replica_<i>_chi.npy        chi1 of each biased residue (radians), one row per pace")
+    print("  replica_<i>_bias.npy       final bias of each biased residue on the chi1 grid (kJ/mol)")
+    print(f"  The order of residues in the .npy files: {', '.join(enhanced_labels)}.")
 
 
 def _check_env(platform, forcefield_files=()) -> bool:
@@ -132,8 +129,7 @@ def cmd_run(args) -> int:
         loop=loop,
         setup=asdict(setup),
         enhanced={"enabled": not args.no_enhanced_sampling,
-                  "settings": {"length_ns": args.enhanced_ns, "max_length_ns": args.enhanced_max_ns,
-                               "n_replicas": args.enhanced_replicas}},
+                  "settings": {"length_ns": args.enhanced_ns, "n_replicas": args.enhanced_replicas}},
     )
     state.save(out)
     if args.setup_only:
@@ -146,7 +142,7 @@ def cmd_run(args) -> int:
         print(f"After plain MD, residues that still need it get enhanced sampling: "
               f"{args.enhanced_replicas} replicas x {args.enhanced_ns:g} ns.")
     files = SystemFiles(built.topology, built.positions, built.system)
-    _print_summary(*run_all(out, state, files))
+    _print_summary(*run_all(out, state, files), out)
     return 0
 
 
@@ -163,14 +159,12 @@ def cmd_resume(args) -> int:
         state.enhanced["enabled"] = args.enhanced_sampling
     if args.enhanced_ns is not None:
         state.enhanced.setdefault("settings", {})["length_ns"] = args.enhanced_ns
-    if args.enhanced_max_ns is not None:
-        state.enhanced.setdefault("settings", {})["max_length_ns"] = args.enhanced_max_ns
     if not _check_env(state.md.platform):
         return 2
     state.save(run)
     print(f"Resuming {run}: {state.ns_done:g} ns of plain MD per replica done. "
           f"Budget: {state.loop.max_ns:g} ns per replica.")
-    _print_summary(*run_all(run, state))
+    _print_summary(*run_all(run, state), run)
     return 0
 
 
@@ -187,9 +181,6 @@ def cmd_diagnose(args) -> int:
         load_run(run, state.target, len(state.rounds_ns)), state.target, state.ns_done,
         min_flips_per_replica=state.loop.min_flips_per_replica)
     print(format_report(reports))
-    results = run / "enhanced" / "results.txt"
-    if results.exists():
-        print("\n" + results.read_text())
     return 0
 
 
@@ -231,8 +222,6 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--seed", type=int, default=1)
     r.add_argument("--enhanced-ns", type=float, default=20.0,
                    help="Length of each enhanced sampling replica (ns).")
-    r.add_argument("--enhanced-max-ns", type=float, default=60.0,
-                   help="The agent extends unconverged enhanced sampling up to this length (ns per replica).")
     r.add_argument("--enhanced-replicas", type=int, default=2)
     r.add_argument("--no-enhanced-sampling", action="store_true",
                    help="Stop after plain MD. Enhanced sampling can still run later with resume.")
@@ -245,8 +234,6 @@ def main(argv: list[str] | None = None) -> int:
     u.add_argument("--platform", default=None)
     u.add_argument("--enhanced-ns", type=float, default=None,
                    help="New length of each enhanced sampling replica (ns). A larger value continues it.")
-    u.add_argument("--enhanced-max-ns", type=float, default=None,
-                   help="New limit for the automatic extension of enhanced sampling (ns per replica).")
     es = u.add_mutually_exclusive_group()
     es.add_argument("--enhanced-sampling", dest="enhanced_sampling", action="store_true", default=None)
     es.add_argument("--no-enhanced-sampling", dest="enhanced_sampling", action="store_false")

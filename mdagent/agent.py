@@ -204,9 +204,12 @@ def run_all(
     state: RunState,
     files: SystemFiles | None = None,
     log: Callable[[str], None] = print,
-) -> tuple[list[Decision], list]:
-    """Plain MD until the agent stops it, then enhanced sampling where it is needed."""
-    from .enhanced import MetadSettings, analyze, format_results, run_replica, save_results
+) -> tuple[list[Decision], list[str]]:
+    """Plain MD until the agent stops it, then enhanced sampling where it is needed.
+
+    Returns the plain MD decisions and the labels of the residues that got enhanced sampling.
+    """
+    from .enhanced import MetadSettings, run_replica
 
     files = files or load_inputs(run_dir)
     decisions = run_loop(run_dir, state, files, log)
@@ -232,41 +235,18 @@ def run_all(
     n_rep = min(settings.n_replicas, state.n_replicas)
     state.save(run_dir)
 
-    resnames = {(c, n): es["resnames"][f"{c}:{n}"] for c, n in residues}
-    names = ", ".join(f"{resnames[k]}{k[1]}" for k in residues)
-    log(f"\nEnhanced sampling (well-tempered metadynamics on chi1) for {names}: "
+    labels = [f"{es['resnames'][f'{c}:{n}']}{n}" for c, n in residues]
+    log(f"\nEnhanced sampling (well-tempered metadynamics on chi1) for {', '.join(labels)}: "
         f"{n_rep} replicas x {settings.length_ns:g} ns, starting from the end of plain MD.")
     last = len(state.rounds_ns) - 1
-    while True:
-        for r in range(n_rep):
-            start = part_path(run_dir, r, last, ".state.xml")
-            run_replica(files, run_dir, r, start, residues, settings, state.md,
-                        seed=state.base_seed + 50000 + r, log=log)
+    for r in range(n_rep):
+        start = part_path(run_dir, r, last, ".state.xml")
+        run_replica(files, run_dir, r, start, residues, settings, state.md,
+                    seed=state.base_seed + 50000 + r, log=log)
 
-        results = analyze(run_dir, residues, resnames, settings, state.md.temperature_k)
-        text = format_results(results, settings.length_ns, n_rep)
-        save_results(run_dir, results, text)
-        log("\n" + text)
-        waiting = [r.label for r in results if r.verdict == "not_converged"]
-        if waiting and settings.length_ns < settings.max_length_ns - 1e-9:
-            new_length = min(settings.length_ns + settings.extend_ns, settings.max_length_ns)
-            decision = (f"Decision: {', '.join(waiting)} not converged. Extend enhanced sampling "
-                        f"from {settings.length_ns:g} to {new_length:g} ns per replica.")
-        elif waiting:
-            decision = (f"Decision: stop. {', '.join(waiting)} did not converge within the limit of "
-                        f"{settings.max_length_ns:g} ns per replica. These side chains are probably coupled "
-                        "to another slow motion that the chi1 bias does not push.")
-            new_length = None
-        else:
-            decision = "Decision: stop. All biased side chains are converged."
-            new_length = None
-        log(decision)
-        with open(run_dir / "decisions.log", "a") as f:
-            f.write(time.strftime("[%Y-%m-%d %H:%M:%S] ") + "Enhanced sampling analyzed.\n"
-                    + text + "\n" + decision + "\n\n")
-        if new_length is None:
-            break
-        settings.length_ns = new_length
-        es["settings"] = asdict(settings)
-        state.save(run_dir)
-    return decisions, results
+    text = (f"Enhanced sampling finished for {', '.join(labels)}: {n_rep} replicas x "
+            f"{settings.length_ns:g} ns. Output in {run_dir / 'enhanced'}.")
+    log(text)
+    with open(run_dir / "decisions.log", "a") as f:
+        f.write(time.strftime("[%Y-%m-%d %H:%M:%S] ") + text + "\n\n")
+    return decisions, labels
