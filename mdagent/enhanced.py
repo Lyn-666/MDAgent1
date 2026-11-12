@@ -175,12 +175,17 @@ def run_replica(
         sim.reporters = [app.DCDReporter(
             str(p["dir"] / f"replica_{replica}_chunk{chunk_index:03d}.dcd"), frame_interval,
             atomSubset=protein_atom_indices(files.topology))]
-        for _ in range(n_pace):
+        report_every = max(1, round(0.1 * 1000 / s.pace_ps))  # Report progress every 0.1 ns.
+        for k in range(1, n_pace + 1):
             sim.step(pace)
             x = biases.values(sim.context)
             chi.append(x)
             biases.deposit(x)
             biases.push(sim.context)
+            if k % report_every == 0 and k < n_pace:
+                now = progress["ns_done"] + k * s.pace_ps / 1000
+                speed = (now - ns_start) / ((time.time() - t0) / 86400)
+                log(f"enhanced replica {replica}: {now:.1f} of {s.length_ns:g} ns ({speed:.0f} ns/day)")
         before = progress["ns_done"]
         progress["ns_done"] = round(before + chunk_ns, 9)
         tmp = p["state"].with_suffix(".tmp")

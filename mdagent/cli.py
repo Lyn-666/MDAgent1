@@ -185,6 +185,10 @@ def cmd_diagnose(args) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Write each line at once, also when the output goes to a log file (nohup ... > log).
+    # Otherwise Python keeps lines in a buffer and the log falls behind.
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
     p = argparse.ArgumentParser(prog="mdagent")
     sub = p.add_subparsers(dest="command", required=True)
 
