@@ -113,9 +113,20 @@ FLAGS = [  # RunPlan field -> command line option
 SWITCHES = [("check_protonation", "--check-protonation"), ("no_enhanced_sampling", "--no-enhanced-sampling")]
 
 
-def to_argv(plan: RunPlan, pdb: str, out: str) -> list[str]:
-    """The `mdagent run` command line that matches the plan."""
-    argv = ["run", "--pdb", str(pdb), "--out", str(out)]
+def to_argv(plan: RunPlan, pdb: str | None, out: str, prmtop: str | None = None,
+            inpcrd: str | None = None) -> list[str]:
+    """The `mdagent run` command line that matches the plan.
+
+    Input is either a PDB file, or a prepared Amber system (prmtop and inpcrd).
+    """
+    if prmtop:
+        if not inpcrd:
+            raise ValueError("A prepared Amber system needs both the prmtop and the inpcrd file.")
+        argv = ["run", "--prmtop", str(prmtop), "--inpcrd", str(inpcrd), "--out", str(out)]
+    elif pdb:
+        argv = ["run", "--pdb", str(pdb), "--out", str(out)]
+    else:
+        raise ValueError("The plan has no input file.")
     if plan.target_kind == "ligand":
         if not plan.ligand:
             raise ValueError("The plan targets a ligand but names none.")

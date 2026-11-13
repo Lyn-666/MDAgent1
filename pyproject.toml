@@ -13,12 +13,16 @@ dependencies = ["openmm>=8.1", "pdbfixer", "mdtraj", "numpy", "propka>=3.5"]
 test = ["pytest"]
 adaptive = ["adaptivepy-sampling"]
 llm = ["anthropic>=2.8"]
+chat = ["pydantic>=2"]
 
 [project.scripts]
 mdagent = "mdagent.cli:main"
 
 [tool.setuptools]
 packages = ["mdagent"]
+
+[tool.setuptools.package-data]
+mdagent = ["chat_page.html"]
 
 [tool.pytest.ini_options]
 markers = ["slow: runs a short MD simulation (about one minute on CPU)"]

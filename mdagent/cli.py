@@ -319,6 +319,14 @@ def build_parser() -> argparse.ArgumentParser:
     isrc.add_argument("--prmtop", help="Amber topology (.parm7/.prmtop). Residue numbers start at 1.")
     i.set_defaults(func=cmd_info)
 
+    c = sub.add_parser("chat", help="Open the MDAgent chat window (a local web page).")
+    c.add_argument("--backend", default="auto", choices=["auto", "claude", "codex", "api"],
+                   help="Language model: claude (Claude Code login), codex (Codex login), api (ANTHROPIC_API_KEY). "
+                        "auto picks the first one installed.")
+    c.add_argument("--port", type=int, default=8765)
+    c.add_argument("--no-browser", action="store_true", help="Do not open the browser.")
+    c.set_defaults(func=cmd_chat)
+
     a = sub.add_parser("ask", help="Describe the run in plain language. Claude turns it into settings; "
                                    "you confirm before anything runs.")
     a.add_argument("request", help='For example: "use CHARMM, look at the pocket around benzene, 0.1 M KCl".')
@@ -339,4 +347,11 @@ def cmd_info(args) -> int:
     from .target import pdb_summary
 
     print(pdb_summary(args.pdb or args.prmtop))
+    return 0
+
+
+def cmd_chat(args) -> int:
+    from .chat import serve
+
+    serve(Path.cwd(), args.backend, args.port, open_browser=not args.no_browser)
     return 0

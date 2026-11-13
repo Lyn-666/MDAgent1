@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MDAgent</title>
+<style>
+  :root { --bg:#f7f7f5; --panel:#fff; --text:#1f2328; --muted:#6b7280; --line:#e5e7eb;
+          --accent:#2563eb; --user:#eef2ff; --ok:#16a34a; --warn:#d97706; --bad:#dc2626; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#111315; --panel:#1a1d21; --text:#e6e6e6; --muted:#9aa1ab; --line:#2b2f35;
+            --accent:#6ea8fe; --user:#1e2a44; --ok:#4ade80; --warn:#fbbf24; --bad:#f87171; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+         background:var(--bg); color:var(--text); }
+  header { padding:12px 16px; border-bottom:1px solid var(--line); display:flex; gap:12px; align-items:center; }
+  header h1 { font-size:18px; margin:0; }
+  header span { color:var(--muted); font-size:13px; }
+  #lang { margin-left:auto; display:flex; border:1px solid var(--line); border-radius:8px; overflow:hidden; }
+  #lang button { background:transparent; color:var(--text); border-radius:0; padding:6px 12px; }
+  #lang button.on { background:var(--accent); color:#fff; }
+  main { display:grid; grid-template-columns: minmax(0,2fr) minmax(0,1fr); gap:16px; padding:16px;
+         height: calc(100vh - 58px); }
+  @media (max-width: 800px) { main { grid-template-columns: 1fr; height:auto; } }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; display:flex;
+           flex-direction:column; min-height:0; }
+  #log { flex:1; overflow-y:auto; padding:16px; display:flex; flex-direction:column; gap:10px; min-height:300px; }
+  .msg { max-width:85%; padding:10px 12px; border-radius:10px; white-space:pre-wrap; line-height:1.5; }
+  .user { align-self:flex-end; background:var(--user); }
+  .assistant { align-self:flex-start; border:1px solid var(--line); }
+  .card { margin-top:8px; padding:10px; border:1px dashed var(--accent); border-radius:8px; font-size:14px; }
+  .card code { display:block; font-size:12px; color:var(--muted); margin:6px 0; word-break:break-all; }
+  button { background:var(--accent); color:#fff; border:0; border-radius:8px; padding:8px 14px; cursor:pointer;
+           font-size:14px; }
+  button:disabled { opacity:.5; cursor:default; }
+  form { display:flex; gap:8px; padding:12px; border-top:1px solid var(--line); }
+  textarea { flex:1; resize:none; height:52px; padding:8px; border-radius:8px; border:1px solid var(--line);
+             background:var(--bg); color:var(--text); font:inherit; }
+  #runs { overflow-y:auto; padding:12px; display:flex; flex-direction:column; gap:10px; }
+  .run { border:1px solid var(--line); border-radius:8px; padding:10px; font-size:13px; }
+  .run b { font-size:14px; }
+  .state { float:right; font-weight:600; }
+  .running { color:var(--accent); } .finished { color:var(--ok); } .stopped { color:var(--warn); }
+  .failed { color:var(--bad); }
+  .last { color:var(--muted); margin-top:6px; white-space:pre-wrap; word-break:break-all; }
+  h2 { font-size:15px; margin:12px 12px 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>MDAgent</h1><span id="backend"></span>
+  <div id="lang"><button data-lang="zh">中文</button><button data-lang="en">English</button></div>
+</header>
+<main>
+  <section class="panel">
+    <div id="log"></div>
+    <form id="form">
+      <textarea id="text"></textarea>
+      <button id="send"></button>
+    </form>
+  </section>
+  <section class="panel">
+    <h2 id="runs-title"></h2>
+    <div id="runs"></div>
+  </section>
+</main>
+<script>
+const UI = {
+  zh: {
+    placeholder: "例如：用 Amber，看 181L 里苯周围的口袋，开发测试。按 Enter 发送，Shift+Enter 换行。",
+    send: "发送", thinking: "思考中…", runsTitle: "运行（每 10 秒刷新）", noRuns: "还没有运行。",
+    backend: "语言模型：", changed: "改动的设置：", plainMd: n => `普通 MD：每条 ${n} ns`,
+    failed: "连接聊天服务失败：",
+    buttons: {start: "开始运行", stop: "停止运行", resume: "继续运行"},
+    states: {running: "运行中", finished: "已完成", stopped: "已停止", failed: "出错"},
+    welcome: "你好。告诉我要模拟什么，例如：“用 Amber，看 181L 里苯周围的口袋，开发测试”。也可以问某个运行的进度，或者让我停止、继续某个运行。运行在后台进行，关掉这个网页也不会停。",
+  },
+  en: {
+    placeholder: "For example: use Amber, look at the pocket around benzene in 181L, development test. Enter sends, Shift+Enter adds a line.",
+    send: "Send", thinking: "Thinking…", runsTitle: "Runs (refresh every 10 s)", noRuns: "No runs yet.",
+    backend: "Language model: ", changed: "Changed settings: ", plainMd: n => `Plain MD: ${n} ns per replica`,
+    failed: "Could not reach the chat server: ",
+    buttons: {start: "Start run", stop: "Stop run", resume: "Continue run"},
+    states: {running: "running", finished: "finished", stopped: "stopped", failed: "failed"},
+    welcome: "Hello. Tell me what to simulate, for example: “use Amber, look at the pocket around benzene in 181L, development test”. You can also ask how a run is going, or ask me to stop or continue a run. Runs go on in the background, also when you close this page.",
+  },
+};
+let lang = "zh";
+try { lang = localStorage.getItem("mdagent-lang") || "zh"; } catch (e) {}
+let backendName = "", history = [];
+const log = document.getElementById("log"), text = document.getElementById("text");
+
+function L() { return UI[lang]; }
+
+function applyLanguage() {
+  document.documentElement.lang = lang;
+  text.placeholder = L().placeholder;
+  document.getElementById("send").textContent = L().send;
+  document.getElementById("runs-title").textContent = L().runsTitle;
+  document.getElementById("backend").textContent = backendName ? L().backend + backendName : "";
+  for (const b of document.querySelectorAll("#lang button")) b.classList.toggle("on", b.dataset.lang === lang);
+  if (!history.length) { log.innerHTML = ""; add("assistant", L().welcome); }
+  refreshRuns();
+}
+for (const b of document.querySelectorAll("#lang button")) {
+  b.onclick = () => {
+    lang = b.dataset.lang;
+    try { localStorage.setItem("mdagent-lang", lang); } catch (e) {}
+    applyLanguage();
+  };
+}
+
+function add(role, body, card) {
+  const div = document.createElement("div");
+  div.className = "msg " + role;
+  div.textContent = body;
+  if (card) {
+    const c = document.createElement("div");
+    c.className = "card";
+    c.innerHTML = `<div>${escapeHtml(card.text)}</div>` +
+      (card.changed && card.changed.length ? `<div>${L().changed}${escapeHtml(card.changed.join(", "))}</div>` : "") +
+      (card.command ? `<code>${escapeHtml(card.command)}</code>` : "");
+    const b = document.createElement("button");
+    b.textContent = L().buttons[card.kind];
+    b.onclick = async () => {
+      b.disabled = true;
+      const r = await post("/api/confirm", {id: card.id, lang});
+      add("assistant", r.reply);
+      refreshRuns();
+    };
+    c.appendChild(b);
+    div.appendChild(c);
+  }
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+}
+
+function escapeHtml(s) { return String(s).replace(/[&<>"]/g, ch => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[ch])); }
+async function post(url, data) {
+  const r = await fetch(url, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(data)});
+  return r.json();
+}
+
+document.getElementById("form").onsubmit = async (e) => {
+  e.preventDefault();
+  const t = text.value.trim();
+  if (!t) return;
+  text.value = "";
+  history.push(t);
+  add("user", t);
+  const send = document.getElementById("send");
+  send.disabled = true; send.textContent = L().thinking;
+  try {
+    const r = await post("/api/chat", {text: t, lang});
+    add("assistant", r.reply, r.card);
+  } catch (err) {
+    add("assistant", L().failed + err);
+  }
+  send.disabled = false; send.textContent = L().send;
+};
+text.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); document.getElementById("form").requestSubmit(); }
+});
+
+async function refreshRuns() {
+  let runs = [];
+  try { runs = await (await fetch("/api/runs")).json(); } catch (e) { return; }
+  const box = document.getElementById("runs");
+  box.innerHTML = runs.length ? "" : `<div class='last'>${L().noRuns}</div>`;
+  for (const r of runs) {
+    const d = document.createElement("div");
+    d.className = "run";
+    const ns = r.plain_md_ns_per_replica != null ? L().plainMd(r.plain_md_ns_per_replica) : "";
+    d.innerHTML = `<b>${escapeHtml(r.name)}</b><span class="state ${r.state}">${L().states[r.state] || r.state}</span>` +
+      `<div>${ns}</div><div class="last">${escapeHtml((r.last || []).join("\n"))}</div>`;
+    box.appendChild(d);
+  }
+}
+
+(async () => {
+  const h = await (await fetch("/api/history")).json();
+  backendName = h.backend;
+  for (const m of h.history) { history.push(m.text); add(m.role, m.text); }
+  applyLanguage();
+  setInterval(refreshRuns, 10000);
+})();
+</script>
+</body>
+</html>

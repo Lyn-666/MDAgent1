@@ -148,6 +148,23 @@ agent 只负责跑增强采样和保存数据，不做分析。输出在运行�
 
 选项：`--adaptive-policy`（`least_counts` 或 `random`）、`--adaptive-clusters`（聚类数，默认 20）、`--full-save-ps`（完整坐标的保存间隔，默认 10 ps）。
 
+## 聊天窗口（`chat`）
+
+```bash
+conda activate mdagent
+pip install -e ".[chat]"
+python -m mdagent chat              # 浏览器打开 http://localhost:8765
+```
+
+一个本地网页，界面有中文和 English 两种语言，右上角可以切换。
+
+- **语言模型后台：** `--backend claude`（Claude Code，用你的 Claude 登录）、`--backend codex`（Codex，用你的 ChatGPT 登录）、`--backend api`（需要 `ANTHROPIC_API_KEY`）。默认 `auto`，选第一个已安装的。它们只负责理解你的话并提出建议，不能运行任何命令：Claude Code 的工具全部关闭，Codex 用只读模式。
+- **先确认后执行：** 开始、停止、继续一个运行，都会先显示成一张卡片，上面有设置和完整命令。你点击按钮后才执行。
+- **运行和网页无关：** 每个运行都是独立的进程，有自己的进程组，日志写在 `runs/<名字>.log`。关掉网页、甚至停掉聊天服务（Ctrl+C），模拟都会继续。只有在聊天窗口里说"停止"并点击确认，或者运行完成，它才会结束。
+- **进度：** 右侧列出所有运行，每 10 秒刷新一次。也可以直接问"dev5 跑到哪了"。聊天窗口不分析模拟结果。
+
+如果设置了 `ANTHROPIC_API_KEY`，Claude Code 会优先用这个密钥，而不是你的订阅登录。Codex 后台还没有在真实环境里测试过。
+
 ## 用 Claude Code 当 agent 窗口（不需要 API 密钥）
 
 在自己的电脑上，先激活环境，再在 MDAgent1 文件夹里打开 Claude Code：
@@ -181,4 +198,4 @@ Claude（`claude-opus-5-5`）只负责填一张固定的设置表，表里每一
 
 ## 下一步
 
-1. 在用户电脑上试用 Claude Code 窗口（`/md`、`/md-status`）。
+1. 在用户电脑上试用聊天窗口（`python -m mdagent chat`），分别试 Claude Code 和 Codex 后台。
