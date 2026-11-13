@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Callable
 
 from .diagnose import ResidueReport, diagnose_trajectories, format_report, load_run
+from .adaptive import AdaptiveSettings, choose_starts
 from .simulate import MDSettings, SystemFiles, load_inputs, part_path, run_segment
 
 
@@ -57,6 +58,11 @@ class RunState:
     # Enhanced sampling: {"enabled": bool, "settings": MetadSettings fields,
     # "residues": [[chain, number], ...], "resnames": {"A:111": "VAL"}}
     enhanced: dict = field(default_factory=lambda: {"enabled": True})
+    # Plain MD mode: "continue" (each replica continues its own trajectory) or
+    # "adaptive" (from round 2, AdaptivePy chooses the starting frames).
+    sampling: str = "continue"
+    adaptive: dict = field(default_factory=dict)  # AdaptiveSettings fields
+    starts: dict = field(default_factory=dict)    # Round index -> [[replica, part, frame], ...]
 
     @property
     def ns_done(self) -> float:
@@ -175,12 +181,20 @@ def run_loop(
         state.pending_round_ns = next_ns
         state.save(run_dir)
         log(f"\nRound {part + 1}: running {state.n_replicas} replicas for {next_ns:g} ns each.")
+        adaptive = state.sampling == "adaptive"
+        full_ps = AdaptiveSettings.from_dict(state.adaptive).full_interval_ps if adaptive else None
+        starts = _adaptive_starts(run_dir, state, part, log) if adaptive and part > 0 else None
         for i in range(state.n_replicas):
             if part_path(run_dir, i, part, ".state.xml").exists():
                 log(f"replica {i}: round {part + 1} is already complete.")
                 continue
             seed = state.base_seed + 1000 * part + i
-            run_segment(files, run_dir, i, part, seed, next_ns, state.md, log)
+            start = None
+            if starts:
+                r, p, frame = starts[i]
+                start = (part_path(run_dir, r, p, ".full.dcd"), frame)
+            run_segment(files, run_dir, i, part, seed, next_ns, state.md, log,
+                        start_frame=start, full_interval_ps=full_ps)
         state.rounds_ns.append(next_ns)
         state.pending_round_ns = 0.0
         state.save(run_dir)
@@ -191,10 +205,30 @@ def run_loop(
     return decisions
 
 
+def _adaptive_starts(run_dir: Path, state: RunState, part: int, log) -> list[list[int]]:
+    """Starting frames for round `part`, chosen once by AdaptivePy and kept in run.json."""
+    key = str(part)
+    if key not in state.starts:
+        segments = [(r, p) for r in range(state.n_replicas) for p in range(part)]
+        chosen = choose_starts(run_dir, part, segments, state.target, state.n_replicas,
+                               AdaptiveSettings.from_dict(state.adaptive),
+                               random_seed=state.base_seed + part, log=log)
+        state.starts[key] = [list(c) for c in chosen]
+        state.save(run_dir)
+    return state.starts[key]
+
+
 def _diagnose_and_decide(run_dir: Path, state: RunState):
-    reports = diagnose_trajectories(
-        load_run(run_dir, state.target, len(state.rounds_ns)), state.target, state.ns_done,
-        min_flips_per_replica=state.loop.min_flips_per_replica)
+    if state.sampling == "adaptive":
+        # Segments start from different frames on purpose, so judge the pooled flips.
+        reports = diagnose_trajectories(
+            load_run(run_dir, state.target, len(state.rounds_ns), join=False), state.target,
+            state.ns_done, min_flips_per_replica=state.loop.min_flips_per_replica,
+            pooled_total_ns=state.ns_done * state.n_replicas, n_replicas=state.n_replicas)
+    else:
+        reports = diagnose_trajectories(
+            load_run(run_dir, state.target, len(state.rounds_ns)), state.target, state.ns_done,
+            min_flips_per_replica=state.loop.min_flips_per_replica)
     decisions, next_ns = decide(reports, state.ns_done, state.loop)
     return reports, decisions, next_ns
 

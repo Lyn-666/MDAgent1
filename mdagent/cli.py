@@ -80,6 +80,9 @@ def cmd_run(args) -> int:
         return 2
     if not _check_env(args.platform, FORCEFIELDS[args.forcefield].files):
         return 2
+    if args.sampling == "adaptive":
+        from .adaptive import check_installed
+        check_installed()
 
     target = _target_from_args(args)
     keys = resolve_target(target, args.pdb)
@@ -128,6 +131,9 @@ def cmd_run(args) -> int:
         md=MDSettings(save_interval_ps=args.save_ps, platform=args.platform),
         loop=loop,
         setup=asdict(setup),
+        sampling=args.sampling,
+        adaptive={"policy": args.adaptive_policy, "n_clusters": args.adaptive_clusters,
+                  "full_interval_ps": args.full_save_ps} if args.sampling == "adaptive" else {},
         enhanced={"enabled": not args.no_enhanced_sampling,
                   "settings": {"length_ns": args.enhanced_ns, "n_replicas": args.enhanced_replicas}},
     )
@@ -138,6 +144,9 @@ def cmd_run(args) -> int:
         return 0
     print(f"Plan: {args.replicas} replicas. Round 1 is {loop.first_ns:g} ns per replica. "
           f"Later rounds add {loop.extend_ns:g} ns. Budget: {loop.max_ns:g} ns per replica.")
+    if args.sampling == "adaptive":
+        print(f"Adaptive sampling: from round 2, AdaptivePy ({args.adaptive_policy}) chooses where each "
+              f"replica starts. Full-system frames are saved every {args.full_save_ps:g} ps.")
     if state.enhanced["enabled"]:
         print(f"After plain MD, residues that still need it get enhanced sampling: "
               f"{args.enhanced_replicas} replicas x {args.enhanced_ns:g} ns.")
@@ -224,6 +233,13 @@ def main(argv: list[str] | None = None) -> int:
                    help="Build the system and stop. Start MD later with 'resume'.")
     r.add_argument("--platform", default=None, help="OpenMM platform: CUDA, OpenCL or CPU.")
     r.add_argument("--seed", type=int, default=1)
+    r.add_argument("--sampling", default="continue", choices=["continue", "adaptive"],
+                   help="continue: each replica continues its own trajectory (default). adaptive: from "
+                        "round 2, AdaptivePy chooses the starting frames (pip install adaptivepy-sampling).")
+    r.add_argument("--adaptive-policy", default="least_counts", choices=["least_counts", "random"])
+    r.add_argument("--adaptive-clusters", type=int, default=20)
+    r.add_argument("--full-save-ps", type=float, default=10.0,
+                   help="Adaptive mode: save all atoms (with water) every this many ps, for restarts.")
     r.add_argument("--enhanced-ns", type=float, default=20.0,
                    help="Length of each enhanced sampling replica (ns).")
     r.add_argument("--enhanced-replicas", type=int, default=2)

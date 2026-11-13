@@ -83,6 +83,7 @@ class ResidueReport:
     occupancies: list[dict[str, float]]
     dominant: list[str]
     ns_per_replica: float = 0.0
+    total_ns_override: float | None = None  # Adaptive mode: segments have different lengths.
     verdict: str = ""
     reason: str = ""
 
@@ -92,6 +93,8 @@ class ResidueReport:
 
     @property
     def total_ns(self) -> float:
+        if self.total_ns_override is not None:
+            return self.total_ns_override
         return self.ns_per_replica * len(self.transitions)
 
     @property
@@ -140,6 +143,22 @@ def judge(report: ResidueReport, min_flips_per_replica: int = 4) -> None:
         report.reason = f"chi1 flips per replica: {report.transitions}."
 
 
+def judge_pooled(report: ResidueReport, min_total_flips: int) -> None:
+    """Adaptive mode: trajectory segments start from chosen frames, so their states
+    differ on purpose. Only the total number of flips over all segments counts."""
+    total = sum(report.transitions)
+    if total == 0:
+        report.verdict = "no_flip"
+        report.reason = ("chi1 did not flip in any trajectory segment. It may be trapped, "
+                         "or it may have only one stable state.")
+    elif total < min_total_flips:
+        report.verdict = "rare_flips"
+        report.reason = f"chi1 flipped {total} times in all segments together; fewer than {min_total_flips}."
+    else:
+        report.verdict = "ok"
+        report.reason = f"chi1 flipped {total} times in all segments together."
+
+
 def rank(reports: list[ResidueReport]) -> list[ResidueReport]:
     """Residues that need work, slowest first. Then the others."""
     def key(r: ResidueReport):
@@ -154,7 +173,15 @@ def diagnose_trajectories(
     ns_per_replica: float,
     core_width_deg: float = 40.0,
     min_flips_per_replica: int = 4,
+    pooled_total_ns: float | None = None,
+    n_replicas: int | None = None,
 ) -> list[ResidueReport]:
+    """Diagnose the target side chains.
+
+    Default: each trajectory is one replica. With pooled_total_ns (adaptive
+    mode), each trajectory is one segment, and the verdict uses the total
+    number of flips (judge_pooled) over pooled_total_ns of simulation.
+    """
     wanted = set(target)
     top = trajs[0].topology
     chi_idx, _ = md.compute_chi1(trajs[0][:1])
@@ -177,8 +204,12 @@ def diagnose_trajectories(
             occupancies=occ,
             dominant=[max(o, key=o.get) for o in occ],
             ns_per_replica=ns_per_replica,
+            total_ns_override=pooled_total_ns,
         )
-        judge(rep, min_flips_per_replica)
+        if pooled_total_ns is None:
+            judge(rep, min_flips_per_replica)
+        else:
+            judge_pooled(rep, min_flips_per_replica * (n_replicas or len(trajs)))
         reports.append(rep)
 
     names = {(r.chain.chain_id, r.resSeq): r.name for r in top.residues}
@@ -218,10 +249,13 @@ def _quiet_c_output():
             os.close(saved[1])
 
 
-def load_run(run_dir: str | Path, target: list[ResidueKey], n_parts: int) -> list[md.Trajectory]:
+def load_run(run_dir: str | Path, target: list[ResidueKey], n_parts: int,
+             join: bool = True) -> list[md.Trajectory]:
     """Load parts 0 .. n_parts-1 of each replica and join them into one trajectory per replica.
 
     Only the atoms of the target residues are kept, so long runs fit in memory.
+    With join=False, return every part as its own trajectory: replica 0 parts,
+    then replica 1 parts, and so on.
     """
     run_dir = Path(run_dir)
     top = md.load_topology(str(run_dir / "protein.pdb"))
@@ -234,7 +268,11 @@ def load_run(run_dir: str | Path, target: list[ResidueKey], n_parts: int) -> lis
     with _quiet_c_output():
         for i in replicas:
             parts = [run_dir / f"replica_{i}_part{k:03d}.dcd" for k in range(n_parts)]
-            trajs.append(md.join([md.load_dcd(str(p), top=top, atom_indices=atoms) for p in parts]))
+            loaded = [md.load_dcd(str(p), top=top, atom_indices=atoms) for p in parts]
+            if join:
+                trajs.append(md.join(loaded))
+            else:
+                trajs.extend(loaded)  # One trajectory per part (adaptive mode).
     return trajs
 
 
@@ -246,7 +284,7 @@ def format_report(reports: list[ResidueReport]) -> str:
         f"after {ns:g} ns per replica.",
         "Rank 1 is the slowest side chain.",
         "",
-        f"{'rank':<6}{'residue':<10}{'verdict':<20}{'flips per replica':<20}"
+        f"{'rank':<6}{'residue':<10}{'verdict':<20}{'flips per traj.':<20}"
         f"{'time between flips':<20}dominant state per replica",
     ]
     for i, r in enumerate(reports, 1):

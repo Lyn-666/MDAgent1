@@ -120,8 +120,19 @@ agent 只负责跑增强采样和保存数据，不做分析。输出在运行�
 
 残基在 `.npy` 文件里的顺序，与 `run.json` 中 `enhanced.residues` 的顺序相同。
 
+## 自适应采样（可选）
+
+加上 `--sampling adaptive` 后，普通 MD 阶段从第 2 轮起，每条轨迹不再接着自己的上一段跑，而是从 AdaptivePy（Shukla 课题组的自适应采样包）挑出的帧重新起跑。默认策略 `least_counts` 会挑"访问最少"区域里的帧。需要先安装：`pip install adaptivepy-sampling`。
+
+- **特征：** 目标区域里各侧链 chi1 的正弦和余弦。
+- **完整坐标：** 这个模式下每段轨迹每 10 ps 额外保存一帧完整体系（含水），文件名是 `replica_<i>_part<k>.full.dcd`。起点只从这些帧里挑。重新起跑时，按设定温度重新随机分配速度。
+- **判断规则：** 各段轨迹的起点是故意挑得不同的，所以这个模式下 agent 只看所有轨迹段加起来的翻转次数，不再比较各条轨迹是否停在同一个状态。
+- **记录：** 每一轮挑出的起点记在 `run.json` 的 `starts` 里；AdaptivePy 的输入和输出在 `adaptive/round_<k>/` 里。程序会核对 AdaptivePy 给出的帧编号，对不上就停下报错。
+
+选项：`--adaptive-policy`（`least_counts` 或 `random`）、`--adaptive-clusters`（聚类数，默认 20）、`--full-save-ps`（完整坐标的保存间隔，默认 10 ps）。
+
 ## 下一步
 
-1. 把 AdaptivePy（Shukla 课题组的自适应采样包）加成普通 MD 阶段的可选模式：每轮从它挑出的帧重新起跑，而不是接着原轨迹跑。这需要保存包含水的完整坐标。
+1. 在 GPU 上用很短的参数验证自适应模式（AdaptivePy 只在用户的电脑上安装过）。
 2. 加一个 LLM 层：把用户的自然语言要求转换成 `SetupOptions` 和其他设置，用通俗的话汇报进度。
 3. 做成异步的 agent 窗口：MD 在后台运行，定期汇报进度。

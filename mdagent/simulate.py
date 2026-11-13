@@ -94,15 +94,34 @@ def run_segment(
     production_ns: float,
     settings: MDSettings,
     log: Callable[[str], None] = print,
+    start_frame: tuple[Path, int] | None = None,
+    full_interval_ps: float | None = None,
 ) -> None:
-    """Run one part of one replica. Part k > 0 starts from the end state of part k - 1."""
+    """Run one part of one replica.
+
+    By default, part k > 0 starts from the end state of part k - 1. With
+    start_frame = (full-system trajectory, frame index), the part starts from
+    that frame instead, with new random velocities (adaptive sampling).
+    With full_interval_ps, the part also saves all atoms (with water) every
+    full_interval_ps, so later parts can start from those frames.
+    """
     s = settings
     resume = part > 0
     state_path = part_path(out_dir, replica, part, ".state.xml")
     steps_per_ps = round(1000.0 / s.timestep_fs)
     sim = make_simulation(files, s, seed)
 
-    if resume:
+    if start_frame is not None:
+        import mdtraj as md
+
+        dcd, frame = start_frame
+        traj = md.load_frame(str(dcd), frame, top=str(out_dir / "solvated.pdb"))
+        box = [openmm.Vec3(*v) for v in traj.unitcell_vectors[0]]
+        sim.context.setPeriodicBoxVectors(*box)
+        sim.context.setPositions(traj.xyz[0] * unit.nanometer)
+        sim.context.setVelocitiesToTemperature(s.temperature_k * unit.kelvin, seed)
+        log(f"replica {replica}: part {part} starts from frame {frame} of {dcd.name}")
+    elif resume:
         sim.loadState(str(part_path(out_dir, replica, part - 1, ".state.xml")))
     else:
         t0 = time.time()
@@ -117,6 +136,9 @@ def run_segment(
     sim.reporters.append(app.DCDReporter(
         str(part_path(out_dir, replica, part, ".dcd")), interval,
         atomSubset=protein_atom_indices(files.topology)))
+    if full_interval_ps:
+        sim.reporters.append(app.DCDReporter(
+            str(part_path(out_dir, replica, part, ".full.dcd")), round(full_interval_ps * steps_per_ps)))
     sim.reporters.append(app.StateDataReporter(
         str(part_path(out_dir, replica, part, ".csv")), interval,
         time=True, potentialEnergy=True, temperature=True, density=True, speed=True))
