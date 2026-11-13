@@ -147,7 +147,13 @@ def judge_pooled(report: ResidueReport, min_total_flips: int) -> None:
     """Adaptive mode: trajectory segments start from chosen frames, so their states
     differ on purpose. Only the total number of flips over all segments counts."""
     total = sum(report.transitions)
-    if total == 0:
+    states = sorted(set(report.dominant))
+    if total == 0 and len(states) > 1:
+        report.verdict = "no_flip"
+        report.reason = (f"chi1 was seen in more than one state ({', '.join(states)}), but it did not flip "
+                         "inside any trajectory segment. The different states come from where the segments "
+                         "started, so plain MD did not show how often chi1 changes state.")
+    elif total == 0:
         report.verdict = "no_flip"
         report.reason = ("chi1 did not flip in any trajectory segment. It may be trapped, "
                          "or it may have only one stable state.")

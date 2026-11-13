@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from mdagent.adaptive import read_seeds
+from mdagent.adaptive import pick_diverse, read_seeds
 from mdagent.diagnose import ResidueReport, judge_pooled
 
 DATA = Path(__file__).resolve().parent / "data"
@@ -30,6 +30,22 @@ def test_read_seeds_checks_traj_frame_and_global_index(tmp_path):
     _write_seeds(csv, [(1, 7, 17)])             # Frame beyond the end of trajectory 1.
     with pytest.raises(ValueError):
         read_seeds(csv, [10, 5])
+
+
+def test_pick_diverse_avoids_neighbouring_frames():
+    # Frames 6 and 7 are almost the same; frame 30 is far away.
+    feats = np.zeros((40, 2))
+    feats[30] = [1.0, 1.0]
+    feats[7] = [0.01, 0.0]
+    assert pick_diverse([6, 7, 30, 6], feats, 2) == [6, 30]
+    assert pick_diverse([6, 6], feats, 2) == [6, 6]   # Only one distinct candidate: reuse it.
+
+
+def test_judge_pooled_explains_states_without_flips():
+    r = ResidueReport("A", 78, "ILE", [0, 0, 0], [{} for _ in range(3)], ["g-", "t", "g-"])
+    judge_pooled(r, min_total_flips=8)
+    assert r.verdict == "no_flip" and "more than one state (g-, t)" in r.reason
+    assert "only one stable state" not in r.reason
 
 
 def test_judge_pooled_uses_total_flips_only():

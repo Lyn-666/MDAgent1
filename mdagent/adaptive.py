@@ -30,6 +30,8 @@ from .simulate import part_path
 
 POLICIES = ("least_counts", "random")
 INSTALL = "pip install adaptivepy-sampling"
+FRAMES_PER_CLUSTER = 5
+CANDIDATES_PER_START = 3
 
 
 @dataclass
@@ -106,6 +108,24 @@ def read_seeds(seeds_csv: Path, frame_counts: list[int]) -> list[tuple[int, int]
     return seeds
 
 
+def pick_diverse(candidates: list[int], feats: np.ndarray, n: int) -> list[int]:
+    """Choose n of the candidate rows that differ most from each other.
+
+    The first candidate (AdaptivePy's top choice) is always kept. Each next pick is
+    the candidate farthest from all picks so far (distance in feature space).
+    Identical frames are not picked twice unless there are fewer than n distinct ones.
+    """
+    unique = list(dict.fromkeys(candidates))
+    picked = [unique[0]]
+    while len(picked) < min(n, len(unique)):
+        rest = [c for c in unique if c not in picked]
+        dist = [min(np.linalg.norm(feats[c] - feats[p]) for p in picked) for c in rest]
+        picked.append(rest[int(np.argmax(dist))])
+    while len(picked) < n:  # Fewer distinct candidates than replicas: reuse them in turn.
+        picked.append(picked[len(picked) % len(unique)])
+    return picked
+
+
 def choose_starts(
     run_dir: Path,
     round_index: int,
@@ -116,7 +136,12 @@ def choose_starts(
     random_seed: int,
     log: Callable[[str], None] = print,
 ) -> list[tuple[int, int, int]]:
-    """Ask AdaptivePy for n_starts frames. Returns (replica, part, frame) for each."""
+    """Choose n_starts starting frames. Returns (replica, part, frame) for each.
+
+    AdaptivePy proposes CANDIDATES_PER_START times more frames than needed; we keep
+    the ones that differ most from each other, so that replicas do not start from
+    nearly the same structure.
+    """
     check_installed()
     from adaptivepy import run_adaptive_sampling
 
@@ -127,16 +152,23 @@ def choose_starts(
     for i, f in enumerate(feats):
         np.save(feat_dir / f"traj_{i:03d}.npy", f)  # Zero-padded: file order equals list order.
     counts = [len(f) for f in feats]
-    n_clusters = max(2, min(s.n_clusters, sum(counts) // 2))
+    # About FRAMES_PER_CLUSTER frames per cluster. With too many clusters, most clusters
+    # hold one or two frames, and "least visited" no longer means anything.
+    n_clusters = max(2, min(s.n_clusters, sum(counts) // FRAMES_PER_CLUSTER))
+    n_candidates = CANDIDATES_PER_START * n_starts
     config = d / "config.yaml"
-    _write_config(config, feat_dir, out_dir, s, n_clusters, n_starts, random_seed)
+    _write_config(config, feat_dir, out_dir, s, n_clusters, n_candidates, random_seed)
     run_adaptive_sampling(str(config))
 
     seeds = read_seeds(out_dir / s.policy / "seeds.csv", counts)
-    starts = [(*segments[t], fr) for t, fr in seeds]
-    while len(starts) < n_starts:  # Fewer seeds than replicas: reuse them in turn.
-        starts.append(starts[len(starts) % len(seeds)])
-    starts = starts[:n_starts]
-    log(f"AdaptivePy ({s.policy}, {n_clusters} clusters) chose the starting frames: "
+    offsets = np.concatenate([[0], np.cumsum(counts)])
+    rows = [int(offsets[t] + fr) for t, fr in seeds]
+    chosen = pick_diverse(rows, np.vstack(feats), n_starts)
+    starts = []
+    for g in chosen:
+        t = int(np.searchsorted(offsets, g, side="right") - 1)
+        starts.append((*segments[t], int(g - offsets[t])))
+    log(f"AdaptivePy ({s.policy}, {n_clusters} clusters) proposed {len(seeds)} frames. "
+        "Starting frames, chosen to differ most from each other: "
         + ", ".join(f"replica {r} part {p} frame {fr}" for r, p, fr in starts) + ".")
     return starts
