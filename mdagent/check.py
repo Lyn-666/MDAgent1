@@ -54,6 +54,9 @@ class CheckResult:
     findings: list[Finding] = field(default_factory=list)
     remove_residues: list[ResKey] = field(default_factory=list)   # Tag residues to delete before building.
     chains: list[str] = field(default_factory=list)                # Protein chains that are kept.
+    # Per chain: (protein continues before the first residue, protein continues after the last residue).
+    # The build caps such ends with ACE / NME by default.
+    cap_ends: dict = field(default_factory=dict)
 
     @property
     def problems(self) -> list[Finding]:
@@ -311,6 +314,7 @@ def _check_chain(p: _Pdb, c: str, res: CheckResult, keep_tags: bool, uniprot: st
     # Which residues belong to the reference sequence.
     refs = [d for d in p.dbref if d["chain"] == c and d["db"] in ("UNP", "UNIPROT")]
     in_ref: set = set()
+    ref_pos: dict = {}      # residue key -> (position in the reference, reference length)
     if uniprot and not refs:
         refs = [dict(chain=c, begin=numbering[0][0], end=numbering[-1][0], acc=uniprot, db_begin=None,
                      db_end=None, _user=True)]
@@ -337,6 +341,7 @@ def _check_chain(p: _Pdb, c: str, res: CheckResult, keep_tags: bool, uniprot: st
             if best and not best["unexplained"]:
                 break
         in_ref |= best["in_ref"]
+        ref_pos.update({k: (v, best["ref_len"]) for k, v in best["pos"].items()})
         label = f"UniProt {best['name']}" + (" (an isoform)" if best["name"] != d["acc"] else "")
         if best["how"] == "aligned" and d.get("db_begin") is not None and d.get("_user") is None:
             res.note(f"Chain {c}: the residue numbering in the file's reference record does not fit {label}; "
@@ -413,6 +418,18 @@ def _check_chain(p: _Pdb, c: str, res: CheckResult, keep_tags: bool, uniprot: st
         if n_term or c_term:
             res.note(f"Chain {c}: {n_term} residue(s) missing at the start and {c_term} at the end; chain ends are "
                      "not modeled.")
+        # Is the first / last residue with coordinates the real end of the protein?
+        first_key, last_key = protein_keys[first], protein_keys[last]
+        if first_key in ref_pos and last_key in ref_pos:
+            (p_first, length), (p_last, _) = ref_pos[first_key], ref_pos[last_key]
+            cap_n, cap_c = p_first > 1, p_last < length
+            res.note(f"Chain {c} covers residues {p_first}-{p_last} of the {length}-residue reference. "
+                     + _ends_text(cap_n, cap_c))
+        else:
+            cap_n, cap_c = n_term > 0, c_term > 0
+            if cap_n or cap_c:
+                res.note(f"Chain {c}: " + _ends_text(cap_n, cap_c))
+        res.cap_ends[c] = (cap_n, cap_c)
     long = [g for g in gaps if len(g) > LONG_GAP]
     short = [g for g in gaps if len(g) <= LONG_GAP]
     if long:
@@ -447,7 +464,7 @@ def _compare(p: _Pdb, c: str, names: dict, numbering: list, d: dict, ref_seq: st
     """
     keys = [k for k in numbering if d["begin"] is None or d["begin"] <= k[0] <= d["end"]]
     if not keys:
-        return dict(mism=[], unexplained=[], in_ref=set(), compared=0, first=0, last=0)
+        return dict(mism=[], unexplained=[], in_ref=set(), compared=0, first=0, last=0, pos={}, ref_len=0)
     if aligned:
         seq = "".join(THREE_TO_ONE.get(names[k] or "", "X") for k in keys)
         off = _best_offset(seq, ref_seq)
@@ -467,7 +484,16 @@ def _compare(p: _Pdb, c: str, names: dict, numbering: list, d: dict, ref_seq: st
             text = f"{ref}{k[0]}{mine}"
             (mism if why else unexplained).append(text + (f" ({why[2].lower()})" if why else ""))
     return dict(mism=mism, unexplained=unexplained, in_ref=set(keys), compared=len(keys),
-                first=min(pos.values()), last=max(pos.values()))
+                first=min(pos.values()), last=max(pos.values()), pos=pos, ref_len=len(ref_seq))
+
+
+def _ends_text(cap_n: bool, cap_c: bool) -> str:
+    parts = []
+    parts.append("The N end continues in the real protein, so it gets a neutral ACE cap." if cap_n
+                 else "The N end is the real start of the protein, so it stays charged (NH3+).")
+    parts.append("The C end continues in the real protein, so it gets a neutral NME cap." if cap_c
+                 else "The C end is the real end of the protein, so it stays charged (COO-).")
+    return " ".join(parts) + " (default --termini auto)"
 
 
 def _best_offset(chain_seq: str, ref: str) -> int:

@@ -68,6 +68,10 @@ class RunPlan(BaseModel):
                                                         "(tags are removed).")
     uniprot: Optional[str] = Field(None, description="UniProt accession of the reference sequence, only for files "
                                                      "that have none.")
+    termini: Optional[Literal["auto", "charged", "capped"]] = Field(
+        None, description="Chain ends. auto (default): neutral ACE/NME caps where the real protein continues "
+                          "beyond the structure, charged ends otherwise. charged: always NH3+/COO-. capped: always "
+                          "ACE/NME.")
     accept_problems: Optional[bool] = Field(
         None, description="True only when the user explicitly says to go on despite the problems that the "
                           "structure check reported.")
@@ -117,7 +121,7 @@ FLAGS = [  # RunPlan field -> command line option
     ("first_ns", "--first-ns"), ("extend_ns", "--extend-ns"), ("max_ns", "--max-ns"),
     ("no_flip_patience_ns", "--no-flip-patience-ns"), ("sampling", "--sampling"),
     ("enhanced_ns", "--enhanced-ns"), ("enhanced_replicas", "--enhanced-replicas"),
-    ("chains", "--chains"), ("uniprot", "--uniprot"),
+    ("chains", "--chains"), ("uniprot", "--uniprot"), ("termini", "--termini"),
 ]
 SWITCHES = [("check_protonation", "--check-protonation"), ("no_enhanced_sampling", "--no-enhanced-sampling"),
             ("keep_tags", "--keep-tags"), ("accept_problems", "--accept-problems")]

@@ -82,3 +82,25 @@ def test_dodecahedron_width_is_checked():
     from mdagent.build import _min_box_width_nm
     b = build_system(FRAGMENT, SetupOptions(box_shape="dodecahedron", **FAST))
     assert _min_box_width_nm(b.topology.getPeriodicBoxVectors()) >= 1.1 * 2 * 1.0
+
+
+@pytest.mark.parametrize("ff", ["amber14", "charmm36m"])
+def test_terminal_caps_build_with_both_force_fields(ff):
+    capped = build_system(FRAGMENT, SetupOptions(forcefield=ff, padding_nm=0.8, termini="capped"))
+    charged = build_system(FRAGMENT, SetupOptions(forcefield=ff, padding_nm=0.8, termini="charged"))
+    first = lambda b: next(r for r in b.topology.residues() if r.name not in ("HOH", "NA", "CL"))
+    if ff.startswith("amber"):
+        assert first(capped).name == "ACE"                     # Amber: caps are residues of their own.
+    else:
+        names = {a.name for a in first(capped).atoms()}        # CHARMM: caps are part of the end residue.
+        assert first(capped).name == "GLU" and {"CAY", "CY", "OY"} <= names
+    assert not any(a.name == "OXT" for a in capped.topology.atoms())
+    assert any(a.name == "OXT" for a in charged.topology.atoms())
+    assert "Chain ends capped" in capped.report() and "charged" in charged.report()
+
+
+def test_termini_auto_caps_only_ends_that_continue():
+    pdb = Path(__file__).resolve().parents[1] / "examples" / "181L.pdb"
+    b = build_system(pdb, SetupOptions(**FAST), cap_ends={"A": (False, True)})
+    res = [r for r in b.topology.residues() if r.name not in ("HOH", "NA", "CL")]
+    assert res[0].name == "MET" and res[-1].name == "NME"

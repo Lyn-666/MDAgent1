@@ -60,6 +60,7 @@ FORCEFIELDS = {
 }
 CATIONS = ("Na+", "K+")
 BOX_SHAPES = ("cube", "dodecahedron", "octahedron")
+TERMINI = ("auto", "charged", "capped")
 LONG_GAP = 5          # A modeled gap longer than this gets a warning.
 NEAR_TARGET = 4       # A modeled gap within this many residues of the target gets a warning.
 MIN_BOX_FACTOR = 1.1  # The box must be at least 1.1 x (2 x cutoff) wide.
@@ -81,6 +82,10 @@ class SetupOptions:
     keep_tags: bool = False              # Keep tag residues at the chain ends.
     uniprot: str | None = None           # Reference sequence when the file has none.
     accept_problems: bool = False        # Build even if the structure check found problems.
+    # Chain ends. "auto": a neutral cap (ACE at the N end, NME at the C end) where the structure is
+    # missing residues at that end, so the end is not the real end of the protein; charged otherwise.
+    # "charged": always NH3+ / COO-. "capped": always ACE / NME.
+    termini: str = "auto"
 
     def validate(self) -> None:
         if self.forcefield not in FORCEFIELDS:
@@ -93,6 +98,8 @@ class SetupOptions:
             raise ValueError("Ion concentration must be between 0 and 2 M.")
         if not 0 < self.ph < 14:
             raise ValueError("pH must be between 0 and 14.")
+        if self.termini not in TERMINI:
+            raise ValueError(f"Unknown termini choice {self.termini!r}. Choose from {list(TERMINI)}.")
         if self.padding_nm < 0.8:
             raise ValueError("Padding below 0.8 nm lets the protein interact with its periodic image.")
 
@@ -134,14 +141,18 @@ def protein_atom_indices(topology: app.Topology) -> list[int]:
     out = []
     for res in topology.residues():
         names = {a.name for a in res.atoms()}
-        if res.name in _PROTEIN or {"N", "CA", "C"} <= names:
+        if res.name in _PROTEIN or res.name in ("ACE", "NME") or {"N", "CA", "C"} <= names:
             out.extend(a.index for a in res.atoms())
     return sorted(out)
 
 
-def _gap_report(fixer: PDBFixer, target: set[tuple[str, int]], notes, warnings) -> None:
-    """Describe missing residues, and drop the ones at chain ends."""
+def _gap_report(fixer: PDBFixer, target: set[tuple[str, int]], notes, warnings) -> set:
+    """Describe missing residues, and drop the ones at chain ends.
+
+    Returns the chain ends that miss residues, as (chain ID, "N" or "C").
+    """
     chains = list(fixer.topology.chains())
+    open_ends = set()
     for key in sorted(fixer.missingResidues):
         names = fixer.missingResidues[key]
         chain = chains[key[0]]
@@ -161,6 +172,7 @@ def _gap_report(fixer: PDBFixer, target: set[tuple[str, int]], notes, warnings) 
         if not modeled:
             notes.append(f"Missing {span}: not modeled, because chain ends are usually disordered.")
             del fixer.missingResidues[key]
+            open_ends.add((chain.id, "N" if key[1] == 0 else "C"))
             continue
         notes.append(f"Missing {span}: modeled by PDBFixer.")
         near = any(c == chain.id and first - NEAR_TARGET <= r <= last + NEAR_TARGET for c, r in target)
@@ -169,6 +181,76 @@ def _gap_report(fixer: PDBFixer, target: set[tuple[str, int]], notes, warnings) 
             warnings.append(
                 f"The modeled gap in {span} may be unreliable because {reason}. "
                 "Consider a structure without this gap, for example an AlphaFold model.")
+    return open_ends
+
+
+def _add_caps(fixer: PDBFixer, opts: "SetupOptions", open_ends: set, cap_ends: dict | None, notes) -> None:
+    """Put ACE / NME caps at the chain ends chosen by opts.termini.
+
+    cap_ends (from the structure check) says, per chain, whether residues of the protein itself are
+    missing at the N and C end; tags do not count. Without it, missing residues at an end count.
+    """
+    if opts.termini == "charged":
+        notes.append("Chain ends: charged (NH3+ at the N end, COO- at the C end), as asked.")
+        return
+    capped = []
+    for ci, chain in enumerate(fixer.topology.chains()):
+        residues = list(chain.residues())
+        if not residues or not any(r.name in _PROTEIN for r in residues):
+            continue
+        for end, key in (("N", (ci, 0)), ("C", (ci, len(residues)))):
+            if opts.termini == "capped":
+                cap = True
+            elif cap_ends is not None and chain.id in cap_ends:
+                cap = cap_ends[chain.id][0 if end == "N" else 1]
+            else:
+                cap = (chain.id, end) in open_ends
+            if cap:
+                fixer.missingResidues[key] = ["ACE"] if end == "N" else ["NME"]
+                capped.append(f"{chain.id} {end}")
+    if capped:
+        notes.append(f"Chain ends capped with ACE (N end) / NME (C end), because the protein continues beyond "
+                     f"them: {', '.join(capped)}. Other chain ends are charged (NH3+ / COO-).")
+    else:
+        notes.append("Chain ends: charged (NH3+ at the N end, COO- at the C end); they are the real ends.")
+
+
+# Atom names of the caps when they become part of the end residue (CHARMM patches ACE and CT3).
+_CHARMM_ACE = {"C": "CY", "O": "OY", "CH3": "CAY", "H1": "HY1", "H2": "HY2", "H3": "HY3"}
+_CHARMM_NME = {"N": "NT", "H": "HNT", "C": "CAT", "H1": "HT1", "H2": "HT2", "H3": "HT3"}
+
+
+def _merge_caps(topology: app.Topology) -> app.Topology:
+    """CHARMM in OpenMM describes caps as patches on the end residue, not as residues of their own.
+
+    Move the atoms of each ACE into the residue after it, and the atoms of each NME into the residue
+    before it, with CHARMM atom names. The order of atoms does not change, so positions still fit.
+    """
+    new = app.Topology()
+    new.setPeriodicBoxVectors(topology.getPeriodicBoxVectors())
+    atom_map = {}
+    for chain in topology.chains():
+        c = new.addChain(chain.id)
+        pending = []      # ACE atoms waiting for the next residue
+        last = None
+        for res in chain.residues():
+            if res.name == "ACE":
+                pending = list(res.atoms())
+                continue
+            if res.name == "NME" and last is not None:
+                for a in res.atoms():
+                    atom_map[a] = new.addAtom(_CHARMM_NME.get(a.name, a.name), a.element, last)
+                continue
+            r = new.addResidue(res.name, c, res.id, res.insertionCode)
+            for a in pending:
+                atom_map[a] = new.addAtom(_CHARMM_ACE.get(a.name, a.name), a.element, r)
+            pending = []
+            for a in res.atoms():
+                atom_map[a] = new.addAtom(a.name, a.element, r, a.id)
+            last = r
+    for a, b in topology.bonds():
+        new.addBond(atom_map[a], atom_map[b])
+    return new
 
 
 def _delete_residues(fixer: PDBFixer, keys: list[tuple[str, int, str]]) -> None:
@@ -213,6 +295,7 @@ def build_system(
     options: SetupOptions | None = None,
     target: list[tuple[str, int]] | None = None,
     remove_residues: list[tuple[str, int, str]] | None = None,
+    cap_ends: dict | None = None,
 ) -> BuiltSystem:
     opts = options or SetupOptions()
     opts.validate()
@@ -236,10 +319,11 @@ def build_system(
         notes.append(f"Removed non-protein molecules: {', '.join(removed)}.")
 
     fixer.findMissingResidues()
-    _gap_report(fixer, target_set, notes, warnings)
+    open_ends = _gap_report(fixer, target_set, notes, warnings)
     _chain_break_check(fixer, warnings)
     if not fixer.missingResidues:
         notes.append("No missing residues inside the chains.")
+    _add_caps(fixer, opts, open_ends, cap_ends, notes)  # After the gap checks: caps are not gaps.
 
     fixer.findNonstandardResidues()
     if fixer.nonstandardResidues:
@@ -315,6 +399,8 @@ def build_system(
     if opts.hydrogen_mass_amu:
         kwargs["hydrogenMass"] = opts.hydrogen_mass_amu * unit.amu
         notes.append(f"Hydrogen mass set to {opts.hydrogen_mass_amu:g} amu.")
+    if opts.forcefield.startswith("charmm") and any(r.name in ("ACE", "NME") for r in modeller.topology.residues()):
+        modeller.topology = _merge_caps(modeller.topology)
     system = forcefield.createSystem(
         modeller.topology,
         nonbondedMethod=app.PME,

@@ -77,7 +77,7 @@ def _structure_check(args):
     return check
 
 
-def _build_from_pdb(args, keys, out, remove_residues=None):
+def _build_from_pdb(args, keys, out, remove_residues=None, cap_ends=None):
     from .build import SetupOptions, build_system
     from .protonation import parse_overrides
     from .simulate import write_inputs
@@ -96,11 +96,12 @@ def _build_from_pdb(args, keys, out, remove_residues=None):
         keep_tags=args.keep_tags,
         uniprot=args.uniprot,
         accept_problems=args.accept_problems,
+        termini=args.termini,
     )
     setup.validate()
     print("Building the system" + (" (checking protonation states with PROPKA)" if setup.check_protonation else "")
           + " ...")
-    built = build_system(args.pdb, setup, keys, remove_residues)
+    built = build_system(args.pdb, setup, keys, remove_residues, cap_ends)
     report = built.report()
     print("\n".join("  " + line for line in report.splitlines()))
     write_inputs(built, out)
@@ -112,7 +113,7 @@ def _build_from_pdb(args, keys, out, remove_residues=None):
 # Options that only matter when MDAgent builds the system from a PDB file, with their defaults.
 SETUP_DEFAULTS = {"forcefield": "charmm36m", "ph": 7.0, "ion_conc": 0.15, "cation": "Na+", "padding_nm": 1.0,
                   "box_shape": "cube", "check_protonation": False, "protonation": None, "chains": None,
-                  "keep_tags": False, "uniprot": None, "accept_problems": False}
+                  "keep_tags": False, "uniprot": None, "accept_problems": False, "termini": "auto"}
 
 
 def cmd_run(args) -> int:
@@ -194,7 +195,7 @@ def cmd_run(args) -> int:
                   "left out of the target: " + ", ".join(map(str, missing)))
 
     if check is not None:
-        built, setup = _build_from_pdb(args, keys, out, check.remove_residues)
+        built, setup = _build_from_pdb(args, keys, out, check.remove_residues, check.cap_ends)
 
     loop = LoopSettings(
         first_ns=min(args.first_ns, args.max_ns),
@@ -299,6 +300,10 @@ def build_parser() -> argparse.ArgumentParser:
                                      "tleap with GAFF ligand parameters. Use it as it is; needs --inpcrd.")
     r.add_argument("--inpcrd", help="Coordinates and box for --prmtop (.rst7/.inpcrd).")
     _add_check_options(r)
+    r.add_argument("--termini", default="auto", choices=["auto", "charged", "capped"],
+                   help="Chain ends. auto (default): a neutral cap (ACE / NME) where the real protein continues "
+                        "beyond the structure, charged NH3+ / COO- at real ends. charged: always charged. "
+                        "capped: always capped.")
     r.add_argument("--accept-problems", action="store_true",
                    help="Build and run even if the structure check finds problems.")
     r.add_argument("--equil-ps", type=float, default=600.0,

@@ -114,3 +114,11 @@ def test_report_uses_project_relative_path_and_explains_caps(root, tmp_path):
     assert r.report().startswith("Structure check of structures/capped.pdb:")
     assert any("Terminal cap(s) NH2" in t for t in _texts(r, "note"))
     assert not any("NH2" in t for t in _texts(r, "note") if t.startswith("Other molecule"))
+
+
+def test_cap_ends_follow_the_reference_sequence(root):
+    assert check_structure(DATA / "4HJO.pdb", root=root).cap_ends == {"A": (True, True)}       # Kinase domain only.
+    assert check_structure(DATA / "4OBE.pdb", chains=["A"], root=root).cap_ends == {"A": (False, True)}
+    r = check_structure(REPO / "examples" / "181L.pdb", root=root)
+    assert r.cap_ends == {"A": (False, True)}   # Starts at Met1; residues 163-164 are missing.
+    assert any("covers residues 1-162 of the 164-residue reference" in t for t in _texts(r, "note"))
