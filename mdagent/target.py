@@ -80,3 +80,24 @@ def resolve_target(target: Target, pdb_path: str | Path) -> list[ResidueKey]:
     if not keys:
         raise ValueError(f"No protein residues match the target: {target.describe()}.")
     return keys
+
+
+def pdb_summary(pdb_path: str | Path) -> str:
+    """Chains, residue ranges and non-protein molecules in the PDB file, for the model."""
+    top = md.load_topology(str(pdb_path))
+    lines = []
+    for chain in top.chains:
+        prot = [r for r in chain.residues if r.is_protein]
+        if prot:
+            lines.append(f"Chain {chain.chain_id}: protein residues {prot[0].resSeq}-{prot[-1].resSeq} "
+                         f"({len(prot)} residues)")
+    others: dict[str, int] = {}
+    for r in top.residues:
+        if not r.is_protein and not r.is_water:
+            others[r.name] = others.get(r.name, 0) + 1
+    if others:
+        lines.append("Non-protein molecules (residue name x count): "
+                     + ", ".join(f"{k} x{v}" for k, v in sorted(others.items())))
+    else:
+        lines.append("No ligands or other non-protein molecules.")
+    return "\n".join(lines)

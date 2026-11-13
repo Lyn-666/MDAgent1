@@ -22,5 +22,5 @@ MDAgent1 是一个 MD agent。用户给出蛋白 PDB 和一个目标区域。age
 - 运行测试：`pytest -q tests`（约 1 分钟，含一个在 CPU 上跑小肽段的测试）；`pytest -q tests -m "not slow"` 只跑快速测试。
 - 用户在自己的电脑上用 GPU 跑 MD（约每天 470 ns）。云端会话通常没有 GPU，只适合跑很短的流程测试。
 - 用户的 conda 环境里不要装 openmm-plumed：conda-forge 上的版本会把 OpenMM 降到 8.2 并丢掉 CUDA，而且其中的 PLUMED 不带 OPES。
-- AdaptivePy 模式已加入（`--sampling adaptive`），云端装不了 AdaptivePy，测试用替身模块；真实验证要在用户电脑上做。LLM 层（`ask`）已加入，云端没有 API 密钥，测试用假的规划函数；真实试用要在用户电脑上做。之后是 agent 窗口（见 README 的“下一步”）。
+- AdaptivePy 模式已加入（`--sampling adaptive`），云端装不了 AdaptivePy，测试用替身模块；真实验证要在用户电脑上做。LLM 层（`ask`）已加入，云端没有 API 密钥，测试用假的规划函数；真实试用要在用户电脑上做。用户没有 API 密钥，所以 agent 窗口用 Claude Code 本身实现：项目命令 `/md`（一句话转成 `mdagent run`，确认后用 nohup 后台启动）和 `/md-status`（查看进度），在 `.claude/commands/` 里。`mdagent info --pdb` 打印 PDB 概况。
 - 开发阶段用户希望测试运行很短（几分钟），给运行命令时用很小的 `--first-ns`、`--max-ns`、`--enhanced-ns`。

@@ -20,6 +20,8 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
+from .target import pdb_summary  # noqa: F401  (used by ask, and re-exported)
+
 MODEL = "claude-opus-5-5"
 
 
@@ -78,29 +80,6 @@ Rules:
 - If the request needs something these settings cannot do, say so in `questions`.
 - If `questions` is not empty, the run will not start. Ask only what is needed.
 - Write `summary` and `questions` in the language of the user's request."""
-
-
-def pdb_summary(pdb_path: str | Path) -> str:
-    """Chains, residue ranges and non-protein molecules in the PDB file, for the model."""
-    import mdtraj as md
-
-    top = md.load_topology(str(pdb_path))
-    lines = []
-    for chain in top.chains:
-        prot = [r for r in chain.residues if r.is_protein]
-        if prot:
-            lines.append(f"Chain {chain.chain_id}: protein residues {prot[0].resSeq}-{prot[-1].resSeq} "
-                         f"({len(prot)} residues)")
-    others: dict[str, int] = {}
-    for r in top.residues:
-        if not r.is_protein and not r.is_water:
-            others[r.name] = others.get(r.name, 0) + 1
-    if others:
-        lines.append("Non-protein molecules (residue name x count): "
-                     + ", ".join(f"{k} x{v}" for k, v in sorted(others.items())))
-    else:
-        lines.append("No ligands or other non-protein molecules.")
-    return "\n".join(lines)
 
 
 def make_plan(request: str, summary: str, client=None) -> RunPlan:

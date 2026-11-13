@@ -132,7 +132,24 @@ agent 只负责跑增强采样和保存数据，不做分析。输出在运行�
 
 选项：`--adaptive-policy`（`least_counts` 或 `random`）、`--adaptive-clusters`（聚类数，默认 20）、`--full-save-ps`（完整坐标的保存间隔，默认 10 ps）。
 
-## 用一句话描述要求（`ask`）
+## 用 Claude Code 当 agent 窗口（不需要 API 密钥）
+
+在自己的电脑上，先激活环境，再在 MDAgent1 文件夹里打开 Claude Code：
+
+```bash
+conda activate mdagent
+cd ~/Desktop/MDAgent1
+claude
+```
+
+然后在 Claude Code 里输入：
+
+- `/md 用 Amber，看苯周围的口袋，先检查质子化，开发测试`：Claude Code 读取 PDB 概况，把要求转成 `mdagent run` 命令，列出设置请你确认，确认后用 `nohup` 在后台启动。
+- `/md-status`：查看进度。运行中途停了时，它会问你要不要续跑。
+
+模拟在后台运行，关掉 Claude Code 或终端都不会停。Claude Code 不分析模拟结果。命令的内容在 `.claude/commands/` 里。
+
+## 用一句话描述要求（`ask`，需要 API 密钥）
 
 ```bash
 pip install -e ".[llm]"
@@ -148,5 +165,4 @@ Claude（`claude-opus-5-5`）只负责填一张固定的设置表，表里每一
 
 ## 下一步
 
-1. 在用户电脑上用真实的 API 密钥试用 `ask`。
-2. 做成异步的 agent 窗口：MD 在后台运行，窗口里定期汇报进度，用户可以随时提问。
+1. 在用户电脑上试用 Claude Code 窗口（`/md`、`/md-status`）。

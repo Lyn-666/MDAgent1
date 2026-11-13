@@ -272,6 +272,10 @@ def build_parser() -> argparse.ArgumentParser:
     d.add_argument("--run", required=True)
     d.set_defaults(func=cmd_diagnose)
 
+    i = sub.add_parser("info", help="Show the chains, residue ranges and ligands of a PDB file.")
+    i.add_argument("--pdb", required=True)
+    i.set_defaults(func=cmd_info)
+
     a = sub.add_parser("ask", help="Describe the run in plain language. Claude turns it into settings; "
                                    "you confirm before anything runs.")
     a.add_argument("request", help='For example: "use CHARMM, look at the pocket around benzene, 0.1 M KCl".')
@@ -286,3 +290,10 @@ def cmd_ask(args) -> int:
     from .llm import ask
 
     return ask(args.request, args.pdb, args.out, assume_yes=args.yes)
+
+
+def cmd_info(args) -> int:
+    from .target import pdb_summary
+
+    print(pdb_summary(args.pdb))
+    return 0
