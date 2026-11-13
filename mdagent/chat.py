@@ -7,6 +7,9 @@ only reads the conversation and proposes one action: answer, start a new run,
 stop a run, or resume a run. A proposed start, stop or resume appears as a card
 with a button; nothing happens until the user clicks it.
 
+Each conversation has its own history and its own list of runs, saved in
+runs/.chats/<id>.json, so different cases stay apart.
+
 Runs are separate processes in their own process group. Their output goes to
 runs/<name>.log, and their process ID to runs/<name>.pid. Closing the page or
 stopping the chat server does not stop them. A run ends when it finishes, or
@@ -186,7 +189,7 @@ class Runs:
         run_json = self.dir / name / "run.json"
         if run_json.exists():
             d = json.loads(run_json.read_text())
-            info["plain_md_ns_per_replica"] = sum(d.get("rounds_ns", []))
+            info["plain_md_ns_per_replica"] = round(sum(d.get("rounds_ns", [])), 6)
             info["replicas"] = d.get("n_replicas")
         return info
 
@@ -245,16 +248,68 @@ def file_summary(root: Path, rel: Path) -> str:
     return _summary_cache[key]
 
 
-def build_prompt(root: Path, runs: Runs, history: list[dict], message: str) -> str:
+@dataclass
+class Conversation:
+    id: str
+    title: str = ""
+    created: float = 0.0
+    updated: float = 0.0
+    history: list = field(default_factory=list)   # [{"role": "user"|"assistant", "text": ...}]
+    runs: list = field(default_factory=list)      # Names of runs started in this conversation.
+
+
+class ChatStore:
+    """Conversations, one JSON file each in runs/.chats/. They survive a restart of the server."""
+
+    def __init__(self, folder: Path):
+        self.folder = folder
+        self.chats: dict[str, Conversation] = {}
+        if folder.exists():
+            for f in folder.glob("*.json"):
+                try:
+                    c = Conversation(**json.loads(f.read_text()))
+                    self.chats[c.id] = c
+                except (ValueError, TypeError):
+                    pass  # A broken file should not stop the chat.
+
+    def list(self) -> list[Conversation]:
+        return sorted(self.chats.values(), key=lambda c: -c.updated)
+
+    def create(self) -> Conversation:
+        now = time.time()
+        c = Conversation(id=uuid.uuid4().hex[:12], created=now, updated=now)
+        self.chats[c.id] = c
+        return c
+
+    def get(self, chat_id: str | None) -> Conversation:
+        if chat_id and chat_id in self.chats:
+            return self.chats[chat_id]
+        return self.create()
+
+    def save(self, c: Conversation) -> None:
+        self.folder.mkdir(parents=True, exist_ok=True)
+        c.updated = time.time()
+        tmp = self.folder / f"{c.id}.tmp"
+        tmp.write_text(json.dumps(c.__dict__, ensure_ascii=False, indent=1))
+        tmp.replace(self.folder / f"{c.id}.json")
+
+
+def build_prompt(root: Path, runs: Runs, conv: Conversation, message: str) -> str:
     parts = ["Input files (paths relative to the project folder):"]
     for rel in input_files(root):
         summary = file_summary(root, rel)
         parts.append(f"- {rel}" + (f"\n  " + summary.replace("\n", "\n  ") if summary else ""))
-    parts.append("\nRuns (newest first):")
     names = runs.names()
-    parts += [f"- {json.dumps(runs.status(n), ensure_ascii=False)}" for n in names[:15]] or ["- none"]
+    mine = [n for n in names if n in conv.runs]
+    parts.append("\nRuns started in this conversation (newest first):")
+    parts += [f"- {json.dumps(runs.status(n), ensure_ascii=False)}" for n in mine] or ["- none"]
+    others = [n for n in names if n not in conv.runs][:20]
+    if others:
+        parts.append("\nOther runs in this project (from other conversations or the command line); use them only "
+                     "if the user names one:")
+        parts += [f"- {n}: {runs.status(n)['state']}" for n in others]
     parts.append("\nRecent conversation:")
-    parts += [f"{h['role']}: {h['text']}" for h in history[-HISTORY_TURNS:]] or ["(none)"]
+    parts += [f"{h['role']}: {h['text']}" for h in conv.history[-HISTORY_TURNS:]] or ["(none)"]
     parts.append(f"\nUser's last message:\n{message}")
     return "\n".join(parts)
 
@@ -272,29 +327,39 @@ class Assistant:
     root: Path
     backend: str
     runs: Runs
-    history: list = field(default_factory=list)
+    store: ChatStore | None = None
     pending: dict = field(default_factory=dict)   # card id -> card
     call: object = backends.call                  # Replaced in tests.
     lock: threading.Lock = field(default_factory=threading.Lock)
 
-    def message(self, text: str, lang: str = "zh") -> dict:
+    def __post_init__(self):
+        if self.store is None:
+            self.store = ChatStore(self.runs.dir / ".chats")
+
+    def message(self, text: str, lang: str = "zh", chat_id: str | None = None) -> dict:
         with self.lock:
-            self.history.append({"role": "user", "text": text})
-            prompt = build_prompt(self.root, self.runs, self.history[:-1], text)
+            conv = self.store.get(chat_id)
+            prompt = build_prompt(self.root, self.runs, conv, text)
+            conv.history.append({"role": "user", "text": text})
+            if not conv.title:
+                conv.title = text.strip().splitlines()[0][:40]
+            self.store.save(conv)
         try:
             action = self.call(self.backend, SYSTEM, prompt, ChatAction)
+            reply, card = action.reply, None
+            try:
+                card = self._card(action, lang)
+            except (ValueError, SystemExit) as e:
+                reply += t(lang, "cannot_use", e=e)
         except Exception as e:
-            return {"reply": t(lang, "backend_failed", e=e), "card": None}
-        reply, card = action.reply, None
-        try:
-            card = self._card(action, lang)
-        except (ValueError, SystemExit) as e:
-            reply += t(lang, "cannot_use", e=e)
+            reply, card = t(lang, "backend_failed", e=e), None
         with self.lock:
-            self.history.append({"role": "assistant", "text": reply})
+            conv.history.append({"role": "assistant", "text": reply})
+            self.store.save(conv)
             if card:
+                card["chat"] = conv.id
                 self.pending[card["id"]] = card
-        return {"reply": reply, "card": card}
+        return {"reply": reply, "card": card, "chat": conv.id, "title": conv.title}
 
     def _card(self, a: ChatAction, lang: str = "zh") -> dict | None:
         from .cli import build_parser
@@ -338,8 +403,10 @@ class Assistant:
         if card is None:
             return t(lang, "expired")
         name = card["name"]
+        conv = self.store.get(card.get("chat"))
         if card["kind"] == "start":
             pid = self.runs.launch(name, card["argv"])
+            conv.runs.append(name)
             msg = t(lang, "started", name=name, pid=pid)
         elif card["kind"] == "resume":
             pid = self.runs.launch(name, ["resume", "--run", f"runs/{name}"], log_suffix=f".resume-{int(time.time())}")
@@ -347,7 +414,10 @@ class Assistant:
         else:
             msg = t(lang, "stopped", name=name) if self.runs.stop(name) else t(lang, "was_not_running", name=name)
         with self.lock:
-            self.history.append({"role": "assistant", "text": msg})
+            if name not in conv.runs:
+                conv.runs.append(name)  # A run stopped or resumed here now belongs to this conversation too.
+            conv.history.append({"role": "assistant", "text": msg})
+            self.store.save(conv)
         return msg
 
 
@@ -376,12 +446,25 @@ def make_handler(assistant: Assistant):
             self._send(code, json.dumps(data, ensure_ascii=False).encode(), "application/json; charset=utf-8")
 
         def do_GET(self):
-            if self.path == "/":
+            from urllib.parse import parse_qs, urlparse
+
+            url = urlparse(self.path)
+            q = {k: v[0] for k, v in parse_qs(url.query).items()}
+            if url.path == "/":
                 self._send(200, PAGE.read_bytes(), "text/html; charset=utf-8")
-            elif self.path == "/api/runs":
-                self._json([assistant.runs.status(n) for n in assistant.runs.names()])
-            elif self.path == "/api/history":
-                self._json({"history": assistant.history, "backend": assistant.backend})
+            elif url.path == "/api/chats":
+                self._json([{"id": c.id, "title": c.title, "updated": c.updated, "runs": c.runs}
+                            for c in assistant.store.list() if c.history])
+            elif url.path == "/api/history":
+                c = assistant.store.chats.get(q.get("chat", ""))
+                self._json({"history": c.history if c else [], "backend": assistant.backend,
+                            "chat": c.id if c else None, "title": c.title if c else ""})
+            elif url.path == "/api/runs":
+                names = assistant.runs.names()
+                if q.get("all") != "1":
+                    c = assistant.store.chats.get(q.get("chat", ""))
+                    names = [n for n in names if c and n in c.runs]
+                self._json([assistant.runs.status(n) for n in names])
             else:
                 self._send(404, b"not found", "text/plain")
 
@@ -389,7 +472,7 @@ def make_handler(assistant: Assistant):
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length) or b"{}")
             if self.path == "/api/chat":
-                self._json(assistant.message(str(body.get("text", "")), _lang(body)))
+                self._json(assistant.message(str(body.get("text", "")), _lang(body), body.get("chat") or None))
             elif self.path == "/api/confirm":
                 self._json({"reply": assistant.confirm(str(body.get("id", "")), _lang(body))})
             else:

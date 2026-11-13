@@ -6,10 +6,10 @@
 <title>MDAgent</title>
 <style>
   :root { --bg:#f7f7f5; --panel:#fff; --text:#1f2328; --muted:#6b7280; --line:#e5e7eb;
-          --accent:#2563eb; --user:#eef2ff; --ok:#16a34a; --warn:#d97706; --bad:#dc2626; }
+          --accent:#2563eb; --user:#eef2ff; --sel:#e0e7ff; --ok:#16a34a; --warn:#d97706; --bad:#dc2626; }
   @media (prefers-color-scheme: dark) {
     :root { --bg:#111315; --panel:#1a1d21; --text:#e6e6e6; --muted:#9aa1ab; --line:#2b2f35;
-            --accent:#6ea8fe; --user:#1e2a44; --ok:#4ade80; --warn:#fbbf24; --bad:#f87171; }
+            --accent:#6ea8fe; --user:#1e2a44; --sel:#24314f; --ok:#4ade80; --warn:#fbbf24; --bad:#f87171; }
   }
   * { box-sizing:border-box; }
   body { margin:0; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
@@ -17,14 +17,22 @@
   header { padding:12px 16px; border-bottom:1px solid var(--line); display:flex; gap:12px; align-items:center; }
   header h1 { font-size:18px; margin:0; }
   header span { color:var(--muted); font-size:13px; }
-  #lang { margin-left:auto; display:flex; border:1px solid var(--line); border-radius:8px; overflow:hidden; }
-  #lang button { background:transparent; color:var(--text); border-radius:0; padding:6px 12px; }
-  #lang button.on { background:var(--accent); color:#fff; }
-  main { display:grid; grid-template-columns: minmax(0,2fr) minmax(0,1fr); gap:16px; padding:16px;
+  .seg { display:flex; border:1px solid var(--line); border-radius:8px; overflow:hidden; }
+  .seg button { background:transparent; color:var(--text); border-radius:0; padding:6px 12px; }
+  .seg button.on { background:var(--accent); color:#fff; }
+  #lang { margin-left:auto; }
+  main { display:grid; grid-template-columns: 220px minmax(0,2fr) minmax(0,1fr); gap:16px; padding:16px;
          height: calc(100vh - 58px); }
-  @media (max-width: 800px) { main { grid-template-columns: 1fr; height:auto; } }
+  @media (max-width: 960px) { main { grid-template-columns: 1fr; height:auto; } }
   .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; display:flex;
            flex-direction:column; min-height:0; }
+  #chats { overflow-y:auto; padding:8px; display:flex; flex-direction:column; gap:4px; }
+  .chat { padding:8px 10px; border-radius:8px; cursor:pointer; font-size:14px; overflow:hidden;
+          text-overflow:ellipsis; white-space:nowrap; }
+  .chat:hover { background:var(--bg); }
+  .chat.on { background:var(--sel); }
+  .chat small { display:block; color:var(--muted); font-size:12px; }
+  #new { margin:12px 12px 4px; }
   #log { flex:1; overflow-y:auto; padding:16px; display:flex; flex-direction:column; gap:10px; min-height:300px; }
   .msg { max-width:85%; padding:10px 12px; border-radius:10px; white-space:pre-wrap; line-height:1.5; }
   .user { align-self:flex-end; background:var(--user); }
@@ -37,6 +45,10 @@
   form { display:flex; gap:8px; padding:12px; border-top:1px solid var(--line); }
   textarea { flex:1; resize:none; height:52px; padding:8px; border-radius:8px; border:1px solid var(--line);
              background:var(--bg); color:var(--text); font:inherit; }
+  .runs-head { display:flex; align-items:center; gap:8px; padding:12px 12px 0; }
+  .runs-head h2 { font-size:15px; margin:0; }
+  .runs-head .seg { margin-left:auto; font-size:12px; }
+  .runs-head .seg button { padding:4px 8px; font-size:12px; }
   #runs { overflow-y:auto; padding:12px; display:flex; flex-direction:column; gap:10px; }
   .run { border:1px solid var(--line); border-radius:8px; padding:10px; font-size:13px; }
   .run b { font-size:14px; }
@@ -44,15 +56,18 @@
   .running { color:var(--accent); } .finished { color:var(--ok); } .stopped { color:var(--warn); }
   .failed { color:var(--bad); }
   .last { color:var(--muted); margin-top:6px; white-space:pre-wrap; word-break:break-all; }
-  h2 { font-size:15px; margin:12px 12px 0; }
 </style>
 </head>
 <body>
 <header>
   <h1>MDAgent</h1><span id="backend"></span>
-  <div id="lang"><button data-lang="zh">中文</button><button data-lang="en">English</button></div>
+  <div id="lang" class="seg"><button data-lang="zh">中文</button><button data-lang="en">English</button></div>
 </header>
 <main>
+  <section class="panel">
+    <button id="new"></button>
+    <div id="chats"></div>
+  </section>
   <section class="panel">
     <div id="log"></div>
     <form id="form">
@@ -61,7 +76,10 @@
     </form>
   </section>
   <section class="panel">
-    <h2 id="runs-title"></h2>
+    <div class="runs-head">
+      <h2 id="runs-title"></h2>
+      <div id="scope" class="seg"><button data-all="0"></button><button data-all="1"></button></div>
+    </div>
     <div id="runs"></div>
   </section>
 </main>
@@ -69,49 +87,64 @@
 const UI = {
   zh: {
     placeholder: "例如：用 Amber，看 181L 里苯周围的口袋，开发测试。按 Enter 发送，Shift+Enter 换行。",
-    send: "发送", thinking: "思考中…", runsTitle: "运行（每 10 秒刷新）", noRuns: "还没有运行。",
+    send: "发送", thinking: "思考中…", runsTitle: "运行", thisChat: "本对话", all: "全部",
+    noRuns: "这个对话还没有启动运行。", noRunsAll: "还没有运行。", newChat: "＋ 新对话", untitled: "新对话",
     backend: "语言模型：", changed: "改动的设置：", plainMd: n => `普通 MD：每条 ${n} ns`,
-    failed: "连接聊天服务失败：",
+    failed: "连接聊天服务失败：", runsCount: n => `${n} 个运行`,
     buttons: {start: "开始运行", stop: "停止运行", resume: "继续运行"},
     states: {running: "运行中", finished: "已完成", stopped: "已停止", failed: "出错"},
-    welcome: "你好。告诉我要模拟什么，例如：“用 Amber，看 181L 里苯周围的口袋，开发测试”。也可以问某个运行的进度，或者让我停止、继续某个运行。运行在后台进行，关掉这个网页也不会停。",
+    welcome: "你好。告诉我要模拟什么，例如：“用 Amber，看 181L 里苯周围的口袋，开发测试”。也可以问某个运行的进度，或者让我停止、继续某个运行。每个对话有自己的记录和运行列表；不同的案例可以用不同的对话。运行在后台进行，关掉这个网页也不会停。",
   },
   en: {
     placeholder: "For example: use Amber, look at the pocket around benzene in 181L, development test. Enter sends, Shift+Enter adds a line.",
-    send: "Send", thinking: "Thinking…", runsTitle: "Runs (refresh every 10 s)", noRuns: "No runs yet.",
+    send: "Send", thinking: "Thinking…", runsTitle: "Runs", thisChat: "This chat", all: "All",
+    noRuns: "No runs started in this chat yet.", noRunsAll: "No runs yet.", newChat: "+ New chat", untitled: "New chat",
     backend: "Language model: ", changed: "Changed settings: ", plainMd: n => `Plain MD: ${n} ns per replica`,
-    failed: "Could not reach the chat server: ",
+    failed: "Could not reach the chat server: ", runsCount: n => `${n} run(s)`,
     buttons: {start: "Start run", stop: "Stop run", resume: "Continue run"},
     states: {running: "running", finished: "finished", stopped: "stopped", failed: "failed"},
-    welcome: "Hello. Tell me what to simulate, for example: “use Amber, look at the pocket around benzene in 181L, development test”. You can also ask how a run is going, or ask me to stop or continue a run. Runs go on in the background, also when you close this page.",
+    welcome: "Hello. Tell me what to simulate, for example: “use Amber, look at the pocket around benzene in 181L, development test”. You can also ask how a run is going, or ask me to stop or continue a run. Each chat has its own history and run list; use a separate chat for each case. Runs go on in the background, also when you close this page.",
   },
 };
-let lang = "zh";
-try { lang = localStorage.getItem("mdagent-lang") || "zh"; } catch (e) {}
-let backendName = "", history = [];
-const log = document.getElementById("log"), text = document.getElementById("text");
+function load(key, fallback) { try { return localStorage.getItem(key) || fallback; } catch (e) { return fallback; } }
+function store(key, value) { try { value == null ? localStorage.removeItem(key) : localStorage.setItem(key, value); } catch (e) {} }
 
-function L() { return UI[lang]; }
+let lang = load("mdagent-lang", "zh"), chatId = load("mdagent-chat", null), showAll = load("mdagent-all", "0");
+let backendName = "", messages = [];
+const log = document.getElementById("log"), text = document.getElementById("text");
+const L = () => UI[lang];
+
+function escapeHtml(s) { return String(s).replace(/[&<>"]/g, ch => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[ch])); }
+async function post(url, data) {
+  const r = await fetch(url, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(data)});
+  return r.json();
+}
 
 function applyLanguage() {
   document.documentElement.lang = lang;
   text.placeholder = L().placeholder;
   document.getElementById("send").textContent = L().send;
+  document.getElementById("new").textContent = L().newChat;
   document.getElementById("runs-title").textContent = L().runsTitle;
+  document.querySelector('#scope [data-all="0"]').textContent = L().thisChat;
+  document.querySelector('#scope [data-all="1"]').textContent = L().all;
   document.getElementById("backend").textContent = backendName ? L().backend + backendName : "";
   for (const b of document.querySelectorAll("#lang button")) b.classList.toggle("on", b.dataset.lang === lang);
-  if (!history.length) { log.innerHTML = ""; add("assistant", L().welcome); }
-  refreshRuns();
+  for (const b of document.querySelectorAll("#scope button")) b.classList.toggle("on", b.dataset.all === showAll);
+  renderLog(); refreshChats(); refreshRuns();
 }
-for (const b of document.querySelectorAll("#lang button")) {
-  b.onclick = () => {
-    lang = b.dataset.lang;
-    try { localStorage.setItem("mdagent-lang", lang); } catch (e) {}
-    applyLanguage();
-  };
+for (const b of document.querySelectorAll("#lang button"))
+  b.onclick = () => { lang = b.dataset.lang; store("mdagent-lang", lang); applyLanguage(); };
+for (const b of document.querySelectorAll("#scope button"))
+  b.onclick = () => { showAll = b.dataset.all; store("mdagent-all", showAll); applyLanguage(); };
+
+function renderLog() {
+  log.innerHTML = "";
+  if (!messages.length) addBubble("assistant", L().welcome);
+  for (const m of messages) addBubble(m.role, m.text, m.card);
 }
 
-function add(role, body, card) {
+function addBubble(role, body, card) {
   const div = document.createElement("div");
   div.className = "msg " + role;
   div.textContent = body;
@@ -123,11 +156,12 @@ function add(role, body, card) {
       (card.command ? `<code>${escapeHtml(card.command)}</code>` : "");
     const b = document.createElement("button");
     b.textContent = L().buttons[card.kind];
+    b.disabled = !!card.used;
     b.onclick = async () => {
-      b.disabled = true;
+      b.disabled = true; card.used = true;
       const r = await post("/api/confirm", {id: card.id, lang});
-      add("assistant", r.reply);
-      refreshRuns();
+      messages.push({role: "assistant", text: r.reply});
+      renderLog(); refreshRuns(); refreshChats();
     };
     c.appendChild(b);
     div.appendChild(c);
@@ -136,38 +170,43 @@ function add(role, body, card) {
   log.scrollTop = log.scrollHeight;
 }
 
-function escapeHtml(s) { return String(s).replace(/[&<>"]/g, ch => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[ch])); }
-async function post(url, data) {
-  const r = await fetch(url, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(data)});
-  return r.json();
-}
-
-document.getElementById("form").onsubmit = async (e) => {
-  e.preventDefault();
-  const t = text.value.trim();
-  if (!t) return;
-  text.value = "";
-  history.push(t);
-  add("user", t);
-  const send = document.getElementById("send");
-  send.disabled = true; send.textContent = L().thinking;
-  try {
-    const r = await post("/api/chat", {text: t, lang});
-    add("assistant", r.reply, r.card);
-  } catch (err) {
-    add("assistant", L().failed + err);
+async function openChat(id) {
+  chatId = id; store("mdagent-chat", id);
+  messages = [];
+  if (id) {
+    const h = await (await fetch("/api/history?chat=" + encodeURIComponent(id))).json();
+    if (!h.chat) { chatId = null; store("mdagent-chat", null); }
+    messages = h.history.map(m => ({role: m.role, text: m.text}));
   }
-  send.disabled = false; send.textContent = L().send;
-};
-text.addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); document.getElementById("form").requestSubmit(); }
-});
+  renderLog(); refreshChats(); refreshRuns();
+}
+document.getElementById("new").onclick = () => openChat(null);
+
+async function refreshChats() {
+  let chats = [];
+  try { chats = await (await fetch("/api/chats")).json(); } catch (e) { return; }
+  const box = document.getElementById("chats");
+  box.innerHTML = "";
+  if (!chatId) {
+    const d = document.createElement("div"); d.className = "chat on"; d.textContent = L().untitled; box.appendChild(d);
+  }
+  for (const c of chats) {
+    const d = document.createElement("div");
+    d.className = "chat" + (c.id === chatId ? " on" : "");
+    d.innerHTML = `${escapeHtml(c.title || L().untitled)}<small>${L().runsCount(c.runs.length)}</small>`;
+    d.title = c.title;
+    d.onclick = () => openChat(c.id);
+    box.appendChild(d);
+  }
+}
 
 async function refreshRuns() {
   let runs = [];
-  try { runs = await (await fetch("/api/runs")).json(); } catch (e) { return; }
+  try {
+    runs = await (await fetch(`/api/runs?all=${showAll}&chat=${encodeURIComponent(chatId || "")}`)).json();
+  } catch (e) { return; }
   const box = document.getElementById("runs");
-  box.innerHTML = runs.length ? "" : `<div class='last'>${L().noRuns}</div>`;
+  box.innerHTML = runs.length ? "" : `<div class='last'>${showAll === "1" ? L().noRunsAll : L().noRuns}</div>`;
   for (const r of runs) {
     const d = document.createElement("div");
     d.className = "run";
@@ -178,11 +217,34 @@ async function refreshRuns() {
   }
 }
 
+document.getElementById("form").onsubmit = async (e) => {
+  e.preventDefault();
+  const t = text.value.trim();
+  if (!t) return;
+  text.value = "";
+  messages.push({role: "user", text: t});
+  renderLog();
+  const send = document.getElementById("send");
+  send.disabled = true; send.textContent = L().thinking;
+  try {
+    const r = await post("/api/chat", {text: t, lang, chat: chatId});
+    if (r.chat && r.chat !== chatId) { chatId = r.chat; store("mdagent-chat", chatId); }
+    messages.push({role: "assistant", text: r.reply, card: r.card});
+  } catch (err) {
+    messages.push({role: "assistant", text: L().failed + err});
+  }
+  send.disabled = false; send.textContent = L().send;
+  renderLog(); refreshChats(); refreshRuns();
+};
+text.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); document.getElementById("form").requestSubmit(); }
+});
+
 (async () => {
   const h = await (await fetch("/api/history")).json();
   backendName = h.backend;
-  for (const m of h.history) { history.push(m.text); add(m.role, m.text); }
   applyLanguage();
+  await openChat(chatId);
   setInterval(refreshRuns, 10000);
 })();
 </script>

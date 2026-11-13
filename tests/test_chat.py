@@ -165,13 +165,48 @@ def test_web_server(project):
     server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(a))
     threading.Thread(target=server.serve_forever, daemon=True).start()
     base = f"http://127.0.0.1:{server.server_address[1]}"
+    get = lambda path: json.loads(urllib.request.urlopen(base + path).read())
+
+    def post(path, data):
+        req = urllib.request.Request(base + path, data=json.dumps(data).encode(),
+                                     headers={"Content-Type": "application/json"})
+        return json.loads(urllib.request.urlopen(req).read())
+
     try:
         assert b"MDAgent" in urllib.request.urlopen(base + "/").read()
-        assert json.loads(urllib.request.urlopen(base + "/api/runs").read()) == []
-        req = urllib.request.Request(base + "/api/chat", data=json.dumps({"text": "hi"}).encode(),
-                                     headers={"Content-Type": "application/json"})
-        assert json.loads(urllib.request.urlopen(req).read())["reply"] == "你好"
-        hist = json.loads(urllib.request.urlopen(base + "/api/history").read())
+        assert get("/api/runs") == [] and get("/api/chats") == []
+        r = post("/api/chat", {"text": "第一个案例"})
+        assert r["reply"] == "你好" and r["title"] == "第一个案例"
+        hist = get(f"/api/history?chat={r['chat']}")
         assert [m["role"] for m in hist["history"]] == ["user", "assistant"]
+        r2 = post("/api/chat", {"text": "second case"})            # No chat id: a new conversation.
+        assert r2["chat"] != r["chat"]
+        assert {c["title"] for c in get("/api/chats")} == {"第一个案例", "second case"}
     finally:
         server.shutdown()
+
+
+def test_conversations_keep_cases_apart(project):
+    plan = ChatAction(action="plan_run", reply="ok", run_name="case-a", pdb="examples/181L.pdb", plan=_plan())
+    a = _assistant(project, plan)
+    a.runs.launch = lambda name, argv, **kw: 1
+    r = a.message("case A")
+    a.confirm(r["card"]["id"])
+    other = a.message("case B")                                # A second conversation.
+    assert other["chat"] != r["chat"]
+    assert a.store.chats[r["chat"]].runs == ["case-a"]
+    assert a.store.chats[other["chat"]].runs == []
+    # The prompt of conversation B lists case-a only as an "other run".
+    seen = {}
+    a.call = lambda backend, system, prompt, model: seen.setdefault("p", prompt) and ChatAction(action="answer", reply="x")
+    a.message("how is it going?", chat_id=other["chat"])
+    mine = seen["p"].split("Runs started in this conversation")[1].split("Recent conversation")[0]
+    assert "- none" in mine.split("Other runs")[0]
+
+
+def test_conversations_survive_a_restart(project):
+    a = _assistant(project, ChatAction(action="answer", reply="hi"))
+    r = a.message("remember me")
+    b = _assistant(project, ChatAction(action="answer", reply="hi"))  # A new server process.
+    c = b.store.chats[r["chat"]]
+    assert c.title == "remember me" and [m["text"] for m in c.history] == ["remember me", "hi"]
