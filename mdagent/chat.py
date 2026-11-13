@@ -84,8 +84,8 @@ Choose one action for the user's last message:
 
 Before a run that uses a PDB file, MDAgent checks the structure: it compares each chain with its UniProt
 reference sequence, finds tags, copies of the same chain, metal ions, unknown residues and long gaps. If the
-check finds problems, no button is shown and the user sees the report. Then propose a new plan with the options
-the user chooses (chains, keep_tags, uniprot). Set accept_problems to true only if the user explicitly says to go
+check finds problems, no button is shown and the user sees the report. Do not promise a button before the check.
+Then propose a new plan with the options the user chooses (chains, keep_tags, uniprot). Set accept_problems to true only if the user explicitly says to go
 on despite the problems.
 
 If the user gives a PDB ID (four characters, for example 3HTB) that is not in the list of input files, put it
@@ -120,8 +120,8 @@ TEXT = {
         "downloaded": "已从 PDB 下载 {id}，保存在 {path}。",
         "already_there": "{id} 之前已经下载过，在 {path}。",
         "download_failed": "下载 {id} 失败：{e}",
-        "check_problems": "\n\n结构检查发现了问题，所以还没有生成运行卡片：\n\n{report}\n\n请告诉我怎么处理，"
-                          "例如“只保留 A 链”“保留标签”，或者明确说“有问题也继续”。",
+        "check_problems": "\n\n结构检查发现了问题，所以还没有生成运行卡片：\n\n{report}\n\n请告诉我怎么处理"
+                          "（每个问题下面的 What to do 写了可选的做法），或者明确说“有问题也继续”。",
     },
     "en": {
         "backend_failed": "The language model backend failed: {e}",
@@ -145,8 +145,8 @@ TEXT = {
         "already_there": "{id} was downloaded before; it is in {path}.",
         "download_failed": "Download of {id} failed: {e}",
         "check_problems": "\n\nThe structure check found problems, so there is no run button yet:\n\n{report}\n\n"
-                          "Tell me what to do, for example \"keep chain A only\" or \"keep the tags\", or say "
-                          "clearly that I should go on despite the problems.",
+                          "Tell me what to do (see \"What to do\" under each problem), or say clearly that I "
+                          "should go on despite the problems.",
     },
 }
 

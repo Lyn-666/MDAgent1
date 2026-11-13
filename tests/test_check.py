@@ -103,3 +103,14 @@ def test_run_stops_on_problems_and_goes_on_after_the_fix(root, monkeypatch):
     state = json.loads((root / "runs" / "kras" / "run.json").read_text())
     assert {c for c, n in state["target"]} == {"A"}
     assert state["setup"]["chains"] == ["A"]
+
+
+def test_report_uses_project_relative_path_and_explains_caps(root, tmp_path):
+    lines = (DATA / "4HJO.pdb").read_text().splitlines()
+    cap = "HETATM 9998  N   NH2 A 999      10.000  10.000  10.000  1.00 20.00           N"
+    i = max(n for n, l in enumerate(lines) if l.startswith(("ATOM", "HETATM")))
+    (root / "structures" / "capped.pdb").write_text("\n".join(lines[:i + 1] + [cap] + lines[i + 1:]) + "\n")
+    r = check_structure(root / "structures" / "capped.pdb", root=root)
+    assert r.report().startswith("Structure check of structures/capped.pdb:")
+    assert any("Terminal cap(s) NH2" in t for t in _texts(r, "note"))
+    assert not any("NH2" in t for t in _texts(r, "note") if t.startswith("Other molecule"))

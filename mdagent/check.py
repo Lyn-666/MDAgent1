@@ -32,6 +32,7 @@ NUCLEIC = {"DA", "DC", "DG", "DT", "DU", "A", "C", "G", "U", "I"}
 WATER = {"HOH", "WAT", "DOD"}
 STRUCTURAL_METALS = {"ZN", "FE", "FE2", "CU", "CU1", "MN", "CO", "NI", "CD", "HG", "MO", "W"}
 CHECK_METALS = {"CA", "MG"}
+CAPS = {"NH2", "ACE", "NME", "NMA", "FOR"}  # Chemical groups that cap a chain end.
 TAG_WORDS = ("EXPRESSION TAG", "CLONING ARTIFACT", "LINKER", "INITIATING METHIONINE", "LEADER SEQUENCE",
              "ACETYLATION", "AMIDATION")
 LONG_GAP = 5
@@ -216,7 +217,11 @@ def check_structure(path: str | Path, chains: list[str] | None = None, keep_tags
                     uniprot: str | None = None, root: Path = Path("."), fetch=None) -> CheckResult:
     fetch = fetch or uniprot_sequences
     p = read_pdb(Path(path))
-    res = CheckResult(str(path))
+    try:  # Show paths relative to the project folder, for example structures/1ZDD.pdb.
+        shown = str(Path(path).resolve().relative_to(Path(root).resolve()))
+    except ValueError:
+        shown = str(path)
+    res = CheckResult(shown)
 
     protein = [c for c, r in p.observed.items() if any(n in THREE_TO_ONE for n in r.values())]
     if not protein:
@@ -269,8 +274,12 @@ def check_structure(path: str | Path, chains: list[str] | None = None, keep_tags
     check_ions = sorted(n for n in het_names if n in CHECK_METALS)
     if check_ions:
         res.note(f"Ion(s) {', '.join(check_ions)} are removed. Check that they are not needed for the structure.")
+    caps = sorted(n for n in het_names if n in CAPS)
+    if caps:
+        res.note(f"Terminal cap(s) {', '.join(caps)} are removed, so those chain ends become normal charged "
+                 "termini. For a peptide whose capped ends matter, prepare an Amber system and use --prmtop.")
     others = sorted(n for n in het_names if n not in STRUCTURAL_METALS and n not in CHECK_METALS
-                    and n not in NUCLEIC)
+                    and n not in NUCLEIC and n not in CAPS)
     if others:
         res.note(f"Other molecule(s) are removed: {', '.join(others)}.")
 
