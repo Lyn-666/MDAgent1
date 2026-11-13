@@ -63,38 +63,10 @@ def _check_env(platform, forcefield_files=()) -> bool:
     return not problems
 
 
-def cmd_run(args) -> int:
-    from dataclasses import asdict
-
-    from .agent import LoopSettings, RunState, run_all
+def _build_from_pdb(args, keys, out):
     from .build import SetupOptions, build_system
     from .protonation import parse_overrides
-    from .simulate import MDSettings, SystemFiles, write_inputs
-
-    from .build import FORCEFIELDS
-
-    out = Path(args.out)
-    if (out / "run.json").exists():
-        print(f"error: {out} already has a run. Use 'resume --run {out}' to continue it.",
-              file=sys.stderr)
-        return 2
-    if not _check_env(args.platform, FORCEFIELDS[args.forcefield].files):
-        return 2
-    if args.sampling == "adaptive":
-        from .adaptive import check_installed
-        check_installed()
-
-    target = _target_from_args(args)
-    keys = resolve_target(target, args.pdb)
-    print(f"Target: {target.describe()}")
-    print(f"        {len(keys)} residues: " + ", ".join(f"{c}:{n}" for c, n in keys))
-
-    if not target.ligand:
-        asked = {(c, n) for c, n in target.residues}
-        missing = sorted(n for c, n in asked if not any(k[1] == n and (c is None or k[0] == c) for k in keys))
-        if missing:
-            print("WARNING: these target residues have no coordinates in the PDB file and are "
-                  "left out of the target: " + ", ".join(map(str, missing)))
+    from .simulate import write_inputs
 
     setup = SetupOptions(
         forcefield=args.forcefield,
@@ -116,6 +88,69 @@ def cmd_run(args) -> int:
     write_inputs(built, out)
     (out / "setup_report.txt").write_text(report + "\n")
 
+    return built, setup
+
+
+# Options that only matter when MDAgent builds the system from a PDB file, with their defaults.
+SETUP_DEFAULTS = {"forcefield": "charmm36m", "ph": 7.0, "ion_conc": 0.15, "cation": "Na+", "padding_nm": 1.0,
+                  "box_shape": "cube", "check_protonation": False, "protonation": None}
+
+
+def cmd_run(args) -> int:
+    from dataclasses import asdict
+
+    from .agent import LoopSettings, RunState, run_all
+    from .build import SetupOptions, build_system
+    from .protonation import parse_overrides
+    from .simulate import MDSettings, SystemFiles, write_inputs
+
+    from .build import FORCEFIELDS
+
+    out = Path(args.out)
+    if (out / "run.json").exists():
+        print(f"error: {out} already has a run. Use 'resume --run {out}' to continue it.",
+              file=sys.stderr)
+        return 2
+    amber = args.prmtop is not None
+    if amber and not args.inpcrd:
+        print("error: --prmtop needs --inpcrd.", file=sys.stderr)
+        return 2
+    if not _check_env(args.platform, () if amber else FORCEFIELDS[args.forcefield].files):
+        return 2
+    if args.sampling == "adaptive":
+        from .adaptive import check_installed
+        check_installed()
+
+    target = _target_from_args(args)
+    if amber:
+        from .build import load_amber
+
+        ignored = [f"--{k.replace('_', '-')}" for k, v in SETUP_DEFAULTS.items() if getattr(args, k) != v]
+        if ignored:
+            print("Note: these options change how a system is built, so they are ignored for a prepared "
+                  "Amber system: " + ", ".join(ignored))
+        print("Loading the prepared system ...")
+        built = load_amber(args.prmtop, args.inpcrd)
+        report = built.report()
+        print("\n".join("  " + line for line in report.splitlines()))
+        write_inputs(built, out)
+        (out / "setup_report.txt").write_text(report + "\n")
+        args.pdb = str(out / "solvated.pdb")
+        setup = None
+    keys = resolve_target(target, args.pdb)
+    print(f"Target: {target.describe()}")
+    print(f"        {len(keys)} residues: " + ", ".join(f"{c}:{n}" for c, n in keys))
+
+    if not target.ligand:
+        asked = {(c, n) for c, n in target.residues}
+        missing = sorted(n for c, n in asked if not any(k[1] == n and (c is None or k[0] == c) for k in keys))
+        if missing:
+            print("WARNING: these target residues have no coordinates in the PDB file and are "
+                  "left out of the target: " + ", ".join(map(str, missing)))
+
+    if not amber:
+        built, setup = _build_from_pdb(args, keys, out)
+
     loop = LoopSettings(
         first_ns=min(args.first_ns, args.max_ns),
         extend_ns=args.extend_ns,
@@ -128,9 +163,9 @@ def cmd_run(args) -> int:
         target=keys,
         n_replicas=args.replicas,
         base_seed=args.seed,
-        md=MDSettings(save_interval_ps=args.save_ps, platform=args.platform),
+        md=MDSettings(save_interval_ps=args.save_ps, platform=args.platform, equilibration_ps=args.equil_ps),
         loop=loop,
-        setup=asdict(setup),
+        setup=asdict(setup) if setup else {"amber": [str(args.prmtop), str(args.inpcrd)]},
         sampling=args.sampling,
         adaptive={"policy": args.adaptive_policy, "n_clusters": args.adaptive_clusters,
                   "full_interval_ps": args.full_save_ps} if args.sampling == "adaptive" else {},
@@ -211,7 +246,13 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command", required=True)
 
     r = sub.add_parser("run", help="Build the system and let the agent run MD until the target is sampled.")
-    r.add_argument("--pdb", required=True)
+    src = r.add_mutually_exclusive_group(required=True)
+    src.add_argument("--pdb", help="Protein PDB file. MDAgent builds the system (ligands are removed).")
+    src.add_argument("--prmtop", help="A prepared, solvated Amber system (.parm7/.prmtop), for example from "
+                                     "tleap with GAFF ligand parameters. Use it as it is; needs --inpcrd.")
+    r.add_argument("--inpcrd", help="Coordinates and box for --prmtop (.rst7/.inpcrd).")
+    r.add_argument("--equil-ps", type=float, default=600.0,
+                   help="Equilibration length: restrained heating, restrained NPT, restraint release, free NPT.")
     g = r.add_mutually_exclusive_group(required=True)
     g.add_argument("--residues", help="Target residues, for example 'A:99-120,A:133'.")
     g.add_argument("--around-ligand", help="Target = residues near this ligand (residue name in the PDB).")
@@ -272,8 +313,10 @@ def build_parser() -> argparse.ArgumentParser:
     d.add_argument("--run", required=True)
     d.set_defaults(func=cmd_diagnose)
 
-    i = sub.add_parser("info", help="Show the chains, residue ranges and ligands of a PDB file.")
-    i.add_argument("--pdb", required=True)
+    i = sub.add_parser("info", help="Show the chains, residue ranges and ligands of a PDB or Amber file.")
+    isrc = i.add_mutually_exclusive_group(required=True)
+    isrc.add_argument("--pdb")
+    isrc.add_argument("--prmtop", help="Amber topology (.parm7/.prmtop). Residue numbers start at 1.")
     i.set_defaults(func=cmd_info)
 
     a = sub.add_parser("ask", help="Describe the run in plain language. Claude turns it into settings; "
@@ -295,5 +338,5 @@ def cmd_ask(args) -> int:
 def cmd_info(args) -> int:
     from .target import pdb_summary
 
-    print(pdb_summary(args.pdb))
+    print(pdb_summary(args.pdb or args.prmtop))
     return 0

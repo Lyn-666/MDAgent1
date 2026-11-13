@@ -9,10 +9,13 @@ argument-hint: "[要求，例如：用 Amber，看苯周围的口袋，先检查
 
 1. **检查环境。** 运行 `python -c "import mdagent, openmm; print(openmm.__version__)"`。如果失败，告诉用户：先退出 Claude Code，运行 `conda activate mdagent`，再在 MDAgent1 文件夹里重新运行 `claude`。然后停下。
 
-2. **确定 PDB 文件。** 用户提到了文件就用那个文件；没有提到就用 `examples/181L.pdb`，并在第 5 步告诉用户。文件不存在时问用户，然后停下。
+2. **确定输入文件。** 有两种输入：
+   - 蛋白 PDB 文件（`--pdb`）：MDAgent 自己搭体系，配体会被删掉。
+   - 用户自己准备好的 Amber 体系（`.parm7`/`.prmtop` 加 `.rst7`/`.inpcrd`，用 `--prmtop` 和 `--inpcrd`）：原样使用，配体保留。用户提到这类文件，或者要求保留配体时用这种。
+   用户没有提到文件时用 `examples/181L.pdb`，并在第 5 步告诉用户。文件不存在时问用户，然后停下。要保留配体但用户只给了 PDB 文件时，告诉用户需要先用 tleap 等工具准备好 Amber 体系，然后停下。
 
 3. **读取 PDB 概况。** 运行：
-   `python -m mdagent info --pdb <PDB 文件>`
+   `python -m mdagent info --pdb <PDB 文件>`（Amber 体系用 `--prmtop <文件>`；Amber 文件里残基从 1 开始编号，没有链名，`--residues` 写成 `3-5` 这样不带链名的形式）
    它列出链、残基编号范围和配体名称。只能使用这里出现的配体名称和残基编号。用户说的配体或残基在这里找不到时（例如用户说 ATP，文件里没有），向用户提问，然后停下。
 
 4. **转成命令。** 运行 `python -m mdagent run --help` 查看所有选项和默认值。规则：

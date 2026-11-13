@@ -14,7 +14,7 @@
 
 MDAgent1 是一个 MD agent。用户给出蛋白 PDB 和一个目标区域。agent 自动搭体系、跑 MD，找出目标区域里没有采样好的侧链，并对它们做增强采样。
 
-- 代码在 `mdagent/`：`target.py`（目标区域）、`build.py`（搭体系，所有选项在 `SetupOptions` 里）、`protonation.py`（PROPKA 和手动质子化）、`simulate.py`（分段跑 MD，可续跑）、`diagnose.py`（侧链诊断和排序）、`agent.py`（多轮循环，决定续跑或停止；`run_all` 在普通 MD 后自动做增强采样）、`enhanced.py`（chi1 上的 well-tempered metadynamics，在 OpenMM 里实现；只跑和存数据）、`envcheck.py`（启动时检查平台和力场文件）、`adaptive.py`（可选的 AdaptivePy 自适应采样：从第 2 轮起选起点）、`llm.py`（`ask` 命令：Claude 把一句话要求填进固定的设置表 `RunPlan`，转成 `mdagent run` 命令，用户确认后才运行）、`cli.py`（命令行：`run`、`resume`、`diagnose`、`ask`）。
+- 代码在 `mdagent/`：`target.py`（目标区域）、`build.py`（搭体系，所有选项在 `SetupOptions` 里；`load_amber` 读入用户准备好的 Amber 体系，配体保留）、`protonation.py`（PROPKA 和手动质子化）、`simulate.py`（分段跑 MD，可续跑；`equilibrate` 是带骨架约束的分阶段平衡：最小化、5 K 升温、约束 NPT、逐步撤约束、无约束 NPT，按用户自己的 OpenMM 流程设计）、`diagnose.py`（侧链诊断和排序）、`agent.py`（多轮循环，决定续跑或停止；`run_all` 在普通 MD 后自动做增强采样）、`enhanced.py`（chi1 上的 well-tempered metadynamics，在 OpenMM 里实现；只跑和存数据）、`envcheck.py`（启动时检查平台和力场文件）、`adaptive.py`（可选的 AdaptivePy 自适应采样：从第 2 轮起选起点）、`llm.py`（`ask` 命令：Claude 把一句话要求填进固定的设置表 `RunPlan`，转成 `mdagent run` 命令，用户确认后才运行）、`cli.py`（命令行：`run`、`resume`、`diagnose`、`ask`）。
 - 用户最初的要求：输入蛋白 PDB 和目标区域；agent 自动处理蛋白、搭水盒子、加离子、跑 MD；跑一段时间后自动判断目标区域里哪些侧链没采样到或各条轨迹太相似，再对这些侧链做增强采样；整个过程在一个 agent 窗口里。
 - agent 不做增强采样之后的分析（不算状态比例、不判断收敛、不据此自动加长）。用户明确要求去掉了这部分。只保存数据，并告诉用户文件在哪里。
 - 设计原则：每项设置都有默认值。影响科学结论的选择（力场、离子、pH、质子化）由用户决定；用户提出非默认要求时，agent 先执行（例如先跑 PROPKA），再开始 MD。以后的对话框也填同一个 `SetupOptions`。
@@ -24,3 +24,4 @@ MDAgent1 是一个 MD agent。用户给出蛋白 PDB 和一个目标区域。age
 - 用户的 conda 环境里不要装 openmm-plumed：conda-forge 上的版本会把 OpenMM 降到 8.2 并丢掉 CUDA，而且其中的 PLUMED 不带 OPES。
 - AdaptivePy 模式已加入（`--sampling adaptive`），云端装不了 AdaptivePy，测试用替身模块；真实验证要在用户电脑上做。LLM 层（`ask`）已加入，云端没有 API 密钥，测试用假的规划函数；真实试用要在用户电脑上做。用户没有 API 密钥，所以 agent 窗口用 Claude Code 本身实现：项目命令 `/md`（一句话转成 `mdagent run`，确认后用 nohup 后台启动）和 `/md-status`（查看进度），在 `.claude/commands/` 里。`mdagent info --pdb` 打印 PDB 概况。
 - 开发阶段用户希望测试运行很短（几分钟），给运行命令时用很小的 `--first-ns`、`--max-ns`、`--enhanced-ns`。
+- 温度默认 300 K，用户不要改。

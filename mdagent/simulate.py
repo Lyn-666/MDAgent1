@@ -28,7 +28,10 @@ from .build import BuiltSystem, protein_atom_indices
 
 @dataclass
 class MDSettings:
-    equilibration_ps: float = 100.0
+    # Total equilibration before the first production part. It is split into
+    # heating (1/6), restrained NPT (2/6), restraint release (2/6) and free NPT (1/6).
+    equilibration_ps: float = 600.0
+    restraint_kcal: float = 1.0   # Backbone (N, CA, C) restraint, kcal/mol/Å², during equilibration.
     timestep_fs: float = 2.0
     temperature_k: float = 300.0
     pressure_bar: float = 1.0
@@ -81,6 +84,76 @@ def make_simulation(files: SystemFiles, s: MDSettings, seed: int, extra_forces=(
     return app.Simulation(files.topology, system, integrator, platform)
 
 
+KCAL_A2_TO_KJ_NM2 = 418.4  # 1 kcal/mol/Å² in kJ/mol/nm²
+HEAT_START_K = 5.0
+HEAT_STEPS = 20
+RELEASE_STEPS = 20
+
+
+def backbone_atom_indices(topology: app.Topology) -> list[int]:
+    keep = set(protein_atom_indices(topology))
+    return [a.index for a in topology.atoms() if a.index in keep and a.name in ("N", "CA", "C")]
+
+
+def equilibrate(files: SystemFiles, s: MDSettings, seed: int, log: Callable[[str], None], label: str):
+    """Equilibrate from the built structure. Returns (positions, velocities, box vectors).
+
+    1. Energy minimization with backbone restraints.
+    2. NVT heating from 5 K to the target temperature, with backbone restraints.
+    3. NPT with full backbone restraints.
+    4. NPT while the restraint constant goes down to zero in steps.
+    5. NPT without restraints.
+    The restraint force exists only in this simulation; production starts from a
+    new simulation without it, using the final positions, velocities and box.
+    """
+    t0 = time.time()
+    steps_per_ps = round(1000.0 / s.timestep_fs)
+    total = round(s.equilibration_ps * steps_per_ps)
+    heat, restrained, release = total // 6, 2 * total // 6, 2 * total // 6
+    free = total - heat - restrained - release
+
+    restraint = openmm.CustomExternalForce("k_restraint*periodicdistance(x, y, z, x0, y0, z0)^2")
+    restraint.addGlobalParameter("k_restraint", s.restraint_kcal * KCAL_A2_TO_KJ_NM2)
+    for name in ("x0", "y0", "z0"):
+        restraint.addPerParticleParameter(name)
+    pos_nm = files.positions.value_in_unit(unit.nanometer)
+    for i in backbone_atom_indices(files.topology):
+        restraint.addParticle(i, list(pos_nm[i]))
+
+    sim = make_simulation(files, s, seed, extra_forces=[restraint])
+    barostat = next(f for f in sim.system.getForces() if isinstance(f, openmm.MonteCarloBarostat))
+    frequency = barostat.getFrequency()
+    barostat.setFrequency(0)  # NVT for minimization and heating.
+    sim.context.reinitialize()
+    box = files.topology.getPeriodicBoxVectors()
+    if box is not None:
+        sim.context.setPeriodicBoxVectors(*box)
+    sim.context.setPositions(files.positions)
+    sim.minimizeEnergy()
+
+    integrator = sim.integrator
+    integrator.setTemperature(HEAT_START_K * unit.kelvin)  # Heat from 5 K, not from the target.
+    sim.context.setVelocitiesToTemperature(HEAT_START_K * unit.kelvin, seed)
+    for i in range(1, HEAT_STEPS + 1):
+        sim.step(max(1, heat // HEAT_STEPS))
+        t = HEAT_START_K + (s.temperature_k - HEAT_START_K) * i / HEAT_STEPS
+        integrator.setTemperature(t * unit.kelvin)
+
+    barostat.setFrequency(frequency)  # Switch on pressure coupling.
+    sim.context.reinitialize(preserveState=True)
+    sim.step(restrained)
+    k0 = s.restraint_kcal * KCAL_A2_TO_KJ_NM2
+    for i in range(1, RELEASE_STEPS + 1):
+        sim.context.setParameter("k_restraint", k0 * (1 - i / RELEASE_STEPS))
+        sim.step(max(1, release // RELEASE_STEPS))
+    sim.step(free)
+
+    state = sim.context.getState(getPositions=True, getVelocities=True)
+    log(f"{label}: minimized, heated to {s.temperature_k:g} K, equilibrated with backbone restraints "
+        f"released step by step ({s.equilibration_ps:g} ps in total) in {time.time() - t0:.0f} s")
+    return state.getPositions(), state.getVelocities(), state.getPeriodicBoxVectors()
+
+
 def part_path(out_dir: Path, replica: int, part: int, suffix: str) -> Path:
     return out_dir / f"replica_{replica}_part{part:03d}{suffix}"
 
@@ -124,13 +197,10 @@ def run_segment(
     elif resume:
         sim.loadState(str(part_path(out_dir, replica, part - 1, ".state.xml")))
     else:
-        t0 = time.time()
-        sim.context.setPositions(files.positions)
-        sim.minimizeEnergy()
-        sim.context.setVelocitiesToTemperature(s.temperature_k * unit.kelvin, seed)
-        sim.step(round(s.equilibration_ps * steps_per_ps))
-        log(f"replica {replica}: minimized and equilibrated ({s.equilibration_ps:g} ps) "
-            f"in {time.time() - t0:.0f} s")
+        positions, velocities, box = equilibrate(files, s, seed, log, f"replica {replica}")
+        sim.context.setPeriodicBoxVectors(*box)
+        sim.context.setPositions(positions)
+        sim.context.setVelocities(velocities)
 
     interval = round(s.save_interval_ps * steps_per_ps)
     sim.reporters.append(app.DCDReporter(

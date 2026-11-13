@@ -83,13 +83,21 @@ def resolve_target(target: Target, pdb_path: str | Path) -> list[ResidueKey]:
 
 
 def pdb_summary(pdb_path: str | Path) -> str:
-    """Chains, residue ranges and non-protein molecules in the PDB file, for the model."""
-    top = md.load_topology(str(pdb_path))
+    """Chains, residue ranges and non-protein molecules of a PDB or Amber topology (.parm7/.prmtop) file."""
+    if Path(pdb_path).suffix.lower() in (".parm7", ".prmtop"):
+        # Read Amber files through OpenMM, as `mdagent run --prmtop` does, so that residue
+        # numbers match (OpenMM numbers them from 1; MDTraj's own reader starts at 0).
+        from openmm import app
+
+        top = md.Topology.from_openmm(app.AmberPrmtopFile(str(pdb_path)).topology)
+    else:
+        top = md.load_topology(str(pdb_path))
     lines = []
     for chain in top.chains:
         prot = [r for r in chain.residues if r.is_protein]
         if prot:
-            lines.append(f"Chain {chain.chain_id}: protein residues {prot[0].resSeq}-{prot[-1].resSeq} "
+            name = chain.chain_id or f"#{chain.index + 1} (no chain ID in the file)"
+            lines.append(f"Chain {name}: protein residues {prot[0].resSeq}-{prot[-1].resSeq} "
                          f"({len(prot)} residues)")
     others: dict[str, int] = {}
     for r in top.residues:

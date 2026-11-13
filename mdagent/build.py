@@ -124,7 +124,14 @@ def _amber14() -> app.ForceField:
 
 
 def protein_atom_indices(topology: app.Topology) -> list[int]:
-    return [a.index for a in topology.atoms() if a.residue.name in _PROTEIN]
+    """Atoms of amino acid residues. A residue counts as an amino acid when it has
+    backbone atoms N, CA and C. This also works for Amber names such as HIE, CYX or ASH."""
+    out = []
+    for res in topology.residues():
+        names = {a.name for a in res.atoms()}
+        if res.name in _PROTEIN or {"N", "CA", "C"} <= names:
+            out.extend(a.index for a in res.atoms())
+    return sorted(out)
 
 
 def _gap_report(fixer: PDBFixer, target: set[tuple[str, int]], notes, warnings) -> None:
@@ -347,3 +354,32 @@ def _choose_protonation(modeller, opts: SetupOptions, target, notes, warnings) -
             variants[i] = state
             notes.append(f"User choice: {name}{residues[i].id} chain {residues[i].chain.id} set to {state}.")
     return variants
+
+
+def load_amber(prmtop: str | Path, inpcrd: str | Path) -> BuiltSystem:
+    """Use a system the user prepared with Amber tools (for example tleap with GAFF for a ligand).
+
+    Nothing is changed: no atoms are added or removed, and ligands keep their parameters.
+    The file must contain a periodic box (a solvated system).
+    """
+    prm = app.AmberPrmtopFile(str(prmtop))
+    crd = app.AmberInpcrdFile(str(inpcrd))
+    if crd.boxVectors is None:
+        raise ValueError(f"{inpcrd} has no periodic box. Solvate the system first (for example with tleap).")
+    prm.topology.setPeriodicBoxVectors(crd.boxVectors)
+    system = prm.createSystem(
+        nonbondedMethod=app.PME,
+        nonbondedCutoff=1.0 * unit.nanometer,
+        constraints=app.HBonds,
+    )
+    names: dict[str, int] = {}
+    prot = set(protein_atom_indices(prm.topology))
+    for res in prm.topology.residues():
+        if res.name != "WAT" and res.name != "HOH" and not any(a.index in prot for a in res.atoms()):
+            names[res.name] = names.get(res.name, 0) + 1
+    notes = [
+        f"Using the prepared Amber system {Path(prmtop).name} / {Path(inpcrd).name} as it is.",
+        f"System has {system.getNumParticles()} atoms. Lennard-Jones cutoff 1 nm, PME electrostatics.",
+        "Non-protein residues: " + (", ".join(f"{k} x{v}" for k, v in sorted(names.items())) or "none") + ".",
+    ]
+    return BuiltSystem(prm.topology, crd.positions, system, notes, [])
