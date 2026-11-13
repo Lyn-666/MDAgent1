@@ -59,6 +59,11 @@ class ChatAction(BaseModel):
     prmtop: Optional[str] = Field(None, description="plan_run: Amber topology file, for a prepared system.")
     inpcrd: Optional[str] = Field(None, description="plan_run: Amber coordinate file, together with prmtop.")
     plan: Optional[RunPlan] = Field(None, description="plan_run: the run settings.")
+    fetch_pdb_ids: list[str] = Field(
+        default_factory=list,
+        description="PDB IDs (for example 3HTB) that the user wants to use but that are not in the list of input "
+                    "files yet. MDAgent downloads them to structures/<ID>.pdb and asks you again with the new "
+                    "files listed. Empty in all other cases.")
 
 
 SYSTEM = """You are the chat assistant of MDAgent, a molecular dynamics tool. MDAgent builds a solvated
@@ -76,6 +81,10 @@ Choose one action for the user's last message:
 - resume: the user asks to continue a run that is stopped or failed. run_name must be in the run list.
 - answer: everything else, for example progress questions. Answer progress questions only from the run
   list below.
+
+If the user gives a PDB ID (four characters, for example 3HTB) that is not in the list of input files, put it
+in fetch_pdb_ids and use action "answer". MDAgent downloads it to structures/<ID>.pdb and asks you again;
+then the file and its summary are in the list, and you can plan the run.
 
 Nothing starts or stops until the user clicks the button under your message, so say what the button will
 do. Do not analyze simulation results (populations, convergence): the user does that. Write `reply` in the
@@ -102,6 +111,9 @@ TEXT = {
         "resumed": "运行“{name}”已在后台继续（进程 {pid}）。",
         "stopped": "运行“{name}”已停止。",
         "was_not_running": "运行“{name}”没有在运行。",
+        "downloaded": "已从 PDB 下载 {id}，保存在 {path}。",
+        "already_there": "{id} 之前已经下载过，在 {path}。",
+        "download_failed": "下载 {id} 失败：{e}",
     },
     "en": {
         "backend_failed": "The language model backend failed: {e}",
@@ -121,6 +133,9 @@ TEXT = {
         "resumed": "Run '{name}' continues in the background (process {pid}).",
         "stopped": "Run '{name}' stopped.",
         "was_not_running": "Run '{name}' was not running.",
+        "downloaded": "Downloaded {id} from the PDB to {path}.",
+        "already_there": "{id} was downloaded before; it is in {path}.",
+        "download_failed": "Download of {id} failed: {e}",
     },
 }
 
@@ -346,7 +361,13 @@ class Assistant:
             self.store.save(conv)
         try:
             action = self.call(self.backend, SYSTEM, prompt, ChatAction)
+            notes = self._fetch(action.fetch_pdb_ids, lang)
+            if notes:  # Ask again, now with the downloaded files in the list.
+                prompt = build_prompt(self.root, self.runs, conv, text) + "\n\nMDAgent note: " + " ".join(notes)
+                action = self.call(self.backend, SYSTEM, prompt, ChatAction)
             reply, card = action.reply, None
+            if notes:
+                reply = "\n".join(notes) + "\n\n" + reply
             try:
                 card = self._card(action, lang)
             except (ValueError, SystemExit) as e:
@@ -360,6 +381,20 @@ class Assistant:
                 card["chat"] = conv.id
                 self.pending[card["id"]] = card
         return {"reply": reply, "card": card, "chat": conv.id, "title": conv.title}
+
+    def _fetch(self, ids: list[str], lang: str) -> list[str]:
+        """Download the requested PDB files. Returns one note per ID (empty if nothing was asked)."""
+        from .fetch import fetch_pdb
+
+        notes = []
+        for pdb_id in ids[:5]:
+            try:
+                path, new = fetch_pdb(pdb_id, self.root)
+                rel = path.relative_to(self.root)
+                notes.append(t(lang, "downloaded" if new else "already_there", id=pdb_id.upper(), path=rel))
+            except ValueError as e:
+                notes.append(t(lang, "download_failed", id=pdb_id, e=e))
+        return notes
 
     def _card(self, a: ChatAction, lang: str = "zh") -> dict | None:
         from .cli import build_parser

@@ -59,7 +59,7 @@ def test_claude_backend_command_and_answer():
     def runner(cmd, **kw):
         seen["cmd"], seen["cwd"] = cmd, kw["cwd"]
         out = {"result": "", "structured_output": {"action": "answer", "reply": "hi", "run_name": None,
-                                                    "pdb": None, "prmtop": None, "inpcrd": None, "plan": None}}
+                                                    "pdb": None, "prmtop": None, "inpcrd": None, "plan": None, "fetch_pdb_ids": []}}
         return SimpleNamespace(returncode=0, stdout=json.dumps(out), stderr="")
 
     a = backends.call("claude", "SYS", "USER", ChatAction, runner=runner)
@@ -83,7 +83,7 @@ def test_codex_backend_reads_output_file():
         assert json.loads(Path(cmd[cmd.index("--output-schema") + 1]).read_text())["additionalProperties"] is False
         assert cmd[-1].startswith("SYS")                # Instructions come first in the prompt.
         out.write_text(json.dumps({"action": "answer", "reply": "ok", "run_name": None, "pdb": None,
-                                   "prmtop": None, "inpcrd": None, "plan": None}))
+                                   "prmtop": None, "inpcrd": None, "plan": None, "fetch_pdb_ids": []}))
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     assert backends.call("codex", "SYS", "U", ChatAction, runner=runner).reply == "ok"
@@ -210,3 +210,52 @@ def test_conversations_survive_a_restart(project):
     b = _assistant(project, ChatAction(action="answer", reply="hi"))  # A new server process.
     c = b.store.chats[r["chat"]]
     assert c.title == "remember me" and [m["text"] for m in c.history] == ["remember me", "hi"]
+
+
+def test_pdb_id_is_downloaded_then_the_model_is_asked_again(project, monkeypatch):
+    import mdagent.fetch as fetch
+
+    class Response:
+        def __init__(self, data): self.data = data
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return self.data
+
+    pdb_text = (REPO / "examples" / "181L.pdb").read_bytes()
+    urls = []
+    monkeypatch.setattr(fetch.urllib.request, "urlopen", lambda url, timeout: urls.append(url) or Response(pdb_text))
+    prompts = []
+
+    def call(backend, system, prompt, model):
+        prompts.append(prompt)
+        if len(prompts) == 1:
+            return ChatAction(action="answer", reply="I will download it.", fetch_pdb_ids=["3htb"])
+        return ChatAction(action="plan_run", reply="Ready.", run_name="t4", pdb="structures/3HTB.pdb", plan=_plan())
+
+    a = Assistant(root=project, backend="claude", runs=Runs(project), call=call)
+    r = a.message("use PDB 3HTB, benzene pocket", lang="en")
+    assert urls == ["https://files.rcsb.org/download/3HTB.pdb"]
+    assert (project / "structures" / "3HTB.pdb").exists()
+    assert "structures/3HTB.pdb" in prompts[1] and "BNZ x1" in prompts[1]   # The second call sees the file.
+    assert r["reply"].startswith("Downloaded 3HTB from the PDB to structures/3HTB.pdb.")
+    assert r["card"]["argv"][:3] == ["run", "--pdb", "structures/3HTB.pdb"]
+    # Asking again does not download again.
+    a.call = lambda *x: ChatAction(action="answer", reply="ok", fetch_pdb_ids=["3HTB"])
+    a.message("3HTB again", lang="zh")
+    assert len(urls) == 1
+
+
+def test_fetch_rejects_bad_ids_and_reports_missing_entries(tmp_path):
+    import urllib.error
+
+    from mdagent.fetch import fetch_pdb
+
+    with pytest.raises(ValueError, match="not a PDB ID"):
+        fetch_pdb("abcd", tmp_path)
+
+    def not_found(url, timeout):
+        raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+
+    with pytest.raises(ValueError, match="mmCIF"):
+        fetch_pdb("9xyz", tmp_path, opener=not_found)
+    assert not (tmp_path / "structures" / "9XYZ.pdb").exists()

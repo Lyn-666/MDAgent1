@@ -12,6 +12,7 @@ argument-hint: "[要求，例如：用 Amber，看苯周围的口袋，先检查
 2. **确定输入文件。** 有两种输入：
    - 蛋白 PDB 文件（`--pdb`）：MDAgent 自己搭体系，配体会被删掉。
    - 用户自己准备好的 Amber 体系（`.parm7`/`.prmtop` 加 `.rst7`/`.inpcrd`，用 `--prmtop` 和 `--inpcrd`）：原样使用，配体保留。用户提到这类文件，或者要求保留配体时用这种。
+   - 用户给出 PDB 编号（例如 3HTB）时，先运行 `python -m mdagent fetch <编号>`，它下载到 `structures/<编号>.pdb`；命令里用 `--pdb-id <编号>`，或者 `--pdb structures/<编号>.pdb`。
    用户没有提到文件时用 `examples/181L.pdb`，并在第 5 步告诉用户。文件不存在时问用户，然后停下。要保留配体但用户只给了 PDB 文件时，告诉用户需要先用 tleap 等工具准备好 Amber 体系，然后停下。
 
 3. **读取 PDB 概况。** 运行：

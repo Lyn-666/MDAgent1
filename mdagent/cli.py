@@ -121,6 +121,13 @@ def cmd_run(args) -> int:
         from .adaptive import check_installed
         check_installed()
 
+    if args.pdb_id:
+        from .fetch import fetch_pdb
+
+        path, new = fetch_pdb(args.pdb_id)
+        print(("Downloaded" if new else "Using the downloaded file") + f" {path} (PDB ID {args.pdb_id.upper()}).")
+        args.pdb = str(path)
+
     target = _target_from_args(args)
     if amber:
         from .build import load_amber
@@ -248,6 +255,8 @@ def build_parser() -> argparse.ArgumentParser:
     r = sub.add_parser("run", help="Build the system and let the agent run MD until the target is sampled.")
     src = r.add_mutually_exclusive_group(required=True)
     src.add_argument("--pdb", help="Protein PDB file. MDAgent builds the system (ligands are removed).")
+    src.add_argument("--pdb-id", help="PDB ID, for example 3HTB. MDAgent downloads it to structures/<ID>.pdb "
+                                     "(if it is not there yet) and uses that file like --pdb.")
     src.add_argument("--prmtop", help="A prepared, solvated Amber system (.parm7/.prmtop), for example from "
                                      "tleap with GAFF ligand parameters. Use it as it is; needs --inpcrd.")
     r.add_argument("--inpcrd", help="Coordinates and box for --prmtop (.rst7/.inpcrd).")
@@ -313,6 +322,10 @@ def build_parser() -> argparse.ArgumentParser:
     d.add_argument("--run", required=True)
     d.set_defaults(func=cmd_diagnose)
 
+    f = sub.add_parser("fetch", help="Download structures from the PDB to structures/<ID>.pdb.")
+    f.add_argument("pdb_ids", nargs="+", help="One or more PDB IDs, for example 181L 3HTB.")
+    f.set_defaults(func=cmd_fetch)
+
     i = sub.add_parser("info", help="Show the chains, residue ranges and ligands of a PDB or Amber file.")
     isrc = i.add_mutually_exclusive_group(required=True)
     isrc.add_argument("--pdb")
@@ -354,4 +367,15 @@ def cmd_chat(args) -> int:
     from .chat import serve
 
     serve(Path.cwd(), args.backend, args.port, open_browser=not args.no_browser)
+    return 0
+
+
+def cmd_fetch(args) -> int:
+    from .fetch import fetch_pdb
+    from .target import pdb_summary
+
+    for pdb_id in args.pdb_ids:
+        path, new = fetch_pdb(pdb_id)
+        print(("Downloaded " if new else "Already there: ") + str(path))
+        print("  " + pdb_summary(path).replace("\n", "\n  "))
     return 0
