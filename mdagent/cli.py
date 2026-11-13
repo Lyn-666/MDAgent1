@@ -198,6 +198,15 @@ def main(argv: list[str] | None = None) -> int:
     # Otherwise Python keeps lines in a buffer and the log falls behind.
     sys.stdout.reconfigure(line_buffering=True)
     sys.stderr.reconfigure(line_buffering=True)
+    args = build_parser().parse_args(argv)
+    try:
+        return args.func(args)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+
+
+def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="mdagent")
     sub = p.add_subparsers(dest="command", required=True)
 
@@ -263,9 +272,17 @@ def main(argv: list[str] | None = None) -> int:
     d.add_argument("--run", required=True)
     d.set_defaults(func=cmd_diagnose)
 
-    args = p.parse_args(argv)
-    try:
-        return args.func(args)
-    except ValueError as e:
-        print(f"error: {e}", file=sys.stderr)
-        return 2
+    a = sub.add_parser("ask", help="Describe the run in plain language. Claude turns it into settings; "
+                                   "you confirm before anything runs.")
+    a.add_argument("request", help='For example: "use CHARMM, look at the pocket around benzene, 0.1 M KCl".')
+    a.add_argument("--pdb", required=True)
+    a.add_argument("--out", required=True)
+    a.add_argument("--yes", action="store_true", help="Start without asking for confirmation.")
+    a.set_defaults(func=cmd_ask)
+    return p
+
+
+def cmd_ask(args) -> int:
+    from .llm import ask
+
+    return ask(args.request, args.pdb, args.out, assume_yes=args.yes)

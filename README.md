@@ -132,8 +132,21 @@ agent 只负责跑增强采样和保存数据，不做分析。输出在运行�
 
 选项：`--adaptive-policy`（`least_counts` 或 `random`）、`--adaptive-clusters`（聚类数，默认 20）、`--full-save-ps`（完整坐标的保存间隔，默认 10 ps）。
 
+## 用一句话描述要求（`ask`）
+
+```bash
+pip install -e ".[llm]"
+export ANTHROPIC_API_KEY=...        # 或者用 ant auth login 登录
+python -m mdagent ask --pdb examples/181L.pdb --out runs/a "用 CHARMM，看苯周围的口袋，0.1 M KCl，先检查质子化"
+```
+
+Claude（`claude-opus-5-5`）只负责填一张固定的设置表，表里每一项都对应 `mdagent run` 的一个选项。你没提到的项留空，保持默认值。程序会把 PDB 文件的概况告诉 Claude：有哪些链、残基编号范围和配体名称。所以 Claude 不需要猜配体名称；你说的配体在文件里找不到时，它会提问。
+
+- 要求不清楚时，Claude 会提出问题，程序不运行。
+- 要求清楚时，设置表被转成一条普通的 `mdagent run` 命令，经过和命令行完全相同的检查。程序显示目标区域、哪些设置改了默认值、完整的命令，等你输入 `y` 才开始运行。加 `--yes` 可以跳过确认。
+- 如果安全分类器拒绝了请求，API 会自动换一个模型重试（server-side fallback）。仍被拒绝时，程序会报错，不会运行。
+
 ## 下一步
 
-1. 在 GPU 上用很短的参数验证自适应模式（AdaptivePy 只在用户的电脑上安装过）。
-2. 加一个 LLM 层：把用户的自然语言要求转换成 `SetupOptions` 和其他设置，用通俗的话汇报进度。
-3. 做成异步的 agent 窗口：MD 在后台运行，定期汇报进度。
+1. 在用户电脑上用真实的 API 密钥试用 `ask`。
+2. 做成异步的 agent 窗口：MD 在后台运行，窗口里定期汇报进度，用户可以随时提问。

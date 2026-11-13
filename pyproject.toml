@@ -12,6 +12,7 @@ dependencies = ["openmm>=8.1", "pdbfixer", "mdtraj", "numpy", "propka>=3.5"]
 [project.optional-dependencies]
 test = ["pytest"]
 adaptive = ["adaptivepy-sampling"]
+llm = ["anthropic>=2.8"]
 
 [project.scripts]
 mdagent = "mdagent.cli:main"
