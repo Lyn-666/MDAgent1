@@ -38,6 +38,8 @@
   .user { align-self:flex-end; background:var(--user); }
   .assistant { align-self:flex-start; border:1px solid var(--line); }
   .card { margin-top:8px; padding:10px; border:1px dashed var(--accent); border-radius:8px; font-size:14px; }
+  .card details { margin:6px 0; } .card summary { cursor:pointer; color:var(--accent); }
+  pre.check { font-size:12px; white-space:pre-wrap; color:var(--muted); margin:6px 0 0; }
   .card code { display:block; font-size:12px; color:var(--muted); margin:6px 0; word-break:break-all; }
   button { background:var(--accent); color:#fff; border:0; border-radius:8px; padding:8px 14px; cursor:pointer;
            font-size:14px; }
@@ -89,7 +91,7 @@ const UI = {
     placeholder: "例如：用 Amber，看 181L 里苯周围的口袋，开发测试。按 Enter 发送，Shift+Enter 换行。",
     send: "发送", thinking: "思考中…", runsTitle: "运行", thisChat: "本对话", all: "全部",
     noRuns: "这个对话还没有启动运行。", noRunsAll: "还没有运行。", newChat: "＋ 新对话", untitled: "新对话",
-    backend: "语言模型：", changed: "改动的设置：", plainMd: n => `普通 MD：每条 ${n} ns`,
+    backend: "语言模型：", changed: "改动的设置：", check: "结构检查报告", plainMd: n => `普通 MD：每条 ${n} ns`,
     failed: "连接聊天服务失败：", runsCount: n => `${n} 个运行`,
     buttons: {start: "开始运行", stop: "停止运行", resume: "继续运行"},
     states: {running: "运行中", finished: "已完成", stopped: "已停止", failed: "出错"},
@@ -99,7 +101,7 @@ const UI = {
     placeholder: "For example: use Amber, look at the pocket around benzene in 181L, development test. Enter sends, Shift+Enter adds a line.",
     send: "Send", thinking: "Thinking…", runsTitle: "Runs", thisChat: "This chat", all: "All",
     noRuns: "No runs started in this chat yet.", noRunsAll: "No runs yet.", newChat: "+ New chat", untitled: "New chat",
-    backend: "Language model: ", changed: "Changed settings: ", plainMd: n => `Plain MD: ${n} ns per replica`,
+    backend: "Language model: ", changed: "Changed settings: ", check: "Structure check report", plainMd: n => `Plain MD: ${n} ns per replica`,
     failed: "Could not reach the chat server: ", runsCount: n => `${n} run(s)`,
     buttons: {start: "Start run", stop: "Stop run", resume: "Continue run"},
     states: {running: "running", finished: "finished", stopped: "stopped", failed: "failed"},
@@ -153,7 +155,8 @@ function addBubble(role, body, card) {
     c.className = "card";
     c.innerHTML = `<div>${escapeHtml(card.text)}</div>` +
       (card.changed && card.changed.length ? `<div>${L().changed}${escapeHtml(card.changed.join(", "))}</div>` : "") +
-      (card.command ? `<code>${escapeHtml(card.command)}</code>` : "");
+      (card.command ? `<code>${escapeHtml(card.command)}</code>` : "") +
+      (card.check ? `<details><summary>${L().check}</summary><pre class="check">${escapeHtml(card.check)}</pre></details>` : "");
     const b = document.createElement("button");
     b.textContent = L().buttons[card.kind];
     b.disabled = !!card.used;

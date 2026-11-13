@@ -63,6 +63,14 @@ class RunPlan(BaseModel):
                                                            "Default 20.")
     enhanced_replicas: Optional[int] = Field(None, description="Default 2.")
     no_enhanced_sampling: Optional[bool] = Field(None, description="True: stop after plain MD.")
+    chains: Optional[str] = Field(None, description="Keep only these protein chains, for example 'A' or 'A,B'.")
+    keep_tags: Optional[bool] = Field(None, description="True: keep tag residues at the chain ends. Default false "
+                                                        "(tags are removed).")
+    uniprot: Optional[str] = Field(None, description="UniProt accession of the reference sequence, only for files "
+                                                     "that have none.")
+    accept_problems: Optional[bool] = Field(
+        None, description="True only when the user explicitly says to go on despite the problems that the "
+                          "structure check reported.")
     questions: list[str] = Field(
         description="Questions for the user when the request is unclear or cannot be done with these "
                     "options. Empty when everything is clear.")
@@ -109,8 +117,10 @@ FLAGS = [  # RunPlan field -> command line option
     ("first_ns", "--first-ns"), ("extend_ns", "--extend-ns"), ("max_ns", "--max-ns"),
     ("no_flip_patience_ns", "--no-flip-patience-ns"), ("sampling", "--sampling"),
     ("enhanced_ns", "--enhanced-ns"), ("enhanced_replicas", "--enhanced-replicas"),
+    ("chains", "--chains"), ("uniprot", "--uniprot"),
 ]
-SWITCHES = [("check_protonation", "--check-protonation"), ("no_enhanced_sampling", "--no-enhanced-sampling")]
+SWITCHES = [("check_protonation", "--check-protonation"), ("no_enhanced_sampling", "--no-enhanced-sampling"),
+            ("keep_tags", "--keep-tags"), ("accept_problems", "--accept-problems")]
 
 
 def to_argv(plan: RunPlan, pdb: str | None, out: str, prmtop: str | None = None,

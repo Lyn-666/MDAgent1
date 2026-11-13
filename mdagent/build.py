@@ -76,6 +76,11 @@ class SetupOptions:
     check_protonation: bool = False
     protonation: dict[str, str] = field(default_factory=dict)  # "A:31" -> "HIP"
     hydrogen_mass_amu: float | None = None
+    # Structure check (check.py) choices.
+    chains: list[str] | None = None      # Keep only these protein chains. None: keep all.
+    keep_tags: bool = False              # Keep tag residues at the chain ends.
+    uniprot: str | None = None           # Reference sequence when the file has none.
+    accept_problems: bool = False        # Build even if the structure check found problems.
 
     def validate(self) -> None:
         if self.forcefield not in FORCEFIELDS:
@@ -166,6 +171,16 @@ def _gap_report(fixer: PDBFixer, target: set[tuple[str, int]], notes, warnings) 
                 "Consider a structure without this gap, for example an AlphaFold model.")
 
 
+def _delete_residues(fixer: PDBFixer, keys: list[tuple[str, int, str]]) -> None:
+    """Delete residues (chain, number, insertion code), for example tags found by the structure check."""
+    wanted = {(c, n, i) for c, n, i in keys}
+    modeller = app.Modeller(fixer.topology, fixer.positions)
+    gone = [r for r in modeller.topology.residues()
+            if (r.chain.id, int(r.id), (r.insertionCode or "").strip()) in wanted]
+    modeller.delete(gone)
+    fixer.topology, fixer.positions = modeller.topology, modeller.positions
+
+
 def _chain_break_check(fixer: PDBFixer, warnings) -> None:
     """Find chain breaks that PDBFixer did not report.
 
@@ -197,6 +212,7 @@ def build_system(
     pdb_path: str | Path,
     options: SetupOptions | None = None,
     target: list[tuple[str, int]] | None = None,
+    remove_residues: list[tuple[str, int, str]] | None = None,
 ) -> BuiltSystem:
     opts = options or SetupOptions()
     opts.validate()
@@ -206,6 +222,13 @@ def build_system(
     warnings: list[str] = []
 
     fixer = PDBFixer(filename=str(pdb_path))
+    if opts.chains:
+        others = [c.id for c in fixer.topology.chains() if c.id not in opts.chains]
+        fixer.removeChains(chainIds=others)
+        notes.append(f"Kept chain(s) {', '.join(opts.chains)} only.")
+    if remove_residues:
+        _delete_residues(fixer, remove_residues)
+        notes.append(f"Removed {len(remove_residues)} tag residue(s) at the chain ends.")
     removed = sorted({r.name for r in fixer.topology.residues()
                       if r.name not in _PROTEIN and r.name != "HOH"})
     fixer.removeHeterogens(keepWater=False)

@@ -63,7 +63,21 @@ def _check_env(platform, forcefield_files=()) -> bool:
     return not problems
 
 
-def _build_from_pdb(args, keys, out):
+def _chain_list(text):
+    return [c.strip() for c in text.split(",") if c.strip()] if text else None
+
+
+def _structure_check(args):
+    from .check import check_structure
+
+    print("Checking the structure ...")
+    check = check_structure(args.pdb, chains=_chain_list(args.chains), keep_tags=args.keep_tags,
+                            uniprot=args.uniprot, root=Path.cwd())
+    print(check.report())
+    return check
+
+
+def _build_from_pdb(args, keys, out, remove_residues=None):
     from .build import SetupOptions, build_system
     from .protonation import parse_overrides
     from .simulate import write_inputs
@@ -78,11 +92,15 @@ def _build_from_pdb(args, keys, out):
         check_protonation=args.check_protonation,
         protonation={f"{c + ':' if c else ''}{n}": v
                      for (c, n), v in parse_overrides(args.protonation or "").items()},
+        chains=_chain_list(args.chains),
+        keep_tags=args.keep_tags,
+        uniprot=args.uniprot,
+        accept_problems=args.accept_problems,
     )
     setup.validate()
     print("Building the system" + (" (checking protonation states with PROPKA)" if setup.check_protonation else "")
           + " ...")
-    built = build_system(args.pdb, setup, keys)
+    built = build_system(args.pdb, setup, keys, remove_residues)
     report = built.report()
     print("\n".join("  " + line for line in report.splitlines()))
     write_inputs(built, out)
@@ -93,7 +111,8 @@ def _build_from_pdb(args, keys, out):
 
 # Options that only matter when MDAgent builds the system from a PDB file, with their defaults.
 SETUP_DEFAULTS = {"forcefield": "charmm36m", "ph": 7.0, "ion_conc": 0.15, "cation": "Na+", "padding_nm": 1.0,
-                  "box_shape": "cube", "check_protonation": False, "protonation": None}
+                  "box_shape": "cube", "check_protonation": False, "protonation": None, "chains": None,
+                  "keep_tags": False, "uniprot": None, "accept_problems": False}
 
 
 def cmd_run(args) -> int:
@@ -128,6 +147,18 @@ def cmd_run(args) -> int:
         print(("Downloaded" if new else "Using the downloaded file") + f" {path} (PDB ID {args.pdb_id.upper()}).")
         args.pdb = str(path)
 
+    check = None
+    if not amber:
+        check = _structure_check(args)
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "structure_check.txt").write_text(check.report() + "\n")
+        if not check.clean and not args.accept_problems:
+            print("\nThe run did not start. Deal with the problems above and run the command again (add the "
+                  "options named under 'What to do'), or add --accept-problems to go on anyway.")
+            return 4
+        if not check.clean:
+            print("Going on despite the problems above (--accept-problems).")
+
     target = _target_from_args(args)
     if amber:
         from .build import load_amber
@@ -145,6 +176,13 @@ def cmd_run(args) -> int:
         args.pdb = str(out / "solvated.pdb")
         setup = None
     keys = resolve_target(target, args.pdb)
+    if check is not None:
+        # Leave out target residues on removed chains or tags.
+        removed = {(c, n) for c, n, _ in check.remove_residues}
+        keys = [k for k in keys if k[0] in check.chains and tuple(k) not in removed]
+        if not keys:
+            print("error: no target residues are left on the kept chains.", file=sys.stderr)
+            return 2
     print(f"Target: {target.describe()}")
     print(f"        {len(keys)} residues: " + ", ".join(f"{c}:{n}" for c, n in keys))
 
@@ -155,8 +193,8 @@ def cmd_run(args) -> int:
             print("WARNING: these target residues have no coordinates in the PDB file and are "
                   "left out of the target: " + ", ".join(map(str, missing)))
 
-    if not amber:
-        built, setup = _build_from_pdb(args, keys, out)
+    if check is not None:
+        built, setup = _build_from_pdb(args, keys, out, check.remove_residues)
 
     loop = LoopSettings(
         first_ns=min(args.first_ns, args.max_ns),
@@ -260,6 +298,9 @@ def build_parser() -> argparse.ArgumentParser:
     src.add_argument("--prmtop", help="A prepared, solvated Amber system (.parm7/.prmtop), for example from "
                                      "tleap with GAFF ligand parameters. Use it as it is; needs --inpcrd.")
     r.add_argument("--inpcrd", help="Coordinates and box for --prmtop (.rst7/.inpcrd).")
+    _add_check_options(r)
+    r.add_argument("--accept-problems", action="store_true",
+                   help="Build and run even if the structure check finds problems.")
     r.add_argument("--equil-ps", type=float, default=600.0,
                    help="Equilibration length: restrained heating, restrained NPT, restraint release, free NPT.")
     g = r.add_mutually_exclusive_group(required=True)
@@ -322,6 +363,14 @@ def build_parser() -> argparse.ArgumentParser:
     d.add_argument("--run", required=True)
     d.set_defaults(func=cmd_diagnose)
 
+    k = sub.add_parser("check", help="Check a structure before a run: reference sequence, tags, chains, "
+                                     "metals, gaps. Builds nothing.")
+    ksrc = k.add_mutually_exclusive_group(required=True)
+    ksrc.add_argument("--pdb")
+    ksrc.add_argument("--pdb-id", help="Download to structures/<ID>.pdb first if needed.")
+    _add_check_options(k)
+    k.set_defaults(func=cmd_check)
+
     f = sub.add_parser("fetch", help="Download structures from the PDB to structures/<ID>.pdb.")
     f.add_argument("pdb_ids", nargs="+", help="One or more PDB IDs, for example 181L 3HTB.")
     f.set_defaults(func=cmd_fetch)
@@ -379,3 +428,19 @@ def cmd_fetch(args) -> int:
         print(("Downloaded " if new else "Already there: ") + str(path))
         print("  " + pdb_summary(path).replace("\n", "\n  "))
     return 0
+
+
+def _add_check_options(p) -> None:
+    p.add_argument("--chains", help="Keep only these protein chains, for example 'A' or 'A,B'.")
+    p.add_argument("--keep-tags", action="store_true", help="Keep tag residues at the chain ends.")
+    p.add_argument("--uniprot", help="UniProt accession of the reference sequence, for files without one.")
+
+
+def cmd_check(args) -> int:
+    if args.pdb_id:
+        from .fetch import fetch_pdb
+
+        path, new = fetch_pdb(args.pdb_id)
+        print(("Downloaded " if new else "Using ") + str(path))
+        args.pdb = str(path)
+    return 0 if _structure_check(args).clean else 4

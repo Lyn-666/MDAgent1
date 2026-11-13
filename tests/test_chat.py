@@ -27,11 +27,16 @@ SLEEPER = [sys.executable, "-c", "import time; print('Round 1: running 2 replica
 def project(tmp_path):
     (tmp_path / "examples").mkdir()
     shutil.copy(REPO / "examples" / "181L.pdb", tmp_path / "examples" / "181L.pdb")
+    (tmp_path / "structures" / "uniprot").mkdir(parents=True)   # UniProt sequences, so tests run offline.
+    for f in (REPO / "tests" / "data" / "uniprot").glob("*.fasta"):
+        shutil.copy(f, tmp_path / "structures" / "uniprot" / f.name)
     return tmp_path
 
 
 def _plan(**kw):
-    base = dict(target_kind="ligand", ligand="BNZ", questions=[], summary="s", forcefield="amber14")
+    # 181L differs from its UniProt entry at two positions; most tests accept that and look at other things.
+    base = dict(target_kind="ligand", ligand="BNZ", questions=[], summary="s", forcefield="amber14",
+                accept_problems=True)
     base.update(kw)
     return RunPlan(**base)
 
@@ -259,3 +264,14 @@ def test_fetch_rejects_bad_ids_and_reports_missing_entries(tmp_path):
     with pytest.raises(ValueError, match="mmCIF"):
         fetch_pdb("9xyz", tmp_path, opener=not_found)
     assert not (tmp_path / "structures" / "9XYZ.pdb").exists()
+
+
+def test_structure_problems_give_no_card_until_accepted(project):
+    plan = ChatAction(action="plan_run", reply="ok", run_name="t4", pdb="examples/181L.pdb",
+                      plan=_plan(accept_problems=None))
+    r = _assistant(project, plan).message("181L, benzene pocket", lang="en")
+    assert r["card"] is None
+    assert "structure check found problems" in r["reply"] and "R12G" in r["reply"]
+    ok = ChatAction(action="plan_run", reply="ok", run_name="t4", pdb="examples/181L.pdb", plan=_plan())
+    r = _assistant(project, ok).message("go on anyway", lang="en")
+    assert r["card"] and "--accept-problems" in r["card"]["argv"] and "R12G" in r["card"]["check"]

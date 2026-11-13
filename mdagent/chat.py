@@ -82,6 +82,12 @@ Choose one action for the user's last message:
 - answer: everything else, for example progress questions. Answer progress questions only from the run
   list below.
 
+Before a run that uses a PDB file, MDAgent checks the structure: it compares each chain with its UniProt
+reference sequence, finds tags, copies of the same chain, metal ions, unknown residues and long gaps. If the
+check finds problems, no button is shown and the user sees the report. Then propose a new plan with the options
+the user chooses (chains, keep_tags, uniprot). Set accept_problems to true only if the user explicitly says to go
+on despite the problems.
+
 If the user gives a PDB ID (four characters, for example 3HTB) that is not in the list of input files, put it
 in fetch_pdb_ids and use action "answer". MDAgent downloads it to structures/<ID>.pdb and asks you again;
 then the file and its summary are in the list, and you can plan the run.
@@ -114,6 +120,8 @@ TEXT = {
         "downloaded": "已从 PDB 下载 {id}，保存在 {path}。",
         "already_there": "{id} 之前已经下载过，在 {path}。",
         "download_failed": "下载 {id} 失败：{e}",
+        "check_problems": "\n\n结构检查发现了问题，所以还没有生成运行卡片：\n\n{report}\n\n请告诉我怎么处理，"
+                          "例如“只保留 A 链”“保留标签”，或者明确说“有问题也继续”。",
     },
     "en": {
         "backend_failed": "The language model backend failed: {e}",
@@ -136,6 +144,9 @@ TEXT = {
         "downloaded": "Downloaded {id} from the PDB to {path}.",
         "already_there": "{id} was downloaded before; it is in {path}.",
         "download_failed": "Download of {id} failed: {e}",
+        "check_problems": "\n\nThe structure check found problems, so there is no run button yet:\n\n{report}\n\n"
+                          "Tell me what to do, for example \"keep chain A only\" or \"keep the tags\", or say "
+                          "clearly that I should go on despite the problems.",
     },
 }
 
@@ -337,6 +348,14 @@ def _clean_name(name: str | None, existing: list[str]) -> str:
     return candidate
 
 
+class CheckProblems(Exception):
+    """The structure check found problems, and the user has not accepted them."""
+
+    def __init__(self, report: str):
+        super().__init__(report)
+        self.report = report
+
+
 @dataclass
 class Assistant:
     root: Path
@@ -370,6 +389,8 @@ class Assistant:
                 reply = "\n".join(notes) + "\n\n" + reply
             try:
                 card = self._card(action, lang)
+            except CheckProblems as e:
+                reply += t(lang, "check_problems", report=e.report)
             except (ValueError, SystemExit) as e:
                 reply += t(lang, "cannot_use", e=e)
         except Exception as e:
@@ -415,10 +436,20 @@ class Assistant:
                 build_parser().parse_args(argv)  # The same checks as the command line.
             except SystemExit:
                 raise ValueError(t(lang, "invalid"))
+            check_text = None
+            if a.pdb and not a.prmtop:
+                from .check import check_structure
+
+                chains = [c.strip() for c in (a.plan.chains or "").split(",") if c.strip()] or None
+                check = check_structure(self.root / a.pdb, chains=chains, keep_tags=bool(a.plan.keep_tags),
+                                        uniprot=a.plan.uniprot, root=self.root)
+                check_text = check.report()
+                if not check.clean and not a.plan.accept_problems:
+                    raise CheckProblems(check_text)
             changed = [f"{n} = {getattr(a.plan, n)}" for n, _ in FLAGS + SWITCHES
                        if getattr(a.plan, n) not in (None, False)]
             return {"id": uuid.uuid4().hex, "kind": "start", "name": name, "argv": argv,
-                    "text": t(lang, "card_start", name=name), "changed": changed,
+                    "text": t(lang, "card_start", name=name), "changed": changed, "check": check_text,
                     "command": "python -m mdagent " + " ".join(shlex.quote(x) for x in argv)}
         if a.action in ("stop", "resume"):
             if a.run_name not in names:
