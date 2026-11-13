@@ -21,7 +21,7 @@ argument-hint: "[要求，例如：用 Amber，看苯周围的口袋，先检查
 4. **转成命令。** 运行 `python -m mdagent run --help` 查看所有选项和默认值。规则：
    - 只设置用户明确要求的选项，其余保持默认。不要自作主张改参数。
    - 目标区域用 `--around-ligand <配体名>`（可加 `--cutoff-angstrom`），或 `--residues A:99-120`。
-   - 用户说"开发测试"或"短一点"时，用很短的参数：`--replicas 2 --first-ns 0.1 --extend-ns 0.1 --max-ns 0.3 --no-flip-patience-ns 0.25 --enhanced-ns 0.1`。
+   - 用户说"开发测试"或"短一点"时，用很短的参数：`--replicas 2 --first-ns 0.1 --extend-ns 0.1 --max-ns 0.3 --no-flip-patience-ns 0.25 --enhanced-ns 0.1 --equil-ps 60`。
    - 输出目录用 `runs/<简短英文名>`，必须是不存在的目录（先用 `ls runs` 检查）。
    - 要求里有这些选项做不到的事情时，告诉用户，然后停下。
 
