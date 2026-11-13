@@ -62,18 +62,30 @@ def test_claude_backend_command_and_answer():
     seen = {}
 
     def runner(cmd, **kw):
-        seen["cmd"], seen["cwd"] = cmd, kw["cwd"]
+        seen["cmd"], seen["cwd"], seen["env"] = cmd, kw["cwd"], kw["env"]
         out = {"result": "", "structured_output": {"action": "answer", "reply": "hi", "run_name": None,
                                                     "pdb": None, "prmtop": None, "inpcrd": None, "plan": None, "fetch_pdb_ids": []}}
         return SimpleNamespace(returncode=0, stdout=json.dumps(out), stderr="")
 
-    a = backends.call("claude", "SYS", "USER", ChatAction, runner=runner)
+    os.environ["ANTHROPIC_API_KEY"] = "sk-test"     # Must not reach Claude Code: it would override the login.
+    try:
+        a = backends.call("claude", "SYS", "USER", ChatAction, runner=runner)
+    finally:
+        del os.environ["ANTHROPIC_API_KEY"]
     assert a.reply == "hi"
+    assert "ANTHROPIC_API_KEY" not in seen["env"]
     cmd = seen["cmd"]
     assert cmd[:3] == ["claude", "-p", "USER"] and "--json-schema" in cmd
     assert cmd[cmd.index("--tools") + 1] == ""          # No tools: it can only answer.
     assert cmd[cmd.index("--system-prompt") + 1] == "SYS"
     assert seen["cwd"] != str(REPO)                     # Not in the project, so no CLAUDE.md is loaded.
+
+
+def test_claude_backend_error_shows_the_real_reason():
+    out = json.dumps({"is_error": True, "result": "Invalid API key"})
+    runner = lambda cmd, **kw: SimpleNamespace(returncode=1, stdout=out, stderr="warning: connectors disabled")
+    with pytest.raises(ValueError, match="Invalid API key"):
+        backends.call("claude", "S", "U", ChatAction, runner=runner)
 
 
 def test_claude_backend_without_structured_output_fails():

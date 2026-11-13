@@ -26,6 +26,7 @@ from pathlib import Path
 from pydantic import BaseModel
 
 BACKENDS = ("claude", "codex", "api")
+API_KEY_VARS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
 TIMEOUT_S = 300
 
 
@@ -85,12 +86,21 @@ def _call_claude(system, user, model, runner):
     cmd = ["claude", "-p", user, "--output-format", "json",
            "--json-schema", json.dumps(strict_schema(model)),
            "--tools", "", "--system-prompt", system, "--no-session-persistence"]
+    # Use the Claude Code login (for example a subscription). An API key in the environment would take
+    # precedence over it, so it is removed for this call; the "api" backend is the one that uses keys.
+    env = {k: v for k, v in os.environ.items() if k not in API_KEY_VARS}
     # Run in an empty folder, so Claude Code does not load this project's CLAUDE.md.
     with tempfile.TemporaryDirectory() as tmp:
-        done = runner(cmd, capture_output=True, text=True, timeout=TIMEOUT_S, cwd=tmp)
-    if done.returncode != 0:
-        raise ValueError(f"Claude Code failed: {(done.stderr or done.stdout).strip()[:500]}")
-    data = json.loads(done.stdout)
+        done = runner(cmd, capture_output=True, text=True, timeout=TIMEOUT_S, cwd=tmp, env=env)
+    try:
+        data = json.loads(done.stdout)
+    except (json.JSONDecodeError, TypeError):
+        data = None
+    if done.returncode != 0 or data is None or data.get("is_error"):
+        # The reason is in the JSON result if there is one; stderr may hold only warnings.
+        reason = (data or {}).get("result") or done.stderr or done.stdout
+        raise ValueError(f"Claude Code failed: {str(reason).strip()[:500]}. If you are not logged in, "
+                         "run `claude` once in a terminal and log in.")
     if data.get("structured_output") is None:
         raise ValueError(f"Claude Code returned no structured answer: {str(data.get('result'))[:500]}")
     return model.model_validate(data["structured_output"])
