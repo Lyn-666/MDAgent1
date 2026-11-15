@@ -287,3 +287,80 @@ def test_structure_problems_give_no_card_until_accepted(project):
     ok = ChatAction(action="plan_run", reply="ok", run_name="t4", pdb="examples/181L.pdb", plan=_plan())
     r = _assistant(project, ok).message("go on anyway", lang="en")
     assert r["card"] and "--accept-problems" in r["card"]["argv"] and "R12G" in r["card"]["check"]
+
+
+def _finished_run(project):
+    """A run folder with result files and one file that is not a result."""
+    run = project / "runs" / "demo"
+    (run / "enhanced").mkdir(parents=True)
+    (run / "run.json").write_text("{}")
+    (run / "protein.pdb").write_text("ATOM\n")
+    for i in (0, 1):
+        (run / f"replica_{i}_part000.dcd").write_bytes(bytes([i]) * 100)
+    (run / "replica_0_part000.state.xml").write_text("<State/>")
+    (run / "enhanced" / "replica_0_chunk000.dcd").write_bytes(b"e" * 50)
+    (run / "enhanced" / "replica_0_chi.npy").write_bytes(b"c")
+    (project / "runs" / "demo.log").write_text("Summary\n")
+    return run
+
+
+def test_run_status_says_where_the_files_are(project):
+    from mdagent.outputs import describe, host
+
+    run = _finished_run(project)
+    st = Runs(project).status("demo")
+    assert st["host"] == host() and st["folder"] == str(run.resolve())
+    assert [f["path"] for f in st["files"]] == [
+        "protein.pdb", "replica_0_part000.dcd", "replica_1_part000.dcd",
+        "enhanced/replica_0_chunk000.dcd", "enhanced/replica_0_chi.npy"]
+    lines = describe(run)
+    assert str(run.resolve()) in lines[0] and host() in lines[0]
+    assert any("replica_<i>_part<k>.dcd" in l and "(2 files)" in l for l in lines)
+
+
+def test_result_files_can_be_downloaded(project):
+    import io
+    import urllib.error
+    import zipfile
+
+    run = _finished_run(project)
+    a = _assistant(project, ChatAction(action="answer", reply="ok"))
+    server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(a))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        r = urllib.request.urlopen(base + "/api/file?run=demo&path=replica_1_part000.dcd")
+        assert r.read() == bytes([1]) * 100
+        assert "demo_replica_1_part000.dcd" in r.headers["Content-Disposition"]
+        # Only listed result files: no state files, no paths outside the run, no unknown runs.
+        for bad in ["run=demo&path=replica_0_part000.state.xml", "run=demo&path=../demo.log",
+                    "run=demo&path=/etc/passwd", "run=ghost&path=protein.pdb"]:
+            with pytest.raises(urllib.error.HTTPError):
+                urllib.request.urlopen(base + "/api/file?" + bad)
+        z = zipfile.ZipFile(io.BytesIO(urllib.request.urlopen(base + "/api/download?run=demo").read()))
+        assert sorted(z.namelist()) == sorted(f"demo/{p}" for p in [
+            "protein.pdb", "replica_0_part000.dcd", "replica_1_part000.dcd",
+            "enhanced/replica_0_chunk000.dcd", "enhanced/replica_0_chi.npy"])
+        assert z.read("demo/enhanced/replica_0_chunk000.dcd") == (run / "enhanced" / "replica_0_chunk000.dcd").read_bytes()
+    finally:
+        server.shutdown()
+
+
+def test_start_message_and_prompt_name_the_folder(project):
+    seen = {}
+
+    def call(backend, system, prompt, model):
+        seen["prompt"] = prompt
+        return ChatAction(action="plan_run", reply="ok", run_name="dev", pdb="examples/181L.pdb", plan=_plan())
+
+    a = Assistant(root=project, backend="claude", runs=Runs(project), call=call)
+    a.runs.launch = lambda name, argv, **kw: 123
+    card = a.message("run it")["card"]
+    msg = a.confirm(card["id"])
+    assert str((project / "runs" / "dev").resolve()) in msg
+    conv = a.store.get(card["chat"])
+    conv.runs.append("demo")
+    _finished_run(project)
+    a.message("where is the trajectory?", chat_id=conv.id)
+    assert '"folder": "' + str((project / "runs" / "demo").resolve()) in seen["prompt"]
+    assert "enhanced/replica_0_chunk000.dcd" in seen["prompt"]

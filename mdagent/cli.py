@@ -34,22 +34,26 @@ def _target_from_args(args) -> Target:
 
 
 def _print_summary(decisions, enhanced_labels, run_dir) -> None:
+    from .outputs import describe
+
     flagged = [d.residue for d in decisions if d.action == "enhanced_sampling"]
     print("\nSummary")
     if not flagged:
         print("Plain MD sampled all target side chains well. No enhanced sampling was needed.")
-        return
-    print("Plain MD could not sample: " + ", ".join(flagged) + ".")
-    if not enhanced_labels:
-        print("Enhanced sampling did not run.")
-        return
-    d = Path(run_dir) / "enhanced"
-    print(f"Enhanced sampling finished for: {', '.join(enhanced_labels)}.")
-    print(f"Output files in {d}:")
-    print("  replica_<i>_chunk<k>.dcd   protein trajectory of each 1 ns chunk (topology: protein.pdb)")
-    print("  replica_<i>_chi.npy        chi1 of each biased residue (radians), one row per pace")
-    print("  replica_<i>_bias.npy       final bias of each biased residue on the chi1 grid (kJ/mol)")
-    print(f"  The order of residues in the .npy files: {', '.join(enhanced_labels)}.")
+    else:
+        print("Plain MD could not sample: " + ", ".join(flagged) + ".")
+        if enhanced_labels:
+            print(f"Enhanced sampling finished for: {', '.join(enhanced_labels)}.")
+            print(f"The order of residues in the .npy files: {', '.join(enhanced_labels)}.")
+        else:
+            print("Enhanced sampling did not run.")
+    print("\n".join(describe(run_dir)))
+
+
+def _host() -> str:
+    from .outputs import host
+
+    return host()
 
 
 def _check_env(platform, forcefield_files=()) -> bool:
@@ -127,6 +131,7 @@ def cmd_run(args) -> int:
     from .build import FORCEFIELDS
 
     out = Path(args.out)
+    print(f"Run folder: {out.resolve()} (on computer '{_host()}')")
     if (out / "run.json").exists():
         print(f"error: {out} already has a run. Use 'resume --run {out}' to continue it.",
               file=sys.stderr)
@@ -252,6 +257,7 @@ def cmd_resume(args) -> int:
     if not _check_env(state.md.platform):
         return 2
     state.save(run)
+    print(f"Run folder: {run.resolve()} (on computer '{_host()}')")
     print(f"Resuming {run}: {state.ns_done:g} ns of plain MD per replica done. "
           f"Budget: {state.loop.max_ns:g} ns per replica.")
     _print_summary(*run_all(run, state), run)

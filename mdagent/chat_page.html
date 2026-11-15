@@ -58,6 +58,13 @@
   .running { color:var(--accent); } .finished { color:var(--ok); } .stopped { color:var(--warn); }
   .failed { color:var(--bad); }
   .last { color:var(--muted); margin-top:6px; white-space:pre-wrap; word-break:break-all; }
+  .where { margin-top:8px; padding-top:8px; border-top:1px solid var(--line); word-break:break-all; }
+  .where code { font-size:12px; user-select:all; }
+  .where .note { color:var(--muted); font-size:12px; margin-top:2px; }
+  .where a { color:var(--accent); }
+  .where details { margin-top:6px; } .where summary { cursor:pointer; color:var(--accent); }
+  .where ul { margin:4px 0 0; padding-left:18px; font-size:12px; }
+  .where li span { color:var(--muted); }
 </style>
 </head>
 <body>
@@ -93,6 +100,8 @@ const UI = {
     noRuns: "这个对话还没有启动运行。", noRunsAll: "还没有运行。", newChat: "＋ 新对话", untitled: "新对话",
     backend: "语言模型：", changed: "改动的设置：", check: "结构检查报告", plainMd: n => `普通 MD：每条 ${n} ns`,
     failed: "连接聊天服务失败：", runsCount: n => `${n} 个运行`,
+    where: h => `结果文件在电脑“${h}”上：`, whereNote: "在另一台电脑上打开这个网页时，用下面的链接下载。",
+    zip: "全部下载（zip）", files: n => `文件列表（${n} 个）`, noFiles: "还没有轨迹文件。",
     buttons: {start: "开始运行", stop: "停止运行", resume: "继续运行"},
     states: {running: "运行中", finished: "已完成", stopped: "已停止", failed: "出错"},
     welcome: "你好。告诉我要模拟什么，例如：“用 Amber，看 181L 里苯周围的口袋，开发测试”。也可以问某个运行的进度，或者让我停止、继续某个运行。每个对话有自己的记录和运行列表；不同的案例可以用不同的对话。运行在后台进行，关掉这个网页也不会停。",
@@ -103,6 +112,8 @@ const UI = {
     noRuns: "No runs started in this chat yet.", noRunsAll: "No runs yet.", newChat: "+ New chat", untitled: "New chat",
     backend: "Language model: ", changed: "Changed settings: ", check: "Structure check report", plainMd: n => `Plain MD: ${n} ns per replica`,
     failed: "Could not reach the chat server: ", runsCount: n => `${n} run(s)`,
+    where: h => `Result files are on computer “${h}”:`, whereNote: "If you opened this page on another computer, use the links below to download them.",
+    zip: "Download all (zip)", files: n => `File list (${n})`, noFiles: "No trajectory files yet.",
     buttons: {start: "Start run", stop: "Stop run", resume: "Continue run"},
     states: {running: "running", finished: "finished", stopped: "stopped", failed: "failed"},
     welcome: "Hello. Tell me what to simulate, for example: “use Amber, look at the pocket around benzene in 181L, development test”. You can also ask how a run is going, or ask me to stop or continue a run. Each chat has its own history and run list; use a separate chat for each case. Runs go on in the background, also when you close this page.",
@@ -203,6 +214,21 @@ async function refreshChats() {
   }
 }
 
+const openLists = new Set();  // Runs whose file list is open; kept across refreshes.
+function size(b) { return b >= 1e9 ? (b / 1e9).toFixed(1) + " GB" : b >= 1e6 ? (b / 1e6).toFixed(1) + " MB" : Math.ceil(b / 1e3) + " kB"; }
+function whereHtml(r) {
+  if (!r.folder) return "";
+  const run = encodeURIComponent(r.name), files = r.files || [];
+  let h = `<div class="where">${escapeHtml(L().where(r.host))}<br><code>${escapeHtml(r.folder)}</code>` +
+          `<div class="note">${L().whereNote}</div>`;
+  if (!files.length) return h + `<div class="note">${L().noFiles}</div></div>`;
+  h += `<a href="/api/download?run=${run}">${L().zip}</a>`;
+  h += `<details data-run="${escapeHtml(r.name)}"${openLists.has(r.name) ? " open" : ""}><summary>${L().files(files.length)}</summary><ul>`;
+  for (const f of files)
+    h += `<li><a href="/api/file?run=${run}&path=${encodeURIComponent(f.path)}">${escapeHtml(f.path)}</a> <span>${size(f.size)}</span></li>`;
+  return h + "</ul></details></div>";
+}
+
 async function refreshRuns() {
   let runs = [];
   try {
@@ -215,7 +241,9 @@ async function refreshRuns() {
     d.className = "run";
     const ns = r.plain_md_ns_per_replica != null ? L().plainMd(r.plain_md_ns_per_replica) : "";
     d.innerHTML = `<b>${escapeHtml(r.name)}</b><span class="state ${r.state}">${L().states[r.state] || r.state}</span>` +
-      `<div>${ns}</div><div class="last">${escapeHtml((r.last || []).join("\n"))}</div>`;
+      `<div>${ns}</div><div class="last">${escapeHtml((r.last || []).join("\n"))}</div>` + whereHtml(r);
+    const det = d.querySelector("details");
+    if (det) det.ontoggle = () => det.open ? openLists.add(r.name) : openLists.delete(r.name);
     box.appendChild(d);
   }
 }

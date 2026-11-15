@@ -15,6 +15,11 @@ runs/<name>.log, and their process ID to runs/<name>.pid. Closing the page or
 stopping the chat server does not stop them. A run ends when it finishes, or
 when the user stops it from the chat window.
 
+Each run card shows the computer and the full folder of the result files, with
+download links. The files stay on the computer that runs the simulation; the
+links let a user who opens the page on another computer (for example through
+SSH port forwarding) get them.
+
 The chat window does not analyze simulation results (project rule).
 """
 
@@ -30,15 +35,18 @@ import sys
 import threading
 import time
 import uuid
+import zipfile
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Literal, Optional
+from urllib.parse import quote
 
 from pydantic import BaseModel, Field
 
 from . import backends
 from .llm import FLAGS, SWITCHES, RunPlan, to_argv
+from .outputs import host, output_files
 
 INPUT_SUFFIXES = (".pdb", ".parm7", ".prmtop", ".rst7", ".inpcrd")
 SKIP_DIRS = {"runs", "tests", ".git", ".venv", "node_modules", "mdagent.egg-info", "__pycache__"}
@@ -80,7 +88,10 @@ Choose one action for the user's last message:
 - stop: the user asks to stop a run that is running. run_name must be in the run list.
 - resume: the user asks to continue a run that is stopped or failed. run_name must be in the run list.
 - answer: everything else, for example progress questions. Answer progress questions only from the run
-  list below.
+  list below. If the user asks where the trajectories or other results are, give the computer ("host") and
+  the full folder ("folder") from the run list, and the file names ("files"). The files are on that computer
+  only. If the user opened this page on another computer, they can download the files with the links on the
+  run card on the right ("all files as zip", or one file at a time).
 
 Before a run that uses a PDB file, MDAgent checks the structure: it compares each chain with its UniProt
 reference sequence, finds tags, copies of the same chain, metal ions, unknown residues and long gaps. If the
@@ -113,7 +124,8 @@ TEXT = {
         "not_running": "运行“{name}”没有在运行",
         "still_running": "运行“{name}”还在运行",
         "expired": "这个提议已经失效，请重新提出要求。",
-        "started": "运行“{name}”已在后台开始（进程 {pid}），日志在 runs/{name}.log。关掉网页也不会停。",
+        "started": "运行“{name}”已在后台开始（进程 {pid}），日志在 runs/{name}.log。关掉网页也不会停。\n"
+                   "结果文件会保存在电脑“{host}”的文件夹 {folder} 里。右侧的运行卡片上有下载链接。",
         "resumed": "运行“{name}”已在后台继续（进程 {pid}）。",
         "stopped": "运行“{name}”已停止。",
         "was_not_running": "运行“{name}”没有在运行。",
@@ -137,7 +149,8 @@ TEXT = {
         "still_running": "run '{name}' is still running",
         "expired": "This proposal is no longer available. Please ask again.",
         "started": "Run '{name}' started in the background (process {pid}). Log: runs/{name}.log. "
-                   "Closing the page does not stop it.",
+                   "Closing the page does not stop it.\nThe result files will be on computer '{host}', in "
+                   "folder {folder}. The run card on the right has download links.",
         "resumed": "Run '{name}' continues in the background (process {pid}).",
         "stopped": "Run '{name}' stopped.",
         "was_not_running": "Run '{name}' was not running.",
@@ -212,12 +225,24 @@ class Runs:
         state = "running" if running else "finished" if finished else "failed" if failed else "stopped"
         info = {"name": name, "state": state, "last": meaningful[-3:], "log": str(logs[-1].relative_to(self.root))
                 if logs else None}
-        run_json = self.dir / name / "run.json"
+        run_dir = self.dir / name
+        info["host"] = host()
+        info["folder"] = str(run_dir.resolve())
+        info["files"] = [{"path": f.as_posix(), "size": (run_dir / f).stat().st_size}
+                         for f in output_files(run_dir)] if run_dir.is_dir() else []
+        run_json = run_dir / "run.json"
         if run_json.exists():
             d = json.loads(run_json.read_text())
             info["plain_md_ns_per_replica"] = round(sum(d.get("rounds_ns", [])), 6)
             info["replicas"] = d.get("n_replicas")
         return info
+
+    def result_file(self, name: str, rel: str) -> Path | None:
+        """A result file of a run, or None if it is not one. Only listed result files can be downloaded."""
+        if name not in self.names():
+            return None
+        run_dir = self.dir / name
+        return run_dir / rel if rel in {f.as_posix() for f in output_files(run_dir)} else None
 
     def launch(self, name: str, argv: list[str], log_suffix: str = "", program: list[str] | None = None) -> int:
         """Start `python -m mdagent <argv>` (or `program`, in tests) as a detached process."""
@@ -328,7 +353,7 @@ def build_prompt(root: Path, runs: Runs, conv: Conversation, message: str) -> st
     names = runs.names()
     mine = [n for n in names if n in conv.runs]
     parts.append("\nRuns started in this conversation (newest first):")
-    parts += [f"- {json.dumps(runs.status(n), ensure_ascii=False)}" for n in mine] or ["- none"]
+    parts += [f"- {json.dumps(_for_prompt(runs.status(n)), ensure_ascii=False)}" for n in mine] or ["- none"]
     others = [n for n in names if n not in conv.runs][:20]
     if others:
         parts.append("\nOther runs in this project (from other conversations or the command line); use them only "
@@ -338,6 +363,11 @@ def build_prompt(root: Path, runs: Runs, conv: Conversation, message: str) -> st
     parts += [f"{h['role']}: {h['text']}" for h in conv.history[-HISTORY_TURNS:]] or ["(none)"]
     parts.append(f"\nUser's last message:\n{message}")
     return "\n".join(parts)
+
+
+def _for_prompt(status: dict) -> dict:
+    """The run status without file sizes, so that the prompt stays short."""
+    return {**status, "files": [f["path"] for f in status.get("files", [])]}
 
 
 def _clean_name(name: str | None, existing: list[str]) -> str:
@@ -473,7 +503,7 @@ class Assistant:
         if card["kind"] == "start":
             pid = self.runs.launch(name, card["argv"])
             conv.runs.append(name)
-            msg = t(lang, "started", name=name, pid=pid)
+            msg = t(lang, "started", name=name, pid=pid, host=host(), folder=self.runs.dir.resolve() / name)
         elif card["kind"] == "resume":
             pid = self.runs.launch(name, ["resume", "--run", f"runs/{name}"], log_suffix=f".resume-{int(time.time())}")
             msg = t(lang, "resumed", name=name, pid=pid)
@@ -508,6 +538,40 @@ def make_handler(assistant: Assistant):
             self.end_headers()
             self.wfile.write(body)
 
+        def _attachment(self, ctype: str, filename: str, length: int | None = None):
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{quote(filename)}")
+            if length is not None:
+                self.send_header("Content-Length", str(length))
+            self.end_headers()
+
+        def _send_file(self, path: Path, filename: str):
+            # A trajectory can still grow while it is sent: send the size it had at the start.
+            left = path.stat().st_size
+            self._attachment("application/octet-stream", filename, left)
+            try:
+                with open(path, "rb") as f:
+                    while left > 0:
+                        block = f.read(min(left, 1 << 20))
+                        if not block:
+                            break
+                        self.wfile.write(block)
+                        left -= len(block)
+            except (BrokenPipeError, ConnectionResetError):
+                pass  # The user cancelled the download.
+
+        def _send_zip(self, run_dir: Path, name: str):
+            # All result files, uncompressed (trajectories do not compress well), streamed as they are read.
+            # Without a length, the browser reads until the server closes the connection (HTTP/1.0).
+            self._attachment("application/zip", f"{name}.zip")
+            try:
+                with zipfile.ZipFile(self.wfile, "w", zipfile.ZIP_STORED, allowZip64=True) as z:
+                    for rel in output_files(run_dir):
+                        z.write(run_dir / rel, f"{name}/{rel.as_posix()}")
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
         def _json(self, data, code=200):
             self._send(code, json.dumps(data, ensure_ascii=False).encode(), "application/json; charset=utf-8")
 
@@ -525,6 +589,19 @@ def make_handler(assistant: Assistant):
                 c = assistant.store.chats.get(q.get("chat", ""))
                 self._json({"history": c.history if c else [], "backend": assistant.backend,
                             "chat": c.id if c else None, "title": c.title if c else ""})
+            elif url.path == "/api/file":
+                name, rel = q.get("run", ""), q.get("path", "")
+                path = assistant.runs.result_file(name, rel)
+                if path is None:
+                    self._send(404, b"not found", "text/plain")
+                else:
+                    self._send_file(path, f"{name}_{rel.replace('/', '_')}")
+            elif url.path == "/api/download":
+                name = q.get("run", "")
+                if name not in assistant.runs.names():
+                    self._send(404, b"not found", "text/plain")
+                else:
+                    self._send_zip(assistant.runs.dir / name, name)
             elif url.path == "/api/runs":
                 names = assistant.runs.names()
                 if q.get("all") != "1":

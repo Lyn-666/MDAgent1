@@ -279,7 +279,7 @@ def run_all(
                     seed=state.base_seed + 50000 + r, log=log)
 
     text = (f"Enhanced sampling finished for {', '.join(labels)}: {n_rep} replicas x "
-            f"{settings.length_ns:g} ns. Output in {run_dir / 'enhanced'}.")
+            f"{settings.length_ns:g} ns. Output in {(run_dir / 'enhanced').resolve()}.")
     log(text)
     with open(run_dir / "decisions.log", "a") as f:
         f.write(time.strftime("[%Y-%m-%d %H:%M:%S] ") + text + "\n\n")

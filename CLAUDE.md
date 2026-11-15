@@ -27,6 +27,7 @@
 - **启动的运行要在后台一直跑**，关网页、关聊天服务都不停；只有用户确认停止或运行完成才结束。
 - **界面文字要有中文和英文两种语言。**
 - **路径要让用户一看就懂**，例如 `structures/3HTB.pdb`、`runs/<名字>/`。
+- **告诉用户结果文件在哪里时，写电脑名和完整路径**，并说明文件只在跑模拟的那台电脑上。网页的运行卡片上有下载链接（单个文件或 zip）。起因：用户跑完测试后在自己电脑上找不到轨迹。
 - **语言模型只做"翻译"**：把用户的话填进固定的设置表，不能运行命令；开始、停止、继续都要用户点按钮确认。
 - **开发阶段测试运行要很短（几分钟）**：`--replicas 2 --first-ns 0.1 --extend-ns 0.1 --max-ns 0.3 --no-flip-patience-ns 0.25 --enhanced-ns 0.1 --equil-ps 60`。
 
@@ -44,7 +45,8 @@
 - `adaptive.py`：可选的 AdaptivePy 自适应采样（`--sampling adaptive`）。
 - `envcheck.py`：启动时检查平台和力场文件。
 - `backends.py`：语言模型后台（`claude -p`、`codex exec`、Anthropic API），统一返回结构化结果。claude 后台会去掉环境里的 `ANTHROPIC_API_KEY`，以使用 Claude Code 的订阅登录。
-- `chat.py`、`chat_page.html`：`chat` 命令，本地网页（`http://localhost:8765`），多个对话，存在 `runs/.chats/`。
+- `chat.py`、`chat_page.html`：`chat` 命令，本地网页（`http://localhost:8765`），多个对话，存在 `runs/.chats/`。运行卡片显示电脑名、完整路径、文件列表和下载链接（`/api/file`、`/api/download`，只提供 `outputs.py` 列出的文件）。
+- `outputs.py`：列出一个运行的结果文件（`protein.pdb`、轨迹、chi1 和偏置势数据），以及电脑名和完整路径。命令行的 Summary 和网页都用它。
 - `llm.py`：`ask` 命令和设置表 `RunPlan`。
 - `cli.py`：命令行 `run`、`resume`、`diagnose`、`check`、`info`、`fetch`、`ask`、`chat`。
 - `.claude/commands/`：Claude Code 项目命令 `/md` 和 `/md-status`。
@@ -56,4 +58,5 @@
 - **用户的电脑：** 项目在 `~/Desktop/MDAgent1`，conda 环境 `mdagent`，OpenMM 8.6.1 带 CUDA，GPU 上约每天 300 到 600 ns。用户有 Claude 订阅，但没有 API 密钥。
 - **不要在用户的 conda 环境里装 openmm-plumed：** conda-forge 上的版本会把 OpenMM 降到 8.2 并丢掉 CUDA，而且其中的 PLUMED 不带 OPES。
 - **云端会话**（Claude Code 网页版的临时容器）：没有 GPU，只适合很短的流程测试；装不了 AdaptivePy；没有 API 密钥。改动直接推送到 GitHub `Lyn-666/MDAgent1` 的 `main` 分支。最早的 `zcorn2017/binding-lang` 仓库已恢复原样，不再使用。
-- **只能在用户电脑上验证的事项：** AdaptivePy 的真实调用（已验证可用）；Claude Code 后台（已验证可用）；Codex 后台（还没验证）；CHARMM 加帽体系在 GPU 上的长时间运行（还没验证）。
+- **用户怎样打开网页（还没确认）：** 截图里浏览器是 Mac 上的 Chrome，地址是 `localhost:8765`，但运行的进程号是 1749823，macOS 上不会出现这么大的进程号。所以模拟很可能跑在一台 Linux 电脑上，网页经 SSH 端口转发打开，结果文件在那台 Linux 电脑上。
+- **只能在用户电脑上验证的事项：** 网页下载链接经端口转发是否可用（还没验证）；AdaptivePy 的真实调用（已验证可用）；Claude Code 后台（已验证可用）；Codex 后台（还没验证）；CHARMM 加帽体系在 GPU 上的长时间运行（还没验证）。
