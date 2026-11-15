@@ -364,3 +364,19 @@ def test_start_message_and_prompt_name_the_folder(project):
     a.message("where is the trajectory?", chat_id=conv.id)
     assert '"folder": "' + str((project / "runs" / "demo").resolve()) in seen["prompt"]
     assert "enhanced/replica_0_chunk000.dcd" in seen["prompt"]
+
+
+def test_busy_port_gives_a_clear_message(project, monkeypatch):
+    import socket
+
+    from mdagent import chat
+
+    monkeypatch.setattr(chat.backends, "choose", lambda b: "claude")
+    busy = socket.socket()
+    busy.bind(("127.0.0.1", 0))
+    busy.listen()
+    try:
+        with pytest.raises(SystemExit, match="(?s)already in use.*pkill -f 'mdagent chat'"):
+            chat.serve(project, "claude", busy.getsockname()[1], open_browser=False)
+    finally:
+        busy.close()

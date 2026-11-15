@@ -25,6 +25,7 @@ The chat window does not analyze simulation results (project rule).
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import re
@@ -627,7 +628,15 @@ def make_handler(assistant: Assistant):
 def serve(root: Path, backend: str, port: int, open_browser: bool = True) -> None:
     backend = backends.choose(backend)
     assistant = Assistant(root=root, backend=backend, runs=Runs(root))
-    server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(assistant))
+    try:
+        server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(assistant))
+    except OSError as e:
+        if e.errno != errno.EADDRINUSE:
+            raise
+        raise SystemExit(
+            f"error: port {port} is already in use. An older chat server is probably still running.\n"
+            f"  Stop it with Ctrl+C in its terminal, or with: pkill -f 'mdagent chat'\n"
+            f"  Running simulations are not affected. Or start this one on another port: --port {port + 1}")
     url = f"http://localhost:{port}"
     print(f"MDAgent chat window: {url}  (language model backend: {backend})")
     print("Runs keep going when you close the page or stop this server (Ctrl+C).")
