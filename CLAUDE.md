@@ -1,5 +1,9 @@
 # CLAUDE.md
 
+这个文件是本项目的记忆。Claude Code 每次在这个仓库里开始对话时都会读取它。
+
+**更新规则：** 用户提出新的要求或偏好、做出设计决定、发现只能在用户电脑上验证的事项，或者项目状态有重要变化时，在同一次工作里更新本文件对应的栏目，和代码一起提交推送。删掉过时的内容，不要只往后追加。保持简短；细节写进 README。
+
 ## 与用户沟通的要求（每次都必须遵守）
 
 开始前，用一句话说明你准备做什么；工作中简短更新进展，帮助用户跟上。结束时给出一段可以独立理解的简短回顾，说明发现了什么、做了什么，以及接下来如何，让只看到最后一条消息的读者也能了解全貌。
@@ -8,23 +12,48 @@
 
 用平实词语，写清楚、好懂的完整句子。不要使用工作过程中自己造出的术语或缩写，以任何读者都能理解的方式说明它是什么。写作总体上参考 ASD-STE100 简化技术英语的风格：使用短句，每句表达一个意思，采用主动语态，对同一件事始终使用同一个词。观点彼此相连时，用连贯自然的段落；只有列举独立项目时才使用项目符号。除非读者要求，否则省去不必要的细节，尽量简洁，但要确保保留关键背景。努力让面向用户的文字尽可能清晰易读。
 
-用户使用中文交流，回复用中文。
+用户使用中文交流，回复用中文。给用户的命令要能直接复制运行，并包含 `cd ~/Desktop/MDAgent1 && git pull`。
 
-## 项目背景
+## 项目目标（用户最初的要求）
 
-MDAgent1 是一个 MD agent。用户给出蛋白 PDB 和一个目标区域。agent 自动搭体系、跑 MD，找出目标区域里没有采样好的侧链，并对它们做增强采样。
+用户输入蛋白（PDB 编号、PDB 文件或准备好的 Amber 体系）和目标区域。agent 自动处理蛋白、搭水盒子、加离子、跑 MD；跑一段时间后自动判断目标区域里哪些侧链没采样到或各条轨迹太相似，再对这些侧链做增强采样。整个过程在一个 agent 窗口里完成。
 
-- 代码在 `mdagent/`：`target.py`（目标区域）、`build.py`（搭体系，所有选项在 `SetupOptions` 里；`load_amber` 读入用户准备好的 Amber 体系，配体保留）、`protonation.py`（PROPKA 和手动质子化）、`simulate.py`（分段跑 MD，可续跑；`equilibrate` 是带骨架约束的分阶段平衡：最小化、5 K 升温、约束 NPT、逐步撤约束、无约束 NPT，按用户自己的 OpenMM 流程设计）、`diagnose.py`（侧链诊断和排序）、`agent.py`（多轮循环，决定续跑或停止；`run_all` 在普通 MD 后自动做增强采样）、`enhanced.py`（chi1 上的 well-tempered metadynamics，在 OpenMM 里实现；只跑和存数据）、`envcheck.py`（启动时检查平台和力场文件）、`adaptive.py`（可选的 AdaptivePy 自适应采样：从第 2 轮起选起点）、`llm.py`（`ask` 命令：Claude 把一句话要求填进固定的设置表 `RunPlan`，转成 `mdagent run` 命令，用户确认后才运行）、`backends.py`（语言模型后台：claude -p、codex exec、Anthropic API，统一返回结构化结果，模型不能运行命令）、`chat.py` 和 `chat_page.html`（`chat` 命令：本地网页聊天窗口，中英文两种语言；多个对话，每个对话有自己的记录和运行列表，存在 runs/.chats/；运行以独立进程组在后台启动，关网页或停服务都不停，只有用户在窗口里确认停止或运行完成才结束）、`check.py`（搭体系前的结构检查：按 DBREF/SEQADV 和 UniProt（含异构体）逐位比对，找标签、多拷贝、金属、未知残基、长缺口、断链；有问题就停，除非 `--accept-problems`）、`fetch.py`（按 PDB 编号从 RCSB 下载到 `structures/<ID>.pdb`，路径要让用户一看就懂）、`cli.py`（命令行：`run`、`resume`、`diagnose`、`info`、`fetch`、`ask`、`chat`；`run --pdb-id`）。
-- 用户最初的要求：输入蛋白 PDB 和目标区域；agent 自动处理蛋白、搭水盒子、加离子、跑 MD；跑一段时间后自动判断目标区域里哪些侧链没采样到或各条轨迹太相似，再对这些侧链做增强采样；整个过程在一个 agent 窗口里。
-- agent 不做增强采样之后的分析（不算状态比例、不判断收敛、不据此自动加长）。用户明确要求去掉了这部分。只保存数据，并告诉用户文件在哪里。
-- 设计原则：每项设置都有默认值。影响科学结论的选择（力场、离子、pH、质子化）由用户决定；用户提出非默认要求时，agent 先执行（例如先跑 PROPKA），再开始 MD。以后的对话框也填同一个 `SetupOptions`。
-- 测试体系是 `examples/181L.pdb`（T4 溶菌酶 L99A 与苯）。口袋里的 Val111 侧链在常规 MD 中很难翻转。
-- 运行测试：`pytest -q tests`（约 1 分钟，含一个在 CPU 上跑小肽段的测试）；`pytest -q tests -m "not slow"` 只跑快速测试。
-- 用户在自己的电脑上用 GPU 跑 MD（约每天 470 ns）。云端会话通常没有 GPU，只适合跑很短的流程测试。
-- 用户的 conda 环境里不要装 openmm-plumed：conda-forge 上的版本会把 OpenMM 降到 8.2 并丢掉 CUDA，而且其中的 PLUMED 不带 OPES。
-- AdaptivePy 模式已加入（`--sampling adaptive`），云端装不了 AdaptivePy，测试用替身模块；真实验证要在用户电脑上做。LLM 层（`ask`）已加入，云端没有 API 密钥，测试用假的规划函数；真实试用要在用户电脑上做。用户没有 API 密钥，所以 agent 窗口用 Claude Code 本身实现：项目命令 `/md`（一句话转成 `mdagent run`，确认后用 nohup 后台启动）和 `/md-status`（查看进度），在 `.claude/commands/` 里。`mdagent info --pdb` 打印 PDB 概况。
-- 开发阶段用户希望测试运行很短（几分钟），给运行命令时用很小的 `--first-ns`、`--max-ns`、`--enhanced-ns`、`--equil-ps`。
-- 温度默认 300 K，用户不要改。
-- 界面文字要有中文和英文两种语言（用户要求），不能只做中文。
-- 用户要求：只有序列和参考序列一致、结构完好干净，才开始正式的下一步。181L 和 P00720 有两处未说明差异，用 181L 测试要加 `--accept-problems`。
-- 链的两端默认 `--termini auto`：真实蛋白在这一端还没结束时（按 UniProt 全长判断）加 ACE/NME 中性帽，否则保留带电末端。CHARMM 下帽并入末端残基（补丁），Amber 下是单独残基。完整流程写在 README 的“完整流程”。
+## 用户定下的规则和决定
+
+- **不做增强采样之后的分析**（不算状态比例、不判断收敛、不据此自动加长）。用户明确要求去掉了这部分。只保存数据，并告诉用户文件在哪里。
+- **只有序列和参考序列一致、结构完好干净，才开始正式的下一步。** 结构检查有问题就停，除非用户明确说继续（`--accept-problems`）。181L 和 UniProt P00720 有两处未说明差异（R12G、I137R），用 181L 测试要加 `--accept-problems`。
+- **每项设置都有默认值。** 影响科学结论的选择（力场、离子、pH、质子化、末端）由用户决定；用户提出非默认要求时，agent 先执行（例如先跑 PROPKA），再开始 MD。所有搭体系选项都在 `SetupOptions` 里，聊天窗口也填同一张表。
+- **默认值：** 温度 300 K（用户不要改）；力场 CHARMM36m；0.15 M NaCl；pH 7；立方盒子 1.0 nm；平衡 600 ps（按用户自己的 OpenMM 流程：骨架约束、最小化、5 K 升温、约束 NPT、逐步撤约束、无约束 NPT）；末端 `--termini auto`（真实蛋白在这一端还没结束时加 ACE/NME 中性帽，按 UniProt 全长判断；否则保留带电末端）。
+- **启动的运行要在后台一直跑**，关网页、关聊天服务都不停；只有用户确认停止或运行完成才结束。
+- **界面文字要有中文和英文两种语言。**
+- **路径要让用户一看就懂**，例如 `structures/3HTB.pdb`、`runs/<名字>/`。
+- **语言模型只做"翻译"**：把用户的话填进固定的设置表，不能运行命令；开始、停止、继续都要用户点按钮确认。
+- **开发阶段测试运行要很短（几分钟）**：`--replicas 2 --first-ns 0.1 --extend-ns 0.1 --max-ns 0.3 --no-flip-patience-ns 0.25 --enhanced-ns 0.1 --equil-ps 60`。
+
+## 代码结构
+
+代码在 `mdagent/`，完整流程写在 README 的“完整流程”。
+
+- `fetch.py`：按 PDB 编号从 RCSB 下载到 `structures/<ID>.pdb`。
+- `check.py`：搭体系前的结构检查。按 DBREF/SEQADV 和 UniProt（含异构体，缓存在 `structures/uniprot/`）逐位比对；找标签、多拷贝、金属、末端帽、未知残基、长缺口、断链；判断每条链两端是否要加帽。
+- `build.py`：搭体系（PDBFixer）。选链、去标签、加帽（CHARMM 下帽并入末端残基作为补丁，Amber 下是单独残基）、质子化、加水和离子。`load_amber` 原样读入用户准备好的 Amber 体系（配体保留）。
+- `protonation.py`：PROPKA 和手动质子化。
+- `simulate.py`：分段跑 MD，可续跑；`equilibrate` 是分阶段平衡。
+- `diagnose.py`：侧链 chi1 诊断和排序。`agent.py`：多轮循环，决定续跑或停止；`run_all` 在普通 MD 后自动做增强采样。
+- `enhanced.py`：chi1 上的 well-tempered metadynamics，在 OpenMM 里实现，只跑和存数据。
+- `adaptive.py`：可选的 AdaptivePy 自适应采样（`--sampling adaptive`）。
+- `envcheck.py`：启动时检查平台和力场文件。
+- `backends.py`：语言模型后台（`claude -p`、`codex exec`、Anthropic API），统一返回结构化结果。claude 后台会去掉环境里的 `ANTHROPIC_API_KEY`，以使用 Claude Code 的订阅登录。
+- `chat.py`、`chat_page.html`：`chat` 命令，本地网页（`http://localhost:8765`），多个对话，存在 `runs/.chats/`。
+- `llm.py`：`ask` 命令和设置表 `RunPlan`。
+- `cli.py`：命令行 `run`、`resume`、`diagnose`、`check`、`info`、`fetch`、`ask`、`chat`。
+- `.claude/commands/`：Claude Code 项目命令 `/md` 和 `/md-status`。
+
+测试：`pytest -q tests`（约 4 分钟，含在 CPU 上跑小肽段的测试）；`pytest -q tests -m "not slow"` 只跑快速测试。测试离线运行，UniProt 序列在 `tests/data/uniprot/`。测试体系 `examples/181L.pdb`（T4 溶菌酶 L99A 与苯，口袋里的 Val111 侧链在常规 MD 中很难翻转）。
+
+## 环境
+
+- **用户的电脑：** 项目在 `~/Desktop/MDAgent1`，conda 环境 `mdagent`，OpenMM 8.6.1 带 CUDA，GPU 上约每天 300 到 600 ns。用户有 Claude 订阅，但没有 API 密钥。
+- **不要在用户的 conda 环境里装 openmm-plumed：** conda-forge 上的版本会把 OpenMM 降到 8.2 并丢掉 CUDA，而且其中的 PLUMED 不带 OPES。
+- **云端会话**（Claude Code 网页版的临时容器）：没有 GPU，只适合很短的流程测试；装不了 AdaptivePy；没有 API 密钥。改动直接推送到 GitHub `Lyn-666/MDAgent1` 的 `main` 分支。最早的 `zcorn2017/binding-lang` 仓库已恢复原样，不再使用。
+- **只能在用户电脑上验证的事项：** AdaptivePy 的真实调用（已验证可用）；Claude Code 后台（已验证可用）；Codex 后台（还没验证）；CHARMM 加帽体系在 GPU 上的长时间运行（还没验证）。
