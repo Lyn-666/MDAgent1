@@ -2,13 +2,13 @@
 
 Examples:
   # Start. The agent decides how long to run, up to --max-ns per replica.
-  python -m mdagent run --pdb examples/181L.pdb --around-ligand BNZ --out runs/181L
+  python -m mdagent run --pdb examples/181L.pdb --around-ligand BNZ --out runs/181L --accept-problems
 
   # Continue a stopped run, or give a finished run a larger budget.
   python -m mdagent resume --run runs/181L --max-ns 40
 
   # Check protonation with PROPKA, use Amber ff19SB + OPC, 0.1 M KCl; build only.
-  python -m mdagent run --pdb examples/181L.pdb --around-ligand BNZ --out runs/181L_b \\
+  python -m mdagent run --pdb examples/181L.pdb --around-ligand BNZ --out runs/181L_b --accept-problems \\
       --check-protonation --forcefield amber19 --ion-conc 0.1 --cation K+ --setup-only
 
   # Run enhanced sampling longer: 30 ns per replica instead of 20.
@@ -136,6 +136,9 @@ def cmd_run(args) -> int:
         print(f"error: {out} already has a run. Use 'resume --run {out}' to continue it.",
               file=sys.stderr)
         return 2
+    if args.enhanced_max_residues < 1:
+        print("error: --enhanced-max-residues must be 1 or more.", file=sys.stderr)
+        return 2
     amber = args.prmtop is not None
     if amber and not args.inpcrd:
         print("error: --prmtop needs --inpcrd.", file=sys.stderr)
@@ -221,7 +224,8 @@ def cmd_run(args) -> int:
         adaptive={"policy": args.adaptive_policy, "n_clusters": args.adaptive_clusters,
                   "full_interval_ps": args.full_save_ps} if args.sampling == "adaptive" else {},
         enhanced={"enabled": not args.no_enhanced_sampling,
-                  "settings": {"length_ns": args.enhanced_ns, "n_replicas": args.enhanced_replicas}},
+                  "settings": {"length_ns": args.enhanced_ns, "n_replicas": args.enhanced_replicas,
+                               "max_residues": args.enhanced_max_residues}},
     )
     state.save(out)
     if args.setup_only:
@@ -235,7 +239,8 @@ def cmd_run(args) -> int:
               f"replica starts. Full-system frames are saved every {args.full_save_ps:g} ps.")
     if state.enhanced["enabled"]:
         print(f"After plain MD, residues that still need it get enhanced sampling: "
-              f"{args.enhanced_replicas} replicas x {args.enhanced_ns:g} ns.")
+              f"{args.enhanced_replicas} replicas x {args.enhanced_ns:g} ns, at most "
+              f"{args.enhanced_max_residues} residues (the slowest ones).")
     files = SystemFiles(built.topology, built.positions, built.system)
     _print_summary(*run_all(out, state, files), out)
     return 0
@@ -266,7 +271,7 @@ def cmd_resume(args) -> int:
 
 def cmd_diagnose(args) -> int:
     from .agent import RunState
-    from .diagnose import diagnose_trajectories, format_report, load_run
+    from .diagnose import diagnose_trajectories, fixed_chi1_residues, format_report, load_run
 
     run = Path(args.run)
     state = RunState.load(run)
@@ -275,7 +280,7 @@ def cmd_diagnose(args) -> int:
         return 0
     reports = diagnose_trajectories(
         load_run(run, state.target, len(state.rounds_ns)), state.target, state.ns_done,
-        min_flips_per_replica=state.loop.min_flips_per_replica)
+        min_flips_per_replica=state.loop.min_flips_per_replica, fixed=fixed_chi1_residues(run / "protein.pdb"))
     print(format_report(reports))
     return 0
 
@@ -354,6 +359,8 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--enhanced-ns", type=float, default=20.0,
                    help="Length of each enhanced sampling replica (ns).")
     r.add_argument("--enhanced-replicas", type=int, default=2)
+    r.add_argument("--enhanced-max-residues", type=int, default=10,
+                   help="Bias at most this many residues at once in enhanced sampling (the slowest ones).")
     r.add_argument("--no-enhanced-sampling", action="store_true",
                    help="Stop after plain MD. Enhanced sampling can still run later with resume.")
     r.add_argument("--out", required=True)

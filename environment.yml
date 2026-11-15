@@ -1,0 +1,16 @@
+# conda env create -f environment.yml && conda activate mdagent && pip install -e .
+# On a Linux computer with an NVIDIA GPU, conda-forge installs OpenMM with CUDA.
+name: mdagent
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - openmm>=8.6
+  - pdbfixer
+  - mdtraj
+  - numpy
+  - pydantic>=2
+  - pytest
+  - pip
+  - pip:
+      - propka>=3.5

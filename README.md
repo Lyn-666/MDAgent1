@@ -1,6 +1,31 @@
 # MDAgent1
 
-一个 MD agent：用户给出蛋白 PDB 和关心的区域，agent 自动搭体系、跑 MD，找出这个区域里没有采样好的侧链。agent 自己决定跑多久：每轮结束后诊断，再决定续跑还是停止。之后的版本会对卡住的侧链自动做增强采样。
+一个 MD agent：用户给出蛋白 PDB 和关心的区域，agent 自动搭体系、跑 MD，找出这个区域里没有采样好的侧链。agent 自己决定跑多久：每轮结束后诊断，再决定续跑还是停止。普通 MD 采样不到的侧链，agent 会自动做增强采样，然后保存数据，不做分析。
+
+## 快速上手（给测试者）
+
+**需要：** 一台 Linux 电脑，有 NVIDIA GPU，装好 conda。想用聊天网页的话，还要装好并登录 [Claude Code](https://claude.com/claude-code)（运行 `claude`，按提示登录）或 Codex（运行 `codex login`）。只用命令行就不需要它们。macOS 上程序能运行，但没有 CUDA，只适合很短的测试。Windows 要在 WSL2 里运行。
+
+**1. 安装（约 5 分钟）：**
+
+```bash
+git clone https://github.com/Lyn-666/MDAgent1.git && cd MDAgent1
+conda env create -f environment.yml && conda activate mdagent && pip install -e .
+pytest -q tests -m "not slow"     # 快速测试，约 2 分钟，应该全部通过
+```
+
+**2. 跑一个几分钟的测试：** 用自带的 T4 溶菌酶（`examples/181L.pdb`），看苯周围的口袋。181L 和它的 UniProt 参考序列有两处差异，所以要加 `--accept-problems`。
+
+```bash
+python -m mdagent run --pdb examples/181L.pdb --around-ligand BNZ --out runs/first_test --accept-problems \
+    --replicas 2 --first-ns 0.1 --extend-ns 0.1 --max-ns 0.3 --no-flip-patience-ns 0.25 --enhanced-ns 0.1 --equil-ps 60
+```
+
+日志第一行写着结果文件夹的完整路径。结束时，日志末尾的 Summary 会列出所有结果文件。
+
+**3. 试聊天网页：** 运行 `python -m mdagent chat`，浏览器打开 `http://localhost:8765`，用中文或英文说要跑什么，例如"用 181L，看苯周围的口袋，开发测试，有问题也继续"。
+
+**4. 反馈问题：** 在 GitHub 上开一个 Issue，选"问题报告"模板，附上日志文件 `runs/<名字>.log`。
 
 ## 工作流程
 
@@ -109,15 +134,14 @@
 
 ```bash
 git clone https://github.com/Lyn-666/MDAgent1.git && cd MDAgent1
-conda create -n mdagent -c conda-forge python=3.11 openmm pdbfixer mdtraj -y
-conda activate mdagent
-pip install -e ".[test]"
+conda env create -f environment.yml && conda activate mdagent && pip install -e .
 
 # 开始。agent 自己决定跑多久，每条轨迹最多 20 ns。
-python -m mdagent run --pdb examples/181L.pdb --around-ligand BNZ --out runs/181L
+# 181L 和 UniProt 参考序列有两处差异，所以要加 --accept-problems（见"结构检查"）。
+python -m mdagent run --pdb examples/181L.pdb --around-ligand BNZ --out runs/181L --accept-problems
 
 # 先用 PROPKA 检查质子化状态，改用 Amber ff19SB + OPC 和 0.1 M KCl，只搭体系不跑 MD。
-python -m mdagent run --pdb examples/181L.pdb --around-ligand BNZ --out runs/181L_b \
+python -m mdagent run --pdb examples/181L.pdb --around-ligand BNZ --out runs/181L_b --accept-problems \
     --check-protonation --forcefield amber19 --ion-conc 0.1 --cation K+ --setup-only
 python -m mdagent resume --run runs/181L_b   # 看过报告后，开始 MD。
 
@@ -160,6 +184,8 @@ pytest -q tests -m "not slow"  # 不跑 MD 的测试，约 1 秒
 - 用 `--pdb` 输入时，配体会被去掉，只模拟蛋白本身。要保留配体，先准备好 Amber 体系，再用 `--prmtop`/`--inpcrd` 输入。
 - PROPKA 只在用户要求时运行，预测的是去掉配体后的蛋白。
 - 只看 chi1，还没有看 chi2。
+- 脯氨酸和形成二硫键的半胱氨酸不做诊断，也不做增强采样，因为它们的 chi1 被环或 S-S 键固定住，不会在几种状态之间翻转。报告里它们的判断是 `fixed_chi1`。
+- 增强采样一次最多给 10 个侧链加偏置势（`--enhanced-max-residues` 可改），选普通 MD 里最慢的那些。同时给很多侧链加偏置势会强行推动整个蛋白，小蛋白可能因此散开。目标区域太大时，先缩小范围。
 
 ## 增强采样
 
@@ -192,7 +218,6 @@ agent 只负责跑增强采样和保存数据，不做分析。输出在运行�
 
 ```bash
 conda activate mdagent
-pip install -e ".[chat]"
 python -m mdagent chat              # 浏览器打开 http://localhost:8765
 ```
 
@@ -244,4 +269,7 @@ Claude（`claude-opus-5-5`）只负责填一张固定的设置表，表里每一
 
 ## 下一步
 
-1. 在用户电脑上试用聊天窗口（`python -m mdagent chat`），分别试 Claude Code 和 Codex 后台。
+公开仓库、邀请更多人测试之前，还要在 GPU 电脑上完成两项验证：
+
+1. 用 181L 和默认设置完整跑一次（约 3 小时），确认 Val111 被找出来，并且在增强采样里翻转。
+2. 用 Codex 后台在聊天网页里跑一次开发测试。

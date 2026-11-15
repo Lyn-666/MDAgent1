@@ -116,3 +116,23 @@ def test_run_resume_and_finish_interrupted_round(tmp_path):
     assert any("replica 0: round 2 is already complete" in line for line in logs)
     assert RunState.load(tmp_path).rounds_ns == [0.002, 0.002]
     assert [t.n_frames for t in load_run(tmp_path, state.target, 2)] == [8, 8]
+
+
+def test_enhanced_sampling_biases_only_the_slowest_residues(tmp_path, monkeypatch):
+    import mdagent.agent as agent
+    import mdagent.enhanced as enhanced
+    from mdagent.agent import Decision, RunState
+    from mdagent.simulate import MDSettings
+
+    flagged = [Decision(f"VAL{n}", "enhanced_sampling", "slow", ("A", n)) for n in (5, 9, 2)]  # Slowest first.
+    monkeypatch.setattr(agent, "run_loop", lambda *a, **k: flagged)
+    biased = []
+    monkeypatch.setattr(enhanced, "run_replica", lambda files, run_dir, r, start, residues, *a, **k:
+                        biased.append(list(residues)))
+    state = RunState(pdb="x", target_description="t", target=[("A", 5), ("A", 9), ("A", 2)], n_replicas=1,
+                     base_seed=1, md=MDSettings(), loop=LoopSettings(), rounds_ns=[1.0],
+                     enhanced={"enabled": True, "settings": {"max_residues": 2, "n_replicas": 1}})
+    logs = []
+    _, labels = agent.run_all(tmp_path, state, files=object(), log=logs.append)
+    assert labels == ["VAL5", "VAL9"] and biased == [[("A", 5), ("A", 9)]]
+    assert any("Left out (faster ones): VAL2" in line for line in logs)
