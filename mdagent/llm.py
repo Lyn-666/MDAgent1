@@ -62,6 +62,9 @@ class RunPlan(BaseModel):
     enhanced_ns: Optional[float] = Field(None, description="Length of each enhanced sampling replica in ns. "
                                                            "Default 20.")
     enhanced_replicas: Optional[int] = Field(None, description="Default 2.")
+    enhanced_max_residues: Optional[int] = Field(
+        None, description="Bias at most this many residues at once in enhanced sampling (the slowest ones). "
+                          "Default 10.")
     no_enhanced_sampling: Optional[bool] = Field(None, description="True: stop after plain MD.")
     chains: Optional[str] = Field(None, description="Keep only these protein chains, for example 'A' or 'A,B'.")
     keep_tags: Optional[bool] = Field(None, description="True: keep tag residues at the chain ends. Default false "
@@ -121,6 +124,7 @@ FLAGS = [  # RunPlan field -> command line option
     ("first_ns", "--first-ns"), ("extend_ns", "--extend-ns"), ("max_ns", "--max-ns"),
     ("no_flip_patience_ns", "--no-flip-patience-ns"), ("sampling", "--sampling"),
     ("enhanced_ns", "--enhanced-ns"), ("enhanced_replicas", "--enhanced-replicas"),
+    ("enhanced_max_residues", "--enhanced-max-residues"),
     ("chains", "--chains"), ("uniprot", "--uniprot"), ("termini", "--termini"),
 ]
 SWITCHES = [("check_protonation", "--check-protonation"), ("no_enhanced_sampling", "--no-enhanced-sampling"),

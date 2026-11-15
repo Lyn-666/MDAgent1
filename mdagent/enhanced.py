@@ -49,6 +49,9 @@ class MetadSettings:
     grid_points: int = 361        # Grid on chi1 from -180° to 180° (both ends included).
     chunk_ns: float = 1.0         # Save progress after each chunk.
     save_interval_ps: float = 5.0  # Time between saved trajectory frames.
+    # At most this many residues are biased at once (the slowest ones). Biasing many side
+    # chains at the same time pushes hard on the protein and can unfold a small one.
+    max_residues: int = 10
 
     @classmethod
     def from_dict(cls, d: dict) -> "MetadSettings":

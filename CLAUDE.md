@@ -28,8 +28,9 @@
 - **界面文字要有中文和英文两种语言。**
 - **路径要让用户一看就懂**，例如 `structures/3HTB.pdb`、`runs/<名字>/`。
 - **告诉用户结果文件在哪里时，写电脑名和完整路径**，并说明文件只在跑模拟的那台电脑上。网页的运行卡片上有下载链接（单个文件或 zip）。起因：用户跑完测试后在自己电脑上找不到轨迹。
-- **测试者在自己的电脑上运行**，用自己的 Claude 或 Codex 登录。所以聊天网页不需要访问密码（只接受本机连接就够了）。要支持的系统：Linux 和 macOS；Windows 只能通过 WSL2（程序用到 `os.killpg`、`pgrep` 和 Unix 的 C 库）。
+- **测试者在自己的电脑上运行**，用自己的 Claude 或 Codex 登录。所以聊天网页不需要访问密码（只接受本机连接就够了）。**主要面向 Linux + NVIDIA GPU。** macOS 能运行但没有 CUDA，只适合短测试，不专门适配；Windows 只能通过 WSL2（程序用到 `os.killpg`、`pgrep` 和 Unix 的 C 库）。
 - **语言模型只做"翻译"**：把用户的话填进固定的设置表，不能运行命令；开始、停止、继续都要用户点按钮确认。
+- **公开计划：** 先保持私有，邀请少数同学测试；公开前要完成：科学修复（已完成：跳过脯氨酸和二硫键半胱氨酸、增强采样最多 10 个侧链）、测试者材料（已完成：`environment.yml`、README 快速上手、Issue 模板、GitHub Actions 自动测试）、许可证（等用户选）、用户在 GPU 上的两项验证（见 README“下一步”）、删掉 CLAUDE.md 里只和用户个人电脑有关的记录。
 - **开发阶段测试运行要很短（几分钟）**：`--replicas 2 --first-ns 0.1 --extend-ns 0.1 --max-ns 0.3 --no-flip-patience-ns 0.25 --enhanced-ns 0.1 --equil-ps 60`。
 
 ## 代码结构
@@ -41,8 +42,8 @@
 - `build.py`：搭体系（PDBFixer）。选链、去标签、加帽（CHARMM 下帽并入末端残基作为补丁，Amber 下是单独残基）、质子化、加水和离子。`load_amber` 原样读入用户准备好的 Amber 体系（配体保留）。
 - `protonation.py`：PROPKA 和手动质子化。
 - `simulate.py`：分段跑 MD，可续跑；`equilibrate` 是分阶段平衡。
-- `diagnose.py`：侧链 chi1 诊断和排序。`agent.py`：多轮循环，决定续跑或停止；`run_all` 在普通 MD 后自动做增强采样。
-- `enhanced.py`：chi1 上的 well-tempered metadynamics，在 OpenMM 里实现，只跑和存数据。
+- `diagnose.py`：侧链 chi1 诊断和排序。脯氨酸和形成二硫键的半胱氨酸（按 SG-SG 距离判断）判为 `fixed_chi1`，跳过。`agent.py`：多轮循环，决定续跑或停止；`run_all` 在普通 MD 后自动做增强采样。
+- `enhanced.py`：chi1 上的 well-tempered metadynamics，在 OpenMM 里实现，只跑和存数据。一次最多偏置 `max_residues`（默认 10，`--enhanced-max-residues`）个最慢的侧链。
 - `adaptive.py`：可选的 AdaptivePy 自适应采样（`--sampling adaptive`）。
 - `envcheck.py`：启动时检查平台和力场文件。
 - `backends.py`：语言模型后台（`claude -p`、`codex exec`、Anthropic API），统一返回结构化结果。claude 后台会去掉环境里的 `ANTHROPIC_API_KEY`，以使用 Claude Code 的订阅登录。

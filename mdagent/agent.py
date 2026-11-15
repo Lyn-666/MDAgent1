@@ -29,7 +29,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from .diagnose import ResidueReport, diagnose_trajectories, format_report, load_run
+from .diagnose import ResidueReport, diagnose_trajectories, fixed_chi1_residues, format_report, load_run
 from .adaptive import AdaptiveSettings, choose_starts
 from .simulate import MDSettings, SystemFiles, load_inputs, part_path, run_segment
 
@@ -93,7 +93,7 @@ def decide(reports: list[ResidueReport], ns_done: float, loop: LoopSettings) -> 
     room = round(loop.max_ns - ns_done, 6)
     decisions = []
     for r in reports:
-        if r.verdict == "no_chi1":
+        if r.verdict in ("no_chi1", "fixed_chi1"):
             decisions.append(Decision(r.label, "skip", r.reason))
         elif r.verdict == "ok":
             decisions.append(Decision(r.label, "done", f"Sampled well: {r.reason}"))
@@ -219,16 +219,17 @@ def _adaptive_starts(run_dir: Path, state: RunState, part: int, log) -> list[lis
 
 
 def _diagnose_and_decide(run_dir: Path, state: RunState):
+    fixed = fixed_chi1_residues(run_dir / "protein.pdb")
     if state.sampling == "adaptive":
         # Segments start from different frames on purpose, so judge the pooled flips.
         reports = diagnose_trajectories(
             load_run(run_dir, state.target, len(state.rounds_ns), join=False), state.target,
             state.ns_done, min_flips_per_replica=state.loop.min_flips_per_replica,
-            pooled_total_ns=state.ns_done * state.n_replicas, n_replicas=state.n_replicas)
+            pooled_total_ns=state.ns_done * state.n_replicas, n_replicas=state.n_replicas, fixed=fixed)
     else:
         reports = diagnose_trajectories(
             load_run(run_dir, state.target, len(state.rounds_ns)), state.target, state.ns_done,
-            min_flips_per_replica=state.loop.min_flips_per_replica)
+            min_flips_per_replica=state.loop.min_flips_per_replica, fixed=fixed)
     decisions, next_ns = decide(reports, state.ns_done, state.loop)
     return reports, decisions, next_ns
 
@@ -261,9 +262,16 @@ def run_all(
             log("Note: enhanced sampling already started for "
                 + ", ".join(f"{c}:{n}" for c, n in residues) + ". It continues with these residues.")
     else:
-        residues = [d.key for d in wanted]
+        settings = MetadSettings.from_dict(es.get("settings", {}))
+        # Decisions follow the diagnosis ranking, so the slowest side chains come first.
+        chosen, left_out = wanted[:settings.max_residues], wanted[settings.max_residues:]
+        if left_out:
+            log(f"Note: {len(wanted)} residues need enhanced sampling, but at most {settings.max_residues} are "
+                f"biased at once. Left out (faster ones): {', '.join(d.residue for d in left_out)}. "
+                "To bias more, start a new run with a larger --enhanced-max-residues, or a smaller target region.")
+        residues = [d.key for d in chosen]
         es["residues"] = [list(k) for k in residues]
-        es["resnames"] = {f"{d.key[0]}:{d.key[1]}": d.residue.rstrip("0123456789") for d in wanted}
+        es["resnames"] = {f"{d.key[0]}:{d.key[1]}": d.residue.rstrip("0123456789") for d in chosen}
     settings = MetadSettings.from_dict(es.get("settings", {}))
     es["settings"] = asdict(settings)
     n_rep = min(settings.n_replicas, state.n_replicas)

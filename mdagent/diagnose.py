@@ -16,6 +16,9 @@ Verdicts for each residue:
 - "rare_flips": chi1 changed state, but too few times to estimate the
   population of each state.
 - "ok": chi1 changed state often enough in every replica.
+- "fixed_chi1": chi1 cannot change rotamer state, so it is not judged and
+  gets no enhanced sampling. This is proline (the ring holds chi1) and
+  cysteine in a disulfide bond (the S-S bond holds chi1).
 
 Ranking: residues are ranked by the estimated time between two flips.
 A slow side chain is ranked first. With zero flips, we only know a lower
@@ -39,6 +42,38 @@ from .target import ResidueKey
 STATE_CENTERS_DEG = {"g+": 60.0, "t": 180.0, "g-": -60.0}
 STATE_NAMES = list(STATE_CENTERS_DEG)
 NEEDS_WORK = ("replicas_disagree", "no_flip", "rare_flips")
+
+
+DISULFIDE_MAX_NM = 0.25  # SG-SG distance; a disulfide bond is about 0.205 nm.
+
+
+def _is_proline(resname: str) -> bool:
+    return resname in ("PRO", "NPRO", "CPRO")
+
+
+def fixed_chi1_residues(protein_pdb: str | Path) -> dict[ResidueKey, str]:
+    """Residues whose chi1 cannot change rotamer state, with the reason.
+
+    Proline: the ring holds chi1. Cysteine in a disulfide bond: the S-S bond holds
+    chi1. Disulfides are found by the SG-SG distance, so this works for every
+    force field and residue naming (CYS, CYX).
+    """
+    t = md.load(str(protein_pdb))
+    top = t.topology
+    out = {}
+    for r in top.residues:
+        if _is_proline(r.name):
+            out[(r.chain.chain_id, r.resSeq)] = "Proline: the ring holds chi1, so it has no rotamer states to sample."
+    sg = [a for a in top.atoms if a.name == "SG"]
+    if len(sg) >= 2:
+        pairs = np.array([(a.index, b.index) for i, a in enumerate(sg) for b in sg[i + 1:]])
+        for (i, j), d in zip(pairs, md.compute_distances(t, pairs)[0]):
+            if d < DISULFIDE_MAX_NM:
+                a, b = top.atom(int(i)).residue, top.atom(int(j)).residue
+                for x, y in ((a, b), (b, a)):
+                    out[(x.chain.chain_id, x.resSeq)] = (
+                        f"Cysteine in a disulfide bond with {y.name}{y.resSeq}: the S-S bond holds chi1.")
+    return out
 
 
 def angular_distance_deg(a: np.ndarray, b: float) -> np.ndarray:
@@ -181,12 +216,16 @@ def diagnose_trajectories(
     min_flips_per_replica: int = 4,
     pooled_total_ns: float | None = None,
     n_replicas: int | None = None,
+    fixed: dict[ResidueKey, str] | None = None,
 ) -> list[ResidueReport]:
     """Diagnose the target side chains.
 
     Default: each trajectory is one replica. With pooled_total_ns (adaptive
     mode), each trajectory is one segment, and the verdict uses the total
     number of flips (judge_pooled) over pooled_total_ns of simulation.
+
+    fixed: residues whose chi1 cannot change state (see fixed_chi1_residues).
+    They get the verdict "fixed_chi1". Prolines are found by name even without it.
     """
     wanted = set(target)
     top = trajs[0].topology
@@ -194,7 +233,10 @@ def diagnose_trajectories(
     keep = []
     for k, quad in enumerate(chi_idx):
         res = top.atom(int(quad[1])).residue
-        if (res.chain.chain_id, res.resSeq) in wanted:
+        key = (res.chain.chain_id, res.resSeq)
+        if key in wanted and _is_proline(res.name):
+            fixed = {key: "Proline: the ring holds chi1, so it has no rotamer states to sample.", **(fixed or {})}
+        if key in wanted and key not in (fixed or {}):
             keep.append((k, res))
 
     per_traj_angles = [np.degrees(md.compute_chi1(t)[1]) for t in trajs]
@@ -219,6 +261,10 @@ def diagnose_trajectories(
         reports.append(rep)
 
     names = {(r.chain.chain_id, r.resSeq): r.name for r in top.residues}
+    for key in sorted(wanted & set(fixed or {})):
+        reports.append(ResidueReport(
+            chain=key[0], resseq=key[1], resname=names.get(key, "?"),
+            transitions=[], occupancies=[], dominant=[], verdict="fixed_chi1", reason=fixed[key]))
     for key in sorted(wanted - {(r.chain, r.resseq) for r in reports}):
         reports.append(ResidueReport(
             chain=key[0], resseq=key[1], resname=names.get(key, "?"),
