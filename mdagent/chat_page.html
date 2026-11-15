@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MDAgent</title>
+<style>
+  :root { --bg:#f7f7f5; --panel:#fff; --text:#1f2328; --muted:#6b7280; --line:#e5e7eb;
+          --accent:#2563eb; --user:#eef2ff; --sel:#e0e7ff; --ok:#16a34a; --warn:#d97706; --bad:#dc2626; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#111315; --panel:#1a1d21; --text:#e6e6e6; --muted:#9aa1ab; --line:#2b2f35;
+            --accent:#6ea8fe; --user:#1e2a44; --sel:#24314f; --ok:#4ade80; --warn:#fbbf24; --bad:#f87171; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+         background:var(--bg); color:var(--text); }
+  header { padding:12px 16px; border-bottom:1px solid var(--line); display:flex; gap:12px; align-items:center; }
+  header h1 { font-size:18px; margin:0; }
+  header span { color:var(--muted); font-size:13px; }
+  .seg { display:flex; border:1px solid var(--line); border-radius:8px; overflow:hidden; }
+  .seg button { background:transparent; color:var(--text); border-radius:0; padding:6px 12px; }
+  .seg button.on { background:var(--accent); color:#fff; }
+  #lang { margin-left:auto; }
+  main { display:grid; grid-template-columns: 220px minmax(0,2fr) minmax(0,1fr); gap:16px; padding:16px;
+         height: calc(100vh - 58px); }
+  @media (max-width: 960px) { main { grid-template-columns: 1fr; height:auto; } }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; display:flex;
+           flex-direction:column; min-height:0; }
+  #chats { overflow-y:auto; padding:8px; display:flex; flex-direction:column; gap:4px; }
+  .chat { padding:8px 10px; border-radius:8px; cursor:pointer; font-size:14px; overflow:hidden;
+          text-overflow:ellipsis; white-space:nowrap; }
+  .chat:hover { background:var(--bg); }
+  .chat.on { background:var(--sel); }
+  .chat small { display:block; color:var(--muted); font-size:12px; }
+  #new { margin:12px 12px 4px; }
+  #log { flex:1; overflow-y:auto; padding:16px; display:flex; flex-direction:column; gap:10px; min-height:300px; }
+  .msg { max-width:85%; padding:10px 12px; border-radius:10px; white-space:pre-wrap; line-height:1.5; }
+  .user { align-self:flex-end; background:var(--user); }
+  .assistant { align-self:flex-start; border:1px solid var(--line); }
+  .card { margin-top:8px; padding:10px; border:1px dashed var(--accent); border-radius:8px; font-size:14px; }
+  .card details { margin:6px 0; } .card summary { cursor:pointer; color:var(--accent); }
+  pre.check { font-size:12px; white-space:pre-wrap; color:var(--muted); margin:6px 0 0; }
+  .card code { display:block; font-size:12px; color:var(--muted); margin:6px 0; word-break:break-all; }
+  button { background:var(--accent); color:#fff; border:0; border-radius:8px; padding:8px 14px; cursor:pointer;
+           font-size:14px; }
+  button:disabled { opacity:.5; cursor:default; }
+  form { display:flex; gap:8px; padding:12px; border-top:1px solid var(--line); }
+  textarea { flex:1; resize:none; height:52px; padding:8px; border-radius:8px; border:1px solid var(--line);
+             background:var(--bg); color:var(--text); font:inherit; }
+  .runs-head { display:flex; align-items:center; gap:8px; padding:12px 12px 0; }
+  .runs-head h2 { font-size:15px; margin:0; }
+  .runs-head .seg { margin-left:auto; font-size:12px; }
+  .runs-head .seg button { padding:4px 8px; font-size:12px; }
+  #runs { overflow-y:auto; padding:12px; display:flex; flex-direction:column; gap:10px; }
+  .run { border:1px solid var(--line); border-radius:8px; padding:10px; font-size:13px; }
+  .run b { font-size:14px; }
+  .state { float:right; font-weight:600; }
+  .running { color:var(--accent); } .finished { color:var(--ok); } .stopped { color:var(--warn); }
+  .failed { color:var(--bad); }
+  .last { color:var(--muted); margin-top:6px; white-space:pre-wrap; word-break:break-all; }
+  .where { margin-top:8px; padding-top:8px; border-top:1px solid var(--line); word-break:break-all; }
+  .where code { font-size:12px; user-select:all; }
+  .where .note { color:var(--muted); font-size:12px; margin-top:2px; }
+  .where a { color:var(--accent); }
+  .where details { margin-top:6px; } .where summary { cursor:pointer; color:var(--accent); }
+  .where ul { margin:4px 0 0; padding-left:18px; font-size:12px; }
+  .where li span { color:var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>MDAgent</h1><span id="backend"></span>
+  <div id="lang" class="seg"><button data-lang="zh">中文</button><button data-lang="en">English</button></div>
+</header>
+<main>
+  <section class="panel">
+    <button id="new"></button>
+    <div id="chats"></div>
+  </section>
+  <section class="panel">
+    <div id="log"></div>
+    <form id="form">
+      <textarea id="text"></textarea>
+      <button id="send"></button>
+    </form>
+  </section>
+  <section class="panel">
+    <div class="runs-head">
+      <h2 id="runs-title"></h2>
+      <div id="scope" class="seg"><button data-all="0"></button><button data-all="1"></button></div>
+    </div>
+    <div id="runs"></div>
+  </section>
+</main>
+<script>
+const UI = {
+  zh: {
+    placeholder: "例如：用 Amber，看 181L 里苯周围的口袋，开发测试。按 Enter 发送，Shift+Enter 换行。",
+    send: "发送", thinking: "思考中…", runsTitle: "运行", thisChat: "本对话", all: "全部",
+    noRuns: "这个对话还没有启动运行。", noRunsAll: "还没有运行。", newChat: "＋ 新对话", untitled: "新对话",
+    backend: "语言模型：", changed: "改动的设置：", check: "结构检查报告", plainMd: n => `普通 MD：每条 ${n} ns`,
+    failed: "连接聊天服务失败：", runsCount: n => `${n} 个运行`,
+    where: h => `结果文件在电脑“${h}”上：`, whereNote: "在另一台电脑上打开这个网页时，用下面的链接下载。",
+    zip: "全部下载（zip）", files: n => `文件列表（${n} 个）`, noFiles: "还没有轨迹文件。",
+    buttons: {start: "开始运行", stop: "停止运行", resume: "继续运行"},
+    states: {running: "运行中", finished: "已完成", stopped: "已停止", failed: "出错"},
+    welcome: "你好。告诉我要模拟什么，例如：“用 Amber，看 181L 里苯周围的口袋，开发测试”。也可以问某个运行的进度，或者让我停止、继续某个运行。每个对话有自己的记录和运行列表；不同的案例可以用不同的对话。运行在后台进行，关掉这个网页也不会停。",
+  },
+  en: {
+    placeholder: "For example: use Amber, look at the pocket around benzene in 181L, development test. Enter sends, Shift+Enter adds a line.",
+    send: "Send", thinking: "Thinking…", runsTitle: "Runs", thisChat: "This chat", all: "All",
+    noRuns: "No runs started in this chat yet.", noRunsAll: "No runs yet.", newChat: "+ New chat", untitled: "New chat",
+    backend: "Language model: ", changed: "Changed settings: ", check: "Structure check report", plainMd: n => `Plain MD: ${n} ns per replica`,
+    failed: "Could not reach the chat server: ", runsCount: n => `${n} run(s)`,
+    where: h => `Result files are on computer “${h}”:`, whereNote: "If you opened this page on another computer, use the links below to download them.",
+    zip: "Download all (zip)", files: n => `File list (${n})`, noFiles: "No trajectory files yet.",
+    buttons: {start: "Start run", stop: "Stop run", resume: "Continue run"},
+    states: {running: "running", finished: "finished", stopped: "stopped", failed: "failed"},
+    welcome: "Hello. Tell me what to simulate, for example: “use Amber, look at the pocket around benzene in 181L, development test”. You can also ask how a run is going, or ask me to stop or continue a run. Each chat has its own history and run list; use a separate chat for each case. Runs go on in the background, also when you close this page.",
+  },
+};
+function load(key, fallback) { try { return localStorage.getItem(key) || fallback; } catch (e) { return fallback; } }
+function store(key, value) { try { value == null ? localStorage.removeItem(key) : localStorage.setItem(key, value); } catch (e) {} }
+
+let lang = load("mdagent-lang", "zh"), chatId = load("mdagent-chat", null), showAll = load("mdagent-all", "0");
+let backendName = "", messages = [];
+const log = document.getElementById("log"), text = document.getElementById("text");
+const L = () => UI[lang];
+
+function escapeHtml(s) { return String(s).replace(/[&<>"]/g, ch => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[ch])); }
+async function post(url, data) {
+  const r = await fetch(url, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(data)});
+  return r.json();
+}
+
+function applyLanguage() {
+  document.documentElement.lang = lang;
+  text.placeholder = L().placeholder;
+  document.getElementById("send").textContent = L().send;
+  document.getElementById("new").textContent = L().newChat;
+  document.getElementById("runs-title").textContent = L().runsTitle;
+  document.querySelector('#scope [data-all="0"]').textContent = L().thisChat;
+  document.querySelector('#scope [data-all="1"]').textContent = L().all;
+  document.getElementById("backend").textContent = backendName ? L().backend + backendName : "";
+  for (const b of document.querySelectorAll("#lang button")) b.classList.toggle("on", b.dataset.lang === lang);
+  for (const b of document.querySelectorAll("#scope button")) b.classList.toggle("on", b.dataset.all === showAll);
+  renderLog(); refreshChats(); refreshRuns();
+}
+for (const b of document.querySelectorAll("#lang button"))
+  b.onclick = () => { lang = b.dataset.lang; store("mdagent-lang", lang); applyLanguage(); };
+for (const b of document.querySelectorAll("#scope button"))
+  b.onclick = () => { showAll = b.dataset.all; store("mdagent-all", showAll); applyLanguage(); };
+
+function renderLog() {
+  log.innerHTML = "";
+  if (!messages.length) addBubble("assistant", L().welcome);
+  for (const m of messages) addBubble(m.role, m.text, m.card);
+}
+
+function addBubble(role, body, card) {
+  const div = document.createElement("div");
+  div.className = "msg " + role;
+  div.textContent = body;
+  if (card) {
+    const c = document.createElement("div");
+    c.className = "card";
+    c.innerHTML = `<div>${escapeHtml(card.text)}</div>` +
+      (card.changed && card.changed.length ? `<div>${L().changed}${escapeHtml(card.changed.join(", "))}</div>` : "") +
+      (card.command ? `<code>${escapeHtml(card.command)}</code>` : "") +
+      (card.check ? `<details><summary>${L().check}</summary><pre class="check">${escapeHtml(card.check)}</pre></details>` : "");
+    const b = document.createElement("button");
+    b.textContent = L().buttons[card.kind];
+    b.disabled = !!card.used;
+    b.onclick = async () => {
+      b.disabled = true; card.used = true;
+      const r = await post("/api/confirm", {id: card.id, lang});
+      messages.push({role: "assistant", text: r.reply});
+      renderLog(); refreshRuns(); refreshChats();
+    };
+    c.appendChild(b);
+    div.appendChild(c);
+  }
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+}
+
+async function openChat(id) {
+  chatId = id; store("mdagent-chat", id);
+  messages = [];
+  if (id) {
+    const h = await (await fetch("/api/history?chat=" + encodeURIComponent(id))).json();
+    if (!h.chat) { chatId = null; store("mdagent-chat", null); }
+    messages = h.history.map(m => ({role: m.role, text: m.text}));
+  }
+  renderLog(); refreshChats(); refreshRuns();
+}
+document.getElementById("new").onclick = () => openChat(null);
+
+async function refreshChats() {
+  let chats = [];
+  try { chats = await (await fetch("/api/chats")).json(); } catch (e) { return; }
+  const box = document.getElementById("chats");
+  box.innerHTML = "";
+  if (!chatId) {
+    const d = document.createElement("div"); d.className = "chat on"; d.textContent = L().untitled; box.appendChild(d);
+  }
+  for (const c of chats) {
+    const d = document.createElement("div");
+    d.className = "chat" + (c.id === chatId ? " on" : "");
+    d.innerHTML = `${escapeHtml(c.title || L().untitled)}<small>${L().runsCount(c.runs.length)}</small>`;
+    d.title = c.title;
+    d.onclick = () => openChat(c.id);
+    box.appendChild(d);
+  }
+}
+
+const openLists = new Set();  // Runs whose file list is open; kept across refreshes.
+function size(b) { return b >= 1e9 ? (b / 1e9).toFixed(1) + " GB" : b >= 1e6 ? (b / 1e6).toFixed(1) + " MB" : Math.ceil(b / 1e3) + " kB"; }
+function whereHtml(r) {
+  if (!r.folder) return "";
+  const run = encodeURIComponent(r.name), files = r.files || [];
+  let h = `<div class="where">${escapeHtml(L().where(r.host))}<br><code>${escapeHtml(r.folder)}</code>` +
+          `<div class="note">${L().whereNote}</div>`;
+  if (!files.length) return h + `<div class="note">${L().noFiles}</div></div>`;
+  h += `<a href="/api/download?run=${run}">${L().zip}</a>`;
+  h += `<details data-run="${escapeHtml(r.name)}"${openLists.has(r.name) ? " open" : ""}><summary>${L().files(files.length)}</summary><ul>`;
+  for (const f of files)
+    h += `<li><a href="/api/file?run=${run}&path=${encodeURIComponent(f.path)}">${escapeHtml(f.path)}</a> <span>${size(f.size)}</span></li>`;
+  return h + "</ul></details></div>";
+}
+
+async function refreshRuns() {
+  let runs = [];
+  try {
+    runs = await (await fetch(`/api/runs?all=${showAll}&chat=${encodeURIComponent(chatId || "")}`)).json();
+  } catch (e) { return; }
+  const box = document.getElementById("runs");
+  box.innerHTML = runs.length ? "" : `<div class='last'>${showAll === "1" ? L().noRunsAll : L().noRuns}</div>`;
+  for (const r of runs) {
+    const d = document.createElement("div");
+    d.className = "run";
+    const ns = r.plain_md_ns_per_replica != null ? L().plainMd(r.plain_md_ns_per_replica) : "";
+    d.innerHTML = `<b>${escapeHtml(r.name)}</b><span class="state ${r.state}">${L().states[r.state] || r.state}</span>` +
+      `<div>${ns}</div><div class="last">${escapeHtml((r.last || []).join("\n"))}</div>` + whereHtml(r);
+    const det = d.querySelector("details");
+    if (det) det.ontoggle = () => det.open ? openLists.add(r.name) : openLists.delete(r.name);
+    box.appendChild(d);
+  }
+}
+
+document.getElementById("form").onsubmit = async (e) => {
+  e.preventDefault();
+  const t = text.value.trim();
+  if (!t) return;
+  text.value = "";
+  messages.push({role: "user", text: t});
+  renderLog();
+  const send = document.getElementById("send");
+  send.disabled = true; send.textContent = L().thinking;
+  try {
+    const r = await post("/api/chat", {text: t, lang, chat: chatId});
+    if (r.chat && r.chat !== chatId) { chatId = r.chat; store("mdagent-chat", chatId); }
+    messages.push({role: "assistant", text: r.reply, card: r.card});
+  } catch (err) {
+    messages.push({role: "assistant", text: L().failed + err});
+  }
+  send.disabled = false; send.textContent = L().send;
+  renderLog(); refreshChats(); refreshRuns();
+};
+text.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); document.getElementById("form").requestSubmit(); }
+});
+
+(async () => {
+  const h = await (await fetch("/api/history")).json();
+  backendName = h.backend;
+  applyLanguage();
+  await openChat(chatId);
+  setInterval(refreshRuns, 10000);
+})();
+</script>
+</body>
+</html>
