@@ -188,7 +188,8 @@ def run_replica(
             if k % report_every == 0 and k < n_pace:
                 now = progress["ns_done"] + k * s.pace_ps / 1000
                 speed = (now - ns_start) / ((time.time() - t0) / 86400)
-                log(f"enhanced replica {replica}: {now:.1f} of {s.length_ns:g} ns ({speed:.0f} ns/day)")
+                log(f"enhanced replica {replica}: {now:.1f} of {s.length_ns:g} ns ({speed:.0f} ns/day, "
+                    f"{time.strftime('%m-%d %H:%M')})")
         before = progress["ns_done"]
         progress["ns_done"] = round(before + chunk_ns, 9)
         tmp = p["state"].with_suffix(".tmp")
@@ -199,4 +200,4 @@ def run_replica(
         p["progress"].write_text(json.dumps(progress))
         speed = (progress["ns_done"] - ns_start) / ((time.time() - t0) / 86400)
         log(f"enhanced replica {replica}: {progress['ns_done']:g} of {s.length_ns:g} ns "
-            f"({speed:.0f} ns/day)")
+            f"({speed:.0f} ns/day, {time.strftime('%m-%d %H:%M')})")

@@ -380,3 +380,22 @@ def test_busy_port_gives_a_clear_message(project, monkeypatch):
             chat.serve(project, "claude", busy.getsockname()[1], open_browser=False)
     finally:
         busy.close()
+
+
+def test_a_stopped_run_leaves_a_trace_in_its_log(tmp_path):
+    import signal
+    import subprocess
+
+    log = tmp_path / "run.log"
+    code = ("import time; from mdagent.cli import _record_how_the_run_ends; "
+            "_record_how_the_run_ends(); print('running', flush=True); time.sleep(60)")
+    with open(log, "w") as f:
+        p = subprocess.Popen([sys.executable, "-c", code], stdout=f, stderr=subprocess.STDOUT, cwd=REPO)
+    for _ in range(100):
+        if "running" in log.read_text():
+            break
+        time.sleep(0.1)
+    p.send_signal(signal.SIGTERM)
+    assert p.wait(timeout=10) == -signal.SIGTERM                 # Stops at once, as before.
+    text = log.read_text()
+    assert "started at" in text and "most recent call first" in text   # The stack shows where it was.
