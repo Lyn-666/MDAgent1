@@ -1,14 +1,14 @@
-"""Plain-language requests: Claude fills in the run settings, the user confirms.
+"""Plain-language requests: a language model fills in the run settings, the user confirms.
 
-Claude only fills in RunPlan, a fixed form whose fields are the options of
+The language model (Claude Code, Codex or the Anthropic API, see backends.py) only fills in RunPlan, a fixed form whose fields are the options of
 `mdagent run`. A field left empty keeps its default. The form is turned into
 a normal `mdagent run` command line and checked by the same parser as the
 command line. The user sees the settings and the command, and confirms
 before anything runs. If the request is unclear, Claude asks questions
 instead, and nothing runs.
 
-Needs: pip install anthropic, and an API key (ANTHROPIC_API_KEY) or
-`ant auth login`.
+The `ask` command works with the same backends as the chat window: a Claude
+Code or Codex login, or an API key.
 """
 
 from __future__ import annotations
@@ -62,6 +62,8 @@ class RunPlan(BaseModel):
     enhanced_ns: Optional[float] = Field(None, description="Length of each enhanced sampling replica in ns. "
                                                            "Default 20.")
     enhanced_replicas: Optional[int] = Field(None, description="Default 2.")
+    equil_ps: Optional[float] = Field(None, description="Total equilibration before production, in ps. "
+                                                        "Default 600.")
     enhanced_max_residues: Optional[int] = Field(
         None, description="Bias at most this many residues at once in enhanced sampling (the slowest ones). "
                           "Default 10.")
@@ -97,8 +99,16 @@ Rules:
 - Write `summary` and `questions` in the language of the user's request."""
 
 
-def make_plan(request: str, summary: str, client=None) -> RunPlan:
-    """Ask Claude to fill in RunPlan."""
+def make_plan(request: str, summary: str, client=None, backend: str = "api") -> RunPlan:
+    """Ask the language model to fill in RunPlan.
+
+    backend "claude" or "codex" uses that login (see backends.py). "api" uses the
+    Anthropic API, through `client` if one is given.
+    """
+    if backend != "api":
+        from . import backends
+
+        return backends.call(backend, f"{SYSTEM}\n\nPDB summary:\n{summary}", request, RunPlan)
     import anthropic
 
     client = client or anthropic.Anthropic()
@@ -124,7 +134,7 @@ FLAGS = [  # RunPlan field -> command line option
     ("first_ns", "--first-ns"), ("extend_ns", "--extend-ns"), ("max_ns", "--max-ns"),
     ("no_flip_patience_ns", "--no-flip-patience-ns"), ("sampling", "--sampling"),
     ("enhanced_ns", "--enhanced-ns"), ("enhanced_replicas", "--enhanced-replicas"),
-    ("enhanced_max_residues", "--enhanced-max-residues"),
+    ("enhanced_max_residues", "--enhanced-max-residues"), ("equil_ps", "--equil-ps"),
     ("chains", "--chains"), ("uniprot", "--uniprot"), ("termini", "--termini"),
 ]
 SWITCHES = [("check_protonation", "--check-protonation"), ("no_enhanced_sampling", "--no-enhanced-sampling"),
@@ -163,13 +173,18 @@ def to_argv(plan: RunPlan, pdb: str | None, out: str, prmtop: str | None = None,
     return argv
 
 
-def ask(request: str, pdb: str, out: str, assume_yes: bool = False, planner=make_plan,
-        confirm=input) -> int:
+def ask(request: str, pdb: str, out: str, assume_yes: bool = False, planner=None,
+        confirm=input, backend: str = "auto") -> int:
     from .cli import build_parser, main
 
     if not Path(pdb).exists():
         raise ValueError(f"PDB file not found: {pdb}")
-    print("Asking Claude to turn the request into settings ...")
+    if planner is None:
+        from . import backends
+
+        chosen = backends.choose(backend)
+        planner = lambda req, summary: make_plan(req, summary, backend=chosen)  # noqa: E731
+        print(f"Asking the language model ({chosen}) to turn the request into settings ...")
     try:
         plan = planner(request, pdb_summary(pdb))
     except ImportError as e:

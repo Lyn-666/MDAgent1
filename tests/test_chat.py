@@ -363,7 +363,7 @@ def test_start_message_and_prompt_name_the_folder(project):
     _finished_run(project)
     a.message("where is the trajectory?", chat_id=conv.id)
     assert '"folder": "' + str((project / "runs" / "demo").resolve()) in seen["prompt"]
-    assert "enhanced/replica_0_chunk000.dcd" in seen["prompt"]
+    assert '"enhanced/replica_*_chunk*.dcd": 1' in seen["prompt"]   # Counts, not every file name.
 
 
 def test_busy_port_gives_a_clear_message(project, monkeypatch):

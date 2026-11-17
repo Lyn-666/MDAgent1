@@ -23,7 +23,7 @@ python -m mdagent run --pdb examples/181L.pdb --around-ligand BNZ --out runs/fir
 
 日志第一行写着结果文件夹的完整路径。结束时，日志末尾的 Summary 会列出所有结果文件。
 
-**3. 试聊天网页：** 运行 `python -m mdagent chat`，浏览器打开 `http://localhost:8765`，用中文或英文说要跑什么，例如"用 181L，看苯周围的口袋，开发测试，有问题也继续"。
+**3. 用对话的方式跑：** 运行 `python -m mdagent start`。程序会依次问你：界面语言、用 Claude 还是 ChatGPT（Codex）、在网页还是终端里对话。然后用中文或英文说要跑什么，例如"用 181L，看苯周围的口袋，开发测试，有问题也继续"。见下面的"开始对话"。
 
 **4. 反馈问题：** 在 GitHub 上开一个 Issue，选"问题报告"模板，附上日志文件 `runs/<名字>.log`。
 
@@ -216,6 +216,34 @@ agent 只负责跑增强采样和保存数据，不做分析。输出在运行�
 
 选项：`--adaptive-policy`（`least_counts` 或 `random`）、`--adaptive-clusters`（聚类数，默认 20）、`--full-save-ps`（完整坐标的保存间隔，默认 10 ps）。
 
+## 开始对话（`start`）
+
+```bash
+conda activate mdagent
+python -m mdagent start
+```
+
+程序依次问三件事，按 Enter 就沿用上次的选择（记在 `runs/.chats/start.json`）：
+
+1. **界面语言：** 中文或 English。
+2. **语言模型：** Claude（用 Claude Code 的登录）或 ChatGPT（用 Codex 的登录）。电脑上只装了一个时，不再问。
+3. **在哪里对话：** 网页（浏览器打开 `http://localhost:8765`）或终端（就在这个窗口里）。
+
+也可以直接指定，跳过提问：`python -m mdagent start --backend codex --ui terminal --lang zh`。
+
+**流程由程序控制，不由语言模型控制。** 语言模型只做一件事：把你的话填进一张固定的设置表，表里每一项对应 `mdagent run` 的一个选项。它不能运行命令，也看不到你的文件，只看到 PDB 文件的概况和运行列表。之后的每一步都由 MDAgent 自己按固定顺序做：按编号下载 PDB、检查结构、生成命令，等你确认后才在后台启动。网页和终端用的是同一个程序，所以步骤完全一样，对话记录也互通。
+
+**尽量少用 token：** 每说一句话，只调用一次语言模型（要下载 PDB 时两次）。调用时关掉 Claude Code 的全部工具，也不用它自带的长提示；Codex 用较低的推理强度。运行列表只告诉语言模型每类结果文件有几个，不列出每个文件名。下面这些终端命令完全不用语言模型，不花 token：
+
+| 命令 | 作用 |
+|---|---|
+| `/runs` | 列出这个项目的所有运行：状态、最近的进度、结果文件在哪台电脑的哪个文件夹 |
+| `/new` | 开始一个新对话。不同的案例用不同的对话。 |
+| `/help` | 显示这些命令 |
+| `/quit` | 退出。正在跑的模拟不会停。 |
+
+在终端里，语言模型提出开始、停止或继续一个运行时，MDAgent 会显示设置、结构检查报告和完整命令，然后问"开始运行？[y/N]"。只有输入 y 才会执行。网页上对应的是一个按钮。
+
 ## 聊天窗口（`chat`）
 
 ```bash
@@ -238,7 +266,9 @@ python -m mdagent chat              # 浏览器打开 http://localhost:8765
 
 如果设置了 `ANTHROPIC_API_KEY`，Claude Code 会优先用这个密钥，而不是你的订阅登录。Codex 后台还没有在真实环境里测试过。
 
-## 用 Claude Code 当 agent 窗口（不需要 API 密钥）
+## 在 Claude Code 里用 `/md`（主要给开发者）
+
+这种方式不是 MDAgent 自己的对话程序。它是 Claude Code 本身在工作：我们在 `.claude/commands/` 里写了一份说明，Claude Code 按说明运行命令、读文件、问你确认。所以它会用掉较多的 Claude Code 额度，步骤也靠 Claude Code 遵守说明，而不是由程序保证。一般使用请用上面的 `start`。
 
 在自己的电脑上，先激活环境，再在 MDAgent1 文件夹里打开 Claude Code：
 
@@ -255,15 +285,15 @@ claude
 
 模拟在后台运行，关掉 Claude Code 或终端都不会停。Claude Code 不分析模拟结果。命令的内容在 `.claude/commands/` 里。
 
-## 用一句话描述要求（`ask`，需要 API 密钥）
+## 用一句话描述要求（`ask`，一次性命令）
 
 ```bash
-pip install -e ".[llm]"
-export ANTHROPIC_API_KEY=...        # 或者用 ant auth login 登录
 python -m mdagent ask --pdb examples/181L.pdb --out runs/a "用 CHARMM，看苯周围的口袋，0.1 M KCl，先检查质子化"
 ```
 
-Claude（`claude-opus-5-5`）只负责填一张固定的设置表，表里每一项都对应 `mdagent run` 的一个选项。你没提到的项留空，保持默认值。程序会把 PDB 文件的概况告诉 Claude：有哪些链、残基编号范围和配体名称。所以 Claude 不需要猜配体名称；你说的配体在文件里找不到时，它会提问。
+和 `start` 一样，它用 Claude Code 或 Codex 的登录（`--backend claude` 或 `--backend codex`，默认选第一个装好的）。有 Anthropic API 密钥时也可以用 `--backend api`，这时要先 `pip install -e ".[llm]"`。它不是对话：说一句话，程序显示设置和命令，你输入 `y` 后开始。适合写进脚本。
+
+语言模型只负责填一张固定的设置表，表里每一项都对应 `mdagent run` 的一个选项。你没提到的项留空，保持默认值。程序会把 PDB 文件的概况告诉 Claude：有哪些链、残基编号范围和配体名称。所以 Claude 不需要猜配体名称；你说的配体在文件里找不到时，它会提问。
 
 - 要求不清楚时，Claude 会提出问题，程序不运行。
 - 要求清楚时，设置表被转成一条普通的 `mdagent run` 命令，经过和命令行完全相同的检查。程序显示目标区域、哪些设置改了默认值、完整的命令，等你输入 `y` 才开始运行。加 `--yes` 可以跳过确认。

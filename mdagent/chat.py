@@ -84,13 +84,14 @@ Choose one action for the user's last message:
 - plan_run: the user wants a new run. Pick the input file only from the list of input files. Fill in only
   the settings the user asked for and leave the others null (defaults). If the user says "development test"
   or "short", use replicas 2, first_ns 0.1, extend_ns 0.1, max_ns 0.3, no_flip_patience_ns 0.25,
-  enhanced_ns 0.1. Never guess a ligand name or residue number: use only names and numbers in the file
+  enhanced_ns 0.1, equil_ps 60. Never guess a ligand name or residue number: use only names and numbers in the file
   summaries. If anything needed is unclear, use action "answer" and ask.
 - stop: the user asks to stop a run that is running. run_name must be in the run list.
 - resume: the user asks to continue a run that is stopped or failed. run_name must be in the run list.
 - answer: everything else, for example progress questions. Answer progress questions only from the run
   list below. If the user asks where the trajectories or other results are, give the computer ("host") and
-  the full folder ("folder") from the run list, and the file names ("files"). The files are on that computer
+  the full folder ("folder") from the run list, and the kinds of result files with how many of each
+  ("files", as file name patterns). protein.pdb is the topology for all .dcd trajectories. The files are on that computer
   only. If the user opened this page on another computer, they can download the files with the links on the
   run card on the right ("all files as zip", or one file at a time).
 
@@ -104,8 +105,8 @@ If the user gives a PDB ID (four characters, for example 3HTB) that is not in th
 in fetch_pdb_ids and use action "answer". MDAgent downloads it to structures/<ID>.pdb and asks you again;
 then the file and its summary are in the list, and you can plan the run.
 
-Nothing starts or stops until the user clicks the button under your message, so say what the button will
-do. Do not analyze simulation results (populations, convergence): the user does that. Write `reply` in the
+Nothing starts or stops until the user confirms under your message: on the web page with a button, in the
+terminal by typing y (the "Interface" line below says which). Say what confirming will do. Do not analyze simulation results (populations, convergence): the user does that. Write `reply` in the
 language of the user's last message (Chinese or English), in short plain sentences."""
 
 
@@ -367,8 +368,13 @@ def build_prompt(root: Path, runs: Runs, conv: Conversation, message: str) -> st
 
 
 def _for_prompt(status: dict) -> dict:
-    """The run status without file sizes, so that the prompt stays short."""
-    return {**status, "files": [f["path"] for f in status.get("files", [])]}
+    """The run status with the number of each kind of result file instead of every file name,
+    so that the prompt stays short (a long run has dozens of trajectory files)."""
+    from .outputs import OUTPUTS
+
+    paths = [Path(f["path"]) for f in status.get("files", [])]
+    kinds = {pattern: sum(1 for p in paths if p.match(pattern)) for pattern, _ in OUTPUTS}
+    return {**status, "files": {k: n for k, n in kinds.items() if n}}
 
 
 def _clean_name(name: str | None, existing: list[str]) -> str:
@@ -395,6 +401,7 @@ class Assistant:
     store: ChatStore | None = None
     pending: dict = field(default_factory=dict)   # card id -> card
     call: object = backends.call                  # Replaced in tests.
+    ui: str = "web"                               # "web" or "terminal": how the user confirms a proposal.
     lock: threading.Lock = field(default_factory=threading.Lock)
 
     def __post_init__(self):
@@ -404,7 +411,7 @@ class Assistant:
     def message(self, text: str, lang: str = "zh", chat_id: str | None = None) -> dict:
         with self.lock:
             conv = self.store.get(chat_id)
-            prompt = build_prompt(self.root, self.runs, conv, text)
+            prompt = self._prompt(conv, text)
             conv.history.append({"role": "user", "text": text})
             if not conv.title:
                 conv.title = text.strip().splitlines()[0][:40]
@@ -413,7 +420,7 @@ class Assistant:
             action = self.call(self.backend, SYSTEM, prompt, ChatAction)
             notes = self._fetch(action.fetch_pdb_ids, lang)
             if notes:  # Ask again, now with the downloaded files in the list.
-                prompt = build_prompt(self.root, self.runs, conv, text) + "\n\nMDAgent note: " + " ".join(notes)
+                prompt = self._prompt(conv, text) + "\n\nMDAgent note: " + " ".join(notes)
                 action = self.call(self.backend, SYSTEM, prompt, ChatAction)
             reply, card = action.reply, None
             if notes:
@@ -433,6 +440,11 @@ class Assistant:
                 card["chat"] = conv.id
                 self.pending[card["id"]] = card
         return {"reply": reply, "card": card, "chat": conv.id, "title": conv.title}
+
+    def _prompt(self, conv: Conversation, text: str) -> str:
+        how = ("Interface: terminal. The user confirms a proposal by typing y; there is no button."
+               if self.ui == "terminal" else "Interface: web page. The user confirms a proposal with a button.")
+        return how + "\n\n" + build_prompt(self.root, self.runs, conv, text)
 
     def _fetch(self, ids: list[str], lang: str) -> list[str]:
         """Download the requested PDB files. Returns one note per ID (empty if nothing was asked)."""
