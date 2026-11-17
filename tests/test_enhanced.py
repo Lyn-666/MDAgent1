@@ -91,7 +91,7 @@ def test_plain_md_then_enhanced_sampling_and_resume(tmp_path):
     # saved bias and state.
     state = RunState.load(tmp_path)
     state.enhanced["settings"]["length_ns"] = 0.003
-    state.enhanced["converged"] = False
+    state.enhanced.pop("outcome", None)
     logs.clear()
     run_all(tmp_path, state, log=logs.append)
     assert np.load(d / "replica_0_chi.npy").shape == (30, 2)

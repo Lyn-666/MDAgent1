@@ -54,7 +54,44 @@ def _print_summary(decisions, enhanced_labels, run_dir) -> None:
                 print(format_table(json.loads(pops.read_text())))
         else:
             print("Enhanced sampling did not run.")
+    try:
+        import json
+
+        state = json.loads((Path(run_dir) / "run.json").read_text())
+        for name, o in (("plain MD", state.get("notes", {}).get("plain_md_outcome")),
+                        ("enhanced sampling", state.get("enhanced", {}).get("outcome"))):
+            if o:
+                print(f"Stop reason ({name}): {o['reason']} after {o['ns_per_replica']:g} ns per replica "
+                      f"(budget {o['budget_ns']:g} ns).")
+    except (OSError, ValueError, KeyError):
+        pass
     print("\n".join(describe(run_dir)))
+
+
+def _run_and_record(work, run_dir):
+    """Run, and record stop reason "failed" (in run.json and the chat) if an error stops the run."""
+    from .agent import record_failure
+
+    try:
+        return work()
+    except Exception as e:
+        record_failure(Path(run_dir), e)
+        raise
+
+
+def _goal_from_args(args):
+    from .agent import PERMISSIONS, Goal
+
+    goal = Goal.for_mode(args.mode, description=args.goal, precision=args.precision)
+    if args.allow is not None:
+        allowed = [a.strip() for a in args.allow.split(",") if a.strip() and a.strip() != "none"]
+        unknown = [a for a in allowed if a not in PERMISSIONS]
+        if unknown:
+            raise ValueError(f"unknown --allow value(s): {', '.join(unknown)}. Choose from {', '.join(PERMISSIONS)}.")
+        goal.permissions = allowed
+    if not 0 < goal.precision < 1:
+        raise ValueError("--precision must be between 0 and 1.")
+    return goal
 
 
 def _host() -> str:
@@ -229,6 +266,7 @@ def cmd_run(args) -> int:
         setup=asdict(setup) if setup else {"amber": [str(args.prmtop), str(args.inpcrd)]},
         sampling=args.sampling,
         mode=args.mode,
+        goal=asdict(_goal_from_args(args)),
         adaptive={"policy": args.adaptive_policy, "n_clusters": args.adaptive_clusters,
                   "full_interval_ps": args.full_save_ps} if args.sampling == "adaptive" else {},
         enhanced={"enabled": not args.no_enhanced_sampling,
@@ -240,6 +278,10 @@ def cmd_run(args) -> int:
         print(f"\nThe system is ready in {out}. Check the report above (also in setup_report.txt).")
         print(f"To start MD: python -m mdagent resume --run {out}")
         return 0
+    goal = state.the_goal()
+    print(f"Goal: {goal.quantity} of the target side chains, standard error at most {goal.precision:g}"
+          + (f" ({goal.description})" if goal.description else "") + ".")
+    print("The agent may by itself: " + (", ".join(goal.permissions) or "nothing (it only suggests)") + ".")
     print(f"Plan: {args.replicas} replicas. Round 1 is {loop.first_ns:g} ns per replica. "
           f"Later rounds add {loop.extend_ns:g} ns. Budget: {loop.max_ns:g} ns per replica.")
     if args.sampling == "adaptive":
@@ -250,7 +292,7 @@ def cmd_run(args) -> int:
               f"{args.enhanced_replicas} replicas x {args.enhanced_ns:g} ns, at most "
               f"{args.enhanced_max_residues} residues (the slowest ones).")
     files = SystemFiles(built.topology, built.positions, built.system)
-    _print_summary(*run_all(out, state, files), out)
+    _print_summary(*_run_and_record(lambda: run_all(out, state, files), out), out)
     return 0
 
 
@@ -268,14 +310,14 @@ def cmd_resume(args) -> int:
         state.enhanced["requested"] = bool(args.enhanced_sampling)  # The user asked for it (guided mode).
     if args.enhanced_ns is not None:
         state.enhanced.setdefault("settings", {})["length_ns"] = args.enhanced_ns
-        state.enhanced["converged"] = False  # The user asked for more: run it, then judge again.
+        state.enhanced.pop("outcome", None)  # The user asked for more: run it, then judge again.
     if not _check_env(state.md.platform):
         return 2
     state.save(run)
     print(f"Run folder: {run.resolve()} (on computer '{_host()}')")
     print(f"Resuming {run}: {state.ns_done:g} ns of plain MD per replica done. "
           f"Budget: {state.loop.max_ns:g} ns per replica.")
-    _print_summary(*run_all(run, state), run)
+    _print_summary(*_run_and_record(lambda: run_all(run, state), run), run)
     return 0
 
 
@@ -382,6 +424,12 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--mode", default="auto", choices=["auto", "guided"],
                    help="auto (default): MDAgent chooses when to switch methods and when to stop. guided: run "
                         "only the method you chose; MDAgent suggests changes in the chat but does not switch.")
+    r.add_argument("--goal", default="", help="What you want to know, in your own words (kept in run.json).")
+    r.add_argument("--precision", type=float, default=0.05,
+                   help="Largest allowed standard error of any chi1 state population (0 to 1). Default 0.05.")
+    r.add_argument("--allow", default=None,
+                   help="What the agent may do by itself, comma separated: extend, add_replicas, switch_method, "
+                        "stop_early; or 'none'. Default: all in auto mode, none in guided mode.")
     r.add_argument("--sampling", default="continue", choices=["continue", "adaptive"],
                    help="continue: each replica continues its own trajectory (default). adaptive: from "
                         "round 2, AdaptivePy chooses the starting frames (pip install adaptivepy-sampling).")
