@@ -38,7 +38,7 @@ def test_terminal_card_runs_only_after_yes(project):
         calls.append(prompt)
         return ChatAction(action="plan_run", reply="I will run it.", run_name="dev", pdb="examples/181L.pdb", plan=plan)
 
-    a = Assistant(root=project, backend="claude", runs=Runs(project), call=call)
+    a = Assistant(root=project, backend="claude", runs=Runs(project), call=call, ui="terminal")
     started = []
     a.runs.launch = lambda name, argv, **kw: started.append(name) or 123
     out = []
@@ -48,6 +48,7 @@ def test_terminal_card_runs_only_after_yes(project):
     text = "\n".join(out)
     assert len(calls) == 2 and started == ["dev"]
     assert "Nothing was done." in text and "started in the background" in text
+    assert "Type /runs" in text and "run card" not in text   # Terminal wording, not the web page's.
     assert "Command: python -m mdagent run --pdb examples/181L.pdb --out runs/dev" in text
     assert "/runs" in text and "Bye." in text
 

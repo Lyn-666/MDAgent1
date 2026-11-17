@@ -126,6 +126,8 @@ TEXT = {
         "not_running": "运行“{name}”没有在运行",
         "still_running": "运行“{name}”还在运行",
         "expired": "这个提议已经失效，请重新提出要求。",
+        "started_terminal": "运行“{name}”已在后台开始（进程 {pid}），日志在 runs/{name}.log。退出这个终端也不会停。\n"
+                            "结果文件会保存在电脑“{host}”的文件夹 {folder} 里。输入 /runs 查看进度和结果文件。",
         "started": "运行“{name}”已在后台开始（进程 {pid}），日志在 runs/{name}.log。关掉网页也不会停。\n"
                    "结果文件会保存在电脑“{host}”的文件夹 {folder} 里。右侧的运行卡片上有下载链接。",
         "resumed": "运行“{name}”已在后台继续（进程 {pid}）。",
@@ -150,6 +152,9 @@ TEXT = {
         "not_running": "run '{name}' is not running",
         "still_running": "run '{name}' is still running",
         "expired": "This proposal is no longer available. Please ask again.",
+        "started_terminal": "Run '{name}' started in the background (process {pid}). Log: runs/{name}.log. "
+                            "Leaving this terminal does not stop it.\nThe result files will be on computer '{host}', "
+                            "in folder {folder}. Type /runs to see the progress and the result files.",
         "started": "Run '{name}' started in the background (process {pid}). Log: runs/{name}.log. "
                    "Closing the page does not stop it.\nThe result files will be on computer '{host}', in "
                    "folder {folder}. The run card on the right has download links.",
@@ -516,7 +521,7 @@ class Assistant:
         if card["kind"] == "start":
             pid = self.runs.launch(name, card["argv"])
             conv.runs.append(name)
-            msg = t(lang, "started", name=name, pid=pid, host=host(), folder=self.runs.dir.resolve() / name)
+            msg = t(lang, "started_terminal" if self.ui == "terminal" else "started", name=name, pid=pid, host=host(), folder=self.runs.dir.resolve() / name)
         elif card["kind"] == "resume":
             pid = self.runs.launch(name, ["resume", "--run", f"runs/{name}"], log_suffix=f".resume-{int(time.time())}")
             msg = t(lang, "resumed", name=name, pid=pid)
