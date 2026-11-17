@@ -112,7 +112,9 @@ def _call_codex(system, user, model, runner):
         schema_path.write_text(json.dumps(strict_schema(model)))
         # Codex exec has no separate system prompt option, so the instructions go first.
         prompt = f"{system}\n\n---\n\n{user}"
+        # Filling in a form needs little reasoning; low effort uses fewer tokens.
         cmd = ["codex", "exec", "--skip-git-repo-check", "--sandbox", "read-only",
+               "-c", 'model_reasoning_effort="low"',
                "--output-schema", str(schema_path), "-o", str(out_path), prompt]
         done = runner(cmd, capture_output=True, text=True, timeout=TIMEOUT_S, cwd=tmp)
         if done.returncode != 0:

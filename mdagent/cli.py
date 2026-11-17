@@ -399,20 +399,34 @@ def build_parser() -> argparse.ArgumentParser:
     isrc.add_argument("--prmtop", help="Amber topology (.parm7/.prmtop). Residue numbers start at 1.")
     i.set_defaults(func=cmd_info)
 
-    c = sub.add_parser("chat", help="Open the MDAgent chat window (a local web page).")
+    st = sub.add_parser("start", help="Start here: choose the language, the language model (Claude or ChatGPT) "
+                                      "and where to talk (web page or terminal).")
+    st.add_argument("--backend", default=None, choices=["claude", "codex", "api"],
+                    help="Language model. Not given: MDAgent asks.")
+    st.add_argument("--ui", default=None, choices=["web", "terminal"], help="Not given: MDAgent asks.")
+    st.add_argument("--lang", default=None, choices=["zh", "en"], help="Not given: MDAgent asks.")
+    st.add_argument("--port", type=int, default=8765)
+    st.add_argument("--no-browser", action="store_true", help="Do not open the browser.")
+    st.set_defaults(func=cmd_start)
+
+    c = sub.add_parser("chat", help="Talk with MDAgent: a local web page, or the terminal with --terminal.")
     c.add_argument("--backend", default="auto", choices=["auto", "claude", "codex", "api"],
                    help="Language model: claude (Claude Code login), codex (Codex login), api (ANTHROPIC_API_KEY). "
                         "auto picks the first one installed.")
+    c.add_argument("--terminal", action="store_true", help="Talk in this terminal instead of a web page.")
+    c.add_argument("--lang", default="zh", choices=["zh", "en"], help="Language of the terminal mode.")
     c.add_argument("--port", type=int, default=8765)
     c.add_argument("--no-browser", action="store_true", help="Do not open the browser.")
     c.set_defaults(func=cmd_chat)
 
-    a = sub.add_parser("ask", help="Describe the run in plain language. Claude turns it into settings; "
+    a = sub.add_parser("ask", help="Describe the run in one sentence. The language model turns it into settings; "
                                    "you confirm before anything runs.")
     a.add_argument("request", help='For example: "use CHARMM, look at the pocket around benzene, 0.1 M KCl".')
     a.add_argument("--pdb", required=True)
     a.add_argument("--out", required=True)
     a.add_argument("--yes", action="store_true", help="Start without asking for confirmation.")
+    a.add_argument("--backend", default="auto", choices=["auto", "claude", "codex", "api"],
+                   help="Language model, as for chat. auto picks the first one installed.")
     a.set_defaults(func=cmd_ask)
     return p
 
@@ -420,7 +434,7 @@ def build_parser() -> argparse.ArgumentParser:
 def cmd_ask(args) -> int:
     from .llm import ask
 
-    return ask(args.request, args.pdb, args.out, assume_yes=args.yes)
+    return ask(args.request, args.pdb, args.out, assume_yes=args.yes, backend=args.backend)
 
 
 def cmd_info(args) -> int:
@@ -431,10 +445,22 @@ def cmd_info(args) -> int:
 
 
 def cmd_chat(args) -> int:
-    from .chat import serve
+    from . import backends
+    from .chat import Assistant, Runs, serve
+    from .terminal import run_terminal
 
+    if args.terminal:
+        root = Path.cwd()
+        assistant = Assistant(root=root, backend=backends.choose(args.backend), runs=Runs(root), ui="terminal")
+        return run_terminal(assistant, args.lang)
     serve(Path.cwd(), args.backend, args.port, open_browser=not args.no_browser)
     return 0
+
+
+def cmd_start(args) -> int:
+    from .terminal import start
+
+    return start(Path.cwd(), args.backend, args.ui, args.lang, args.port, open_browser=not args.no_browser)
 
 
 def cmd_fetch(args) -> int:

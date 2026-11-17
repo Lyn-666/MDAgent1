@@ -29,7 +29,8 @@
 - **路径要让用户一看就懂**，例如 `structures/3HTB.pdb`、`runs/<名字>/`。
 - **告诉用户结果文件在哪里时，写电脑名和完整路径**，并说明文件只在跑模拟的那台电脑上。网页的运行卡片上有下载链接（单个文件或 zip）。起因：用户跑完测试后在自己电脑上找不到轨迹。
 - **测试者在自己的电脑上运行**，用自己的 Claude 或 Codex 登录。所以聊天网页不需要访问密码（只接受本机连接就够了）。**主要面向 Linux + NVIDIA GPU。** macOS 能运行但没有 CUDA，只适合短测试，不专门适配；Windows 只能通过 WSL2（程序用到 `os.killpg`、`pgrep` 和 Unix 的 C 库）。
-- **语言模型只做"翻译"**：把用户的话填进固定的设置表，不能运行命令；开始、停止、继续都要用户点按钮确认。
+- **语言模型只做"翻译"**：把用户的话填进固定的设置表，不能运行命令；开始、停止、继续都要用户确认（网页点按钮，终端输入 y）。
+- **使用方式（用户的设计）：** 装好程序后运行 `mdagent start`，依次选界面语言、Claude 还是 ChatGPT（Codex）、网页还是终端。流程由我们的程序控制，不由语言模型控制；网页和终端共用 `chat.Assistant`。**尽量少用 Claude Code 和 Codex 的 token**：每句话只调用一次模型，提示里不放长列表，`/runs` 等本地命令不调用模型。Claude Code 的 `/md` 是 Claude Code 自己按说明工作，费额度，只给开发者用。
 - **公开计划：** 先保持私有，邀请少数同学测试；公开前要完成：科学修复（已完成：跳过脯氨酸和二硫键半胱氨酸、增强采样最多 10 个侧链）、测试者材料（已完成：`environment.yml`、README 快速上手、Issue 模板、GitHub Actions 自动测试）、许可证（已完成：MIT，版权人 Lyn-666）、用户在 GPU 上的两项验证（见 README“下一步”；181L 完整运行的普通 MD 部分已通过：VAL111 在 3×20 ns 里没有翻转，被送进增强采样，10 个侧链的上限生效；增强采样里 VAL111 第 1 条轨迹 5 ns 翻转 373 次，三种状态都去过，也已通过）、删掉 CLAUDE.md 里只和用户个人电脑有关的记录。
 - **开发阶段测试运行要很短（几分钟）**：`--replicas 2 --first-ns 0.1 --extend-ns 0.1 --max-ns 0.3 --no-flip-patience-ns 0.25 --enhanced-ns 0.1 --equil-ps 60`。
 
@@ -49,8 +50,9 @@
 - `backends.py`：语言模型后台（`claude -p`、`codex exec`、Anthropic API），统一返回结构化结果。claude 后台会去掉环境里的 `ANTHROPIC_API_KEY`，以使用 Claude Code 的订阅登录。
 - `chat.py`、`chat_page.html`：`chat` 命令，本地网页（`http://localhost:8765`），多个对话，存在 `runs/.chats/`。运行卡片显示电脑名、完整路径、文件列表和下载链接（`/api/file`、`/api/download`，只提供 `outputs.py` 列出的文件）。
 - `outputs.py`：列出一个运行的结果文件（`protein.pdb`、轨迹、chi1 和偏置势数据），以及电脑名和完整路径。命令行的 Summary 和网页都用它。
-- `llm.py`：`ask` 命令和设置表 `RunPlan`。
-- `cli.py`：命令行 `run`、`resume`、`diagnose`、`check`、`info`、`fetch`、`ask`、`chat`。
+- `terminal.py`：终端对话（`chat --terminal`）和 `start` 菜单（选择记在 `runs/.chats/start.json`）。
+- `llm.py`：`ask` 命令和设置表 `RunPlan`。`ask` 也用 `backends.py`，不再只能用 API 密钥。
+- `cli.py`：命令行 `start`、`run`、`resume`、`diagnose`、`check`、`info`、`fetch`、`ask`、`chat`。
 - `.claude/commands/`：Claude Code 项目命令 `/md` 和 `/md-status`。
 
 测试：`pytest -q tests`（约 4 分钟，含在 CPU 上跑小肽段的测试）；`pytest -q tests -m "not slow"` 只跑快速测试。测试离线运行，UniProt 序列在 `tests/data/uniprot/`。测试体系 `examples/181L.pdb`（T4 溶菌酶 L99A 与苯，口袋里的 Val111 侧链在常规 MD 中很难翻转）。
