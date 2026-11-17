@@ -72,12 +72,24 @@ class RunState:
     sampling: str = "continue"
     mode: str = "auto"      # "auto": the agent chooses methods and when to stop. "guided": the user chose.
     notes: dict = field(default_factory=dict)     # Which messages were posted already, so each is posted once.
+    goal: dict = field(default_factory=dict)      # Goal fields. Empty in runs made before goals existed.
     adaptive: dict = field(default_factory=dict)  # AdaptiveSettings fields
     starts: dict = field(default_factory=dict)    # Round index -> [[replica, part, frame], ...]
 
     @property
     def ns_done(self) -> float:
         return sum(self.rounds_ns)
+
+    def the_goal(self) -> Goal:
+        if not self.goal:
+            return Goal.for_mode(self.mode)  # Older runs: the defaults of their mode.
+        names = set(Goal.__dataclass_fields__)
+        return Goal(**{k: v for k, v in self.goal.items() if k in names})
+
+    def allowed(self, action: str) -> bool:
+        if action == "switch_method" and self.enhanced.get("requested"):
+            return True  # The user asked for enhanced sampling (resume --enhanced-sampling).
+        return action in self.the_goal().permissions
 
     def save(self, run_dir: Path) -> None:
         _write_json(run_dir / "run.json", asdict(self))
@@ -91,6 +103,39 @@ class RunState:
         return cls(**d)
 
 
+PERMISSIONS = ("extend", "add_replicas", "switch_method", "stop_early")
+DEFAULT_PERMISSIONS = {
+    # auto: the agent may do everything by itself.
+    "auto": list(PERMISSIONS),
+    # guided: the user chose the method and the budget; the agent only suggests.
+    "guided": [],
+}
+
+
+@dataclass
+class Goal:
+    """What the user wants to know, how precisely, and what the agent may do by itself.
+
+    quantity: the result the user cares about. Supported now: "chi1_populations" (the state
+      populations of the target side chains).
+    precision: the largest allowed standard error of any state population (0 to 1).
+    permissions: actions the agent may take without asking:
+      extend         run longer than the planned budget when the goal is not met yet
+      add_replicas   start more independent replicas
+      switch_method  switch from plain MD to enhanced sampling
+      stop_early     stop before the budget once the goal is met
+    """
+
+    quantity: str = "chi1_populations"
+    description: str = ""          # The user's own words.
+    precision: float = 0.05
+    permissions: list = field(default_factory=lambda: list(PERMISSIONS))
+
+    @classmethod
+    def for_mode(cls, mode: str, **kw) -> "Goal":
+        return cls(permissions=list(DEFAULT_PERMISSIONS[mode]), **kw)
+
+
 @dataclass
 class Decision:
     residue: str
@@ -98,14 +143,16 @@ class Decision:
     reason: str
     key: tuple = ()  # (chain, residue number)
     stalled: bool = False  # Guided mode: plain MD makes no progress, but goes on because the user chose it.
+    cause: str = ""        # For "enhanced_sampling": "stalled" (no flip after the patience time) or
+                           # "budget_exhausted" (the plain MD budget is used up first).
 
 
 def decide(reports: list[ResidueReport], ns_done: float, loop: LoopSettings,
-           mode: str = "auto") -> tuple[list[Decision], float]:
+           may_switch: bool = True) -> tuple[list[Decision], float]:
     """Return a decision for each residue, and the length of the next round (0 means stop).
 
-    In guided mode a residue with no flip after the patience time does not stop plain MD:
-    the user chose plain MD, so it goes on until the budget (the decision is marked stalled).
+    Without permission to switch methods, a residue with no flip after the patience time does
+    not stop plain MD: the user chose plain MD, so it goes on until the budget (marked stalled).
     """
     room = round(loop.max_ns - ns_done, 6)
     decisions = []
@@ -114,7 +161,7 @@ def decide(reports: list[ResidueReport], ns_done: float, loop: LoopSettings,
             decisions.append(Decision(r.label, "skip", r.reason))
         elif r.verdict == "ok":
             decisions.append(Decision(r.label, "done", f"Sampled well: {r.reason}"))
-        elif sum(r.transitions) == 0 and ns_done >= loop.no_flip_patience_ns and mode == "guided" and room > 0:
+        elif sum(r.transitions) == 0 and ns_done >= loop.no_flip_patience_ns and not may_switch and room > 0:
             decisions.append(Decision(
                 r.label, "extend",
                 f"No flip in {ns_done:g} ns per replica. Plain MD is unlikely to see one, but the user chose "
@@ -122,11 +169,11 @@ def decide(reports: list[ResidueReport], ns_done: float, loop: LoopSettings,
         elif sum(r.transitions) == 0 and ns_done >= loop.no_flip_patience_ns:
             decisions.append(Decision(
                 r.label, "enhanced_sampling",
-                f"No flip in {ns_done:g} ns per replica. Plain MD is unlikely to see one."))
+                f"No flip in {ns_done:g} ns per replica. Plain MD is unlikely to see one.", cause="stalled"))
         elif room <= 0:
             decisions.append(Decision(
                 r.label, "enhanced_sampling",
-                f"The budget of {loop.max_ns:g} ns per replica is used up. {r.reason}"))
+                f"The budget of {loop.max_ns:g} ns per replica is used up. {r.reason}", cause="budget_exhausted"))
         elif sum(r.transitions) == 0:
             decisions.append(Decision(
                 r.label, "extend",
@@ -251,8 +298,9 @@ def _diagnose_and_decide(run_dir: Path, state: RunState):
     else:
         reports = diagnose_trajectories(
             load_run(run_dir, state.target, len(state.rounds_ns)), state.target, state.ns_done,
-            min_flips_per_replica=state.loop.min_flips_per_replica, fixed=fixed)
-    decisions, next_ns = decide(reports, state.ns_done, state.loop, state.mode)
+            min_flips_per_replica=state.loop.min_flips_per_replica, fixed=fixed,
+            precision=state.the_goal().precision)
+    decisions, next_ns = decide(reports, state.ns_done, state.loop, state.allowed("switch_method"))
     _post_plain_md_messages(run_dir, state, decisions, next_ns)
     return reports, decisions, next_ns
 
@@ -281,23 +329,37 @@ def _post_plain_md_messages(run_dir: Path, state: RunState, decisions: list[Deci
     if next_ns > 0:
         return
     need = [d.residue for d in decisions if d.action == "enhanced_sampling"]
+    # Why plain MD stopped. Stalled wins over budget: it says that more plain MD would not help.
+    reason = ("target_reached" if not need else
+              "stalled" if any(d.cause == "stalled" for d in decisions) else "budget_exhausted")
+    if state.notes.get("plain_md_outcome", {}).get("ns_per_replica") != state.ns_done:
+        state.notes["plain_md_outcome"] = {
+            "phase": "plain_md", "reason": reason, "ns_per_replica": state.ns_done, "budget_ns": state.loop.max_ns,
+            "residues": {d.residue: d.cause or d.action for d in decisions if d.action != "skip"},
+            "time": time.strftime("%Y-%m-%d %H:%M:%S")}
+        state.save(run_dir)
+    why_zh = {"target_reached": "达到目标", "stalled": "采样停滞", "budget_exhausted": "预算用完"}[reason]
+    why_en = {"target_reached": "goal reached", "stalled": "sampling stalled",
+              "budget_exhausted": "budget used up"}[reason]
     if not need:
         _once(run_dir, state, "plain_done",
-              f"普通 MD 结束（每条 {state.ns_done:g} ns）：目标区域的侧链都采样充分了，再跑不会有明显增益。",
-              f"Plain MD finished ({state.ns_done:g} ns per replica): all target side chains are sampled well, so "
-              "more sampling would add little.", "done")
-    elif state.mode == "guided" and not state.enhanced.get("requested"):
+              f"普通 MD 结束，原因是{why_zh}（每条 {state.ns_done:g} ns）：目标区域的侧链都在状态之间来回了足够多次，"
+              f"比例的误差也不超过 {state.the_goal().precision:g}。",
+              f"Plain MD finished. Stop reason: {why_en} ({state.ns_done:g} ns per replica): every target side chain "
+              f"crossed between states often enough, and every population error is at most "
+              f"{state.the_goal().precision:g}.", "done")
+    elif not state.allowed("switch_method"):
         _once(run_dir, state, "plain_done",
-              f"普通 MD 按你的设置结束（每条 {state.ns_done:g} ns）。这些侧链没有采样充分：{', '.join(need)}。"
+              f"普通 MD 结束，原因是{why_zh}（每条 {state.ns_done:g} ns）。这些侧链没有采样充分：{', '.join(need)}。"
               f"建议用增强采样继续，可以说“用增强采样继续 {run_dir.name}”。",
-              f"Plain MD finished as you set it ({state.ns_done:g} ns per replica). These side chains are not "
+              f"Plain MD finished. Stop reason: {why_en} ({state.ns_done:g} ns per replica). These side chains are not "
               f"sampled well: {', '.join(need)}. I suggest continuing with enhanced sampling: say \"continue "
               f"{run_dir.name} with enhanced sampling\".", "suggestion")
     elif state.enhanced.get("enabled", True):
         _once(run_dir, state, "plain_done",
-              f"普通 MD 结束（每条 {state.ns_done:g} ns）。这些侧链普通 MD 采样不到：{', '.join(need)}。"
+              f"普通 MD 结束，原因是{why_zh}（每条 {state.ns_done:g} ns）。这些侧链普通 MD 采样不到：{', '.join(need)}。"
               "现在自动改用增强采样（chi1 上的 metadynamics）。",
-              f"Plain MD finished ({state.ns_done:g} ns per replica). Plain MD cannot sample these side chains: "
+              f"Plain MD finished. Stop reason: {why_en} ({state.ns_done:g} ns per replica). Plain MD cannot sample these side chains: "
               f"{', '.join(need)}. Switching to enhanced sampling (metadynamics on chi1) now.", "info")
 
 
@@ -312,7 +374,7 @@ def run_all(
     Returns the plain MD decisions and the labels of the residues that got enhanced sampling.
     """
     from .enhanced import MetadSettings, ns_done, run_replica
-    from .reweight import StopRule, analyze, converged, format_table
+    from .reweight import StopRule, analyze, assess, format_table
     from .reweight import save as save_populations
 
     files = files or load_inputs(run_dir)
@@ -320,8 +382,8 @@ def run_all(
     wanted = [d for d in decisions if d.action == "enhanced_sampling"]
     if not wanted:
         return decisions, []
-    if state.mode == "guided" and not state.enhanced.get("requested"):
-        log("Guided mode: the user chose plain MD, so enhanced sampling does not start by itself. "
+    if not state.allowed("switch_method"):
+        log("The user chose plain MD (no permission to switch methods), so enhanced sampling does not start by itself. "
             "Use 'resume --enhanced-sampling' to run it.")
         return decisions, []
     if not state.enhanced.get("enabled", True):
@@ -351,79 +413,133 @@ def run_all(
     state.save(run_dir)
 
     labels = [f"{es['resnames'][f'{c}:{n}']}{n}" for c, n in residues]
-    rule = StopRule(**{**asdict(StopRule()), **es.get("stop_rule", {})})
-    rule.min_ns = min(rule.min_ns, settings.length_ns)  # A short test run may stop at its own length.
-    auto = state.mode != "guided"
+    rule = StopRule(**{k: v for k, v in es.get("stop_rule", {}).items() if k in StopRule.__dataclass_fields__})
+    rule.min_ns = min(rule.min_ns, settings.length_ns)  # A short test run may be judged at its own length.
+    precision = state.the_goal().precision
+    may_stop = state.allowed("stop_early")
     log(f"\nEnhanced sampling (well-tempered metadynamics on chi1) for {', '.join(labels)}: "
-        f"{n_rep} replicas, up to {settings.length_ns:g} ns each, starting from the end of plain MD. "
-        + ("It stops earlier when more sampling no longer changes the populations." if auto else
-           "Guided mode: it runs the full length and says when the populations stop changing."))
+        f"{n_rep} replicas, up to {settings.length_ns:g} ns each, starting from the end of plain MD. Goal: every "
+        f"population with a standard error of at most {precision:g}. "
+        + ("It stops as soon as the goal is reached." if may_stop else
+           "It runs the full length (no permission to stop early) and says when the goal is reached."))
     last = len(state.rounds_ns) - 1
     done = min(ns_done(run_dir, r) for r in range(n_rep))
     result = before = None
-    stopped_early = False
-    finished_before = bool(es.get("converged")) and auto
-    if finished_before:  # Resumed after it had already stopped: report the saved result again.
+    verdicts: dict[str, str] = {}
+    outcome = es.get("outcome") or {}
+    if outcome.get("reason") == "target_reached" and may_stop:
+        # Resumed after it had stopped with the goal reached: report the saved result again.
         result = analyze(run_dir, labels, n_rep, settings, state.md.temperature_k, rule)
-        stopped_early = done < settings.length_ns - 1e-9
-    while not finished_before:
-        if done < settings.length_ns - 1e-9:
-            target = min(done + settings.chunk_ns, settings.length_ns)
-            for r in range(n_rep):  # The replicas take turns, so they can be compared after each round.
-                start = part_path(run_dir, r, last, ".state.xml")
-                run_replica(files, run_dir, r, start, residues, settings, state.md,
-                            seed=state.base_seed + 50000 + r, log=log, until_ns=target)
-            done = target
-        before, result = result, analyze(run_dir, labels, n_rep, settings, state.md.temperature_k, rule)
-        if result is None:
-            break
-        save_populations(run_dir, result)
-        ok, still = converged(result, before, rule)
-        log("\n" + format_table(result) + "\n" + (
-            "Populations no longer change: more sampling would add little." if ok else
-            f"Still changing or replicas disagree: {', '.join(still) or '(too short to judge)'}."))
-        if ok:
-            es["converged"] = True
-            state.save(run_dir)
-            if auto:
-                stopped_early = done < settings.length_ns - 1e-9
+        verdicts = assess(result, None, rule, precision) if result else {}
+    else:
+        while True:
+            if done < settings.length_ns - 1e-9:
+                target = min(done + settings.chunk_ns, settings.length_ns)
+                for r in range(n_rep):  # The replicas take turns, so they can be compared after each round.
+                    start = part_path(run_dir, r, last, ".state.xml")
+                    run_replica(files, run_dir, r, start, residues, settings, state.md,
+                                seed=state.base_seed + 50000 + r, log=log, until_ns=target)
+                done = target
+            before, result = result, analyze(run_dir, labels, n_rep, settings, state.md.temperature_k, rule)
+            if result is None:
                 break
-            _once(run_dir, state, "enhanced_converged",
-                  f"增强采样的结果已经稳定（每条 {done:g} ns）：再跑各状态的比例也不会明显变化。"
-                  f"运行会按你的设置跑满 {settings.length_ns:g} ns；想提前结束可以说“停止 {run_dir.name}”。",
-                  f"The enhanced sampling result is stable ({done:g} ns per replica): more sampling would not "
-                  f"change the populations much. The run goes on to {settings.length_ns:g} ns as you set it; say "
-                  f"\"stop {run_dir.name}\" to end it now.", "info")
-        if done >= settings.length_ns - 1e-9:
-            break
+            verdicts = assess(result, before, rule, precision)
+            save_populations(run_dir, result)
+            log("\n" + format_table(result))
+            reached = all(v == "reached" for v in verdicts.values())
+            stalled = [k for k, v in verdicts.items() if v == "stalled"]
+            if stalled and done >= rule.min_ns - 1e-9:
+                _once(run_dir, state, "enhanced_stalled",
+                      f"增强采样已跑每条 {done:g} ns，但 {', '.join(stalled)} 在一些重复里几乎没有在状态之间来回。"
+                      "偏置势推不动它们，所以它们的比例还不能信，即使各条重复看起来一致（可能都困在同一个状态）。"
+                      "常见原因是这个侧链和别的慢运动耦合在一起。",
+                      f"Enhanced sampling has run {done:g} ns per replica, but {', '.join(stalled)} hardly move between "
+                      "states in some replicas. The bias does not push them, so their populations cannot be trusted "
+                      "yet, even if the replicas look alike (they may all be trapped in the same state). A common "
+                      "cause is coupling to another slow motion.", "suggestion")
+            if reached and may_stop:
+                break
+            if reached:
+                _once(run_dir, state, "enhanced_reached",
+                      f"增强采样已经达到你要的精度（每条 {done:g} ns，误差不超过 {precision:g}）。"
+                      f"运行会按你的设置跑满 {settings.length_ns:g} ns；想提前结束可以说“停止 {run_dir.name}”。",
+                      f"Enhanced sampling has reached the precision you asked for ({done:g} ns per replica, errors at "
+                      f"most {precision:g}). The run goes on to {settings.length_ns:g} ns as you set it; say "
+                      f"\"stop {run_dir.name}\" to end it now.", "info")
+            if done >= settings.length_ns - 1e-9:
+                break
+        outcome = _enhanced_outcome(verdicts, done, settings.length_ns)
+        es["outcome"] = outcome
+        state.save(run_dir)
 
     folder = (run_dir / "enhanced").resolve()
-    if result is not None and es.get("converged"):
-        why = (f"stopped at {done:g} ns per replica because more sampling no longer changed the populations"
-               if stopped_early else f"ran {done:g} ns per replica; the populations are stable")
-        post(run_dir,
-             f"结果已经可以用了：增强采样{'提前停下' if stopped_early else '跑完了'}（每条 {done:g} ns），"
-             f"各条轨迹的结果一致、继续跑也不再变化。重新加权后的各状态比例在 {folder}/populations.json，"
-             "日志末尾也有一张表。",
-             f"Results are ready: enhanced sampling {why}, and the replicas agree. The reweighted state "
-             f"populations are in {folder}/populations.json and in a table at the end of the log.", "done")
-    elif result is not None:
-        _, still = converged(result, before, rule)
-        why = f"ran the full {done:g} ns per replica; still changing: {', '.join(still)}"
-        post(run_dir,
-             f"增强采样跑满了每条 {done:g} ns，但这些侧链的结果还在变化，或各条轨迹不一致：{', '.join(still)}。"
-             f"现有结果在 {folder}/populations.json，误差可能较大。可以加长增强采样，"
-             f"例如说“把 {run_dir.name} 的增强采样加长到 {2 * settings.length_ns:g} ns”。"
-             "如果一直不收敛，这些侧链可能和别的慢运动耦合在一起，只偏置 chi1 推不动。",
-             f"Enhanced sampling ran the full {done:g} ns per replica, but these side chains still change or the "
-             f"replicas disagree: {', '.join(still)}. The current result is in {folder}/populations.json and may "
-             f"have large errors. You can run longer, for example \"run the enhanced sampling of {run_dir.name} to "
-             f"{2 * settings.length_ns:g} ns\". If it never settles, these side chains may be coupled to another "
-             "slow motion that a chi1 bias does not push.", "suggestion")
-    else:
-        why = f"ran {done:g} ns per replica (too short to reweight)"
-    text = f"Enhanced sampling for {', '.join(labels)}: {why}. Output in {folder}."
+    _post_outcome(run_dir, outcome, verdicts, folder, precision)
+    text = (f"Enhanced sampling for {', '.join(labels)}: stop reason {outcome.get('reason', 'none')} at "
+            f"{outcome.get('ns_per_replica', done):g} ns per replica. "
+            + ", ".join(f"{k}: {v}" for k, v in verdicts.items()) + f". Output in {folder}.")
     log(text)
     with open(run_dir / "decisions.log", "a") as f:
         f.write(time.strftime("[%Y-%m-%d %H:%M:%S] ") + text + "\n\n")
     return decisions, labels
+
+
+STOP_REASONS = ("target_reached", "stalled", "budget_exhausted", "failed")
+
+
+def _enhanced_outcome(verdicts: dict[str, str], done: float, length: float) -> dict:
+    """Why enhanced sampling stopped. A stable result alone is never a reason (see reweight.assess)."""
+    if verdicts and all(v == "reached" for v in verdicts.values()):
+        reason = "target_reached"
+    elif any(v == "stalled" for v in verdicts.values()):
+        reason = "stalled"
+    else:
+        reason = "budget_exhausted"
+    return {"phase": "enhanced_sampling", "reason": reason, "ns_per_replica": done, "budget_ns": length,
+            "residues": dict(verdicts), "time": time.strftime("%Y-%m-%d %H:%M:%S")}
+
+
+def _post_outcome(run_dir: Path, outcome: dict, verdicts: dict[str, str], folder: Path, precision: float) -> None:
+    reason, ns = outcome.get("reason"), outcome.get("ns_per_replica", 0)
+    open_ = {k: v for k, v in verdicts.items() if v != "reached"}
+    names = ", ".join(f"{k}（{v}）" for k, v in open_.items())
+    names_en = ", ".join(f"{k} ({v})" for k, v in open_.items())
+    where_zh = f"结果（各状态比例、误差、每条重复的翻转次数和判断）在 {folder}/populations.json，日志末尾也有表。"
+    where_en = (f"The results (populations, errors, transitions per replica and verdicts) are in "
+                f"{folder}/populations.json and in a table at the end of the log.")
+    if reason == "target_reached":
+        post(run_dir, f"结果已经可以用了：停下的原因是达到目标。每条跑了 {ns:g} ns，所有侧链的比例误差都不超过 "
+                      f"{precision:g}，各条重复一致，并且都在状态之间来回了足够多次。" + where_zh,
+             f"Results are ready. Stop reason: goal reached. After {ns:g} ns per replica every population has an "
+             f"error of at most {precision:g}, the replicas agree, and each crossed between states often enough. "
+             + where_en, "done")
+    elif reason == "stalled":
+        post(run_dir, f"增强采样停下了，原因是采样停滞（每条 {ns:g} ns）：{names}。stalled 表示偏置势推不动这个侧链，"
+                      "它的比例不能信；not_yet 表示还不够精确；unreliable 表示结果只靠少数几帧。" + where_zh +
+                      "可以加长增强采样，或者对停滞的侧链换一种方法（例如同时偏置和它耦合的运动）。",
+             f"Enhanced sampling stopped. Stop reason: sampling stalled ({ns:g} ns per replica): {names_en}. stalled: "
+             "the bias does not push this side chain, so its populations cannot be trusted; not_yet: not precise "
+             "enough yet; unreliable: the result rests on a few frames. " + where_en + " You can run longer, or "
+             "use another method for the stalled side chains (for example also bias the motion they are coupled to).",
+             "suggestion")
+    elif reason == "budget_exhausted":
+        post(run_dir, f"增强采样停下了，原因是预算用完（每条 {ns:g} ns），还没达到目标：{names}。" + where_zh +
+                      f"要达到误差 {precision:g}，可以加长，例如说“把 {run_dir.name} 的增强采样加长到 {2 * ns:g} ns”。",
+             f"Enhanced sampling stopped. Stop reason: budget used up ({ns:g} ns per replica) before the goal: "
+             f"{names_en}. " + where_en + f" To reach an error of {precision:g}, run longer, for example \"run the "
+             f"enhanced sampling of {run_dir.name} to {2 * ns:g} ns\".", "suggestion")
+
+
+def record_failure(run_dir: Path, error: BaseException) -> None:
+    """Stop reason "failed": keep it in run.json and tell the chat."""
+    try:
+        state = RunState.load(run_dir)
+        state.notes["outcome"] = {"phase": "any", "reason": "failed", "error": f"{type(error).__name__}: {error}",
+                                  "time": time.strftime("%Y-%m-%d %H:%M:%S")}
+        state.save(run_dir)
+    except (OSError, ValueError, TypeError, KeyError):
+        pass
+    post(run_dir, f"运行出错停下了，停下的原因是运行失败：{type(error).__name__}: {error}。日志里有完整的报错。"
+                  f"修好问题后可以说“继续 {run_dir.name}”，它会从最后保存的位置接着跑。",
+         f"The run stopped with an error. Stop reason: failed: {type(error).__name__}: {error}. The log has the "
+         f"full error. After fixing the cause, say \"continue {run_dir.name}\"; it resumes from the last saved "
+         "point.", "suggestion")

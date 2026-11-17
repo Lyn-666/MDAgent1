@@ -66,6 +66,14 @@ class RunPlan(BaseModel):
         None, description="auto (default): MDAgent chooses the methods, when to switch and when to stop. guided: "
                           "the user named the method (for example 'only plain MD', 'use adaptive sampling'); MDAgent "
                           "runs only that and suggests changes in the chat.")
+    goal: Optional[str] = Field(None, description="What the user wants to know, in the user's own words.")
+    precision: Optional[float] = Field(
+        None, description="Largest allowed standard error of a chi1 state population (0 to 1), only if the user "
+                          "states a precision (for example 'within 5%' -> 0.05). Default 0.05.")
+    allow: Optional[str] = Field(
+        None, description="Only if the user says what MDAgent may do by itself: comma separated from extend, "
+                          "add_replicas, switch_method, stop_early, or 'none'. Default: all in auto mode, none in "
+                          "guided mode.")
     equil_ps: Optional[float] = Field(None, description="Total equilibration before production, in ps. "
                                                         "Default 600.")
     enhanced_max_residues: Optional[int] = Field(
@@ -139,6 +147,7 @@ FLAGS = [  # RunPlan field -> command line option
     ("no_flip_patience_ns", "--no-flip-patience-ns"), ("sampling", "--sampling"),
     ("enhanced_ns", "--enhanced-ns"), ("enhanced_replicas", "--enhanced-replicas"),
     ("enhanced_max_residues", "--enhanced-max-residues"), ("equil_ps", "--equil-ps"), ("mode", "--mode"),
+    ("goal", "--goal"), ("precision", "--precision"), ("allow", "--allow"),
     ("chains", "--chains"), ("uniprot", "--uniprot"), ("termini", "--termini"),
 ]
 SWITCHES = [("check_protonation", "--check-protonation"), ("no_enhanced_sampling", "--no-enhanced-sampling"),

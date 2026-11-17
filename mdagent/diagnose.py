@@ -15,7 +15,11 @@ Verdicts for each residue:
   The result depends on which replica you look at, so it is not converged.
 - "rare_flips": chi1 changed state, but too few times to estimate the
   population of each state.
-- "ok": chi1 changed state often enough in every replica.
+- "imprecise": chi1 flipped often enough, but the error of a state population
+  (block averaging and spread between replicas, see uncertainty.py) is larger
+  than the precision the user asked for.
+- "ok": chi1 changed state often enough in every replica, and the populations
+  are as precise as the user asked for.
 - "fixed_chi1": chi1 cannot change rotamer state, so it is not judged and
   gets no enhanced sampling. This is proline (the ring holds chi1) and
   cysteine in a disulfide bond (the S-S bond holds chi1).
@@ -38,10 +42,11 @@ import mdtraj as md
 import numpy as np
 
 from .target import ResidueKey
+from .uncertainty import block_standard_error, combine_replicas
 
 STATE_CENTERS_DEG = {"g+": 60.0, "t": 180.0, "g-": -60.0}
 STATE_NAMES = list(STATE_CENTERS_DEG)
-NEEDS_WORK = ("replicas_disagree", "no_flip", "rare_flips")
+NEEDS_WORK = ("replicas_disagree", "no_flip", "rare_flips", "imprecise")
 
 
 DISULFIDE_MAX_NM = 0.25  # SG-SG distance; a disulfide bond is about 0.205 nm.
@@ -121,6 +126,8 @@ class ResidueReport:
     total_ns_override: float | None = None  # Adaptive mode: segments have different lengths.
     verdict: str = ""
     reason: str = ""
+    populations: dict | None = None   # Mean over replicas.
+    standard_error: dict | None = None  # Of each population, allowing for time correlation.
 
     @property
     def label(self) -> str:
@@ -156,7 +163,7 @@ class ResidueReport:
         return f"{prefix}{t:.1f} ns" if t >= 0.1 else f"{prefix}{t * 1000:.0f} ps"
 
 
-def judge(report: ResidueReport, min_flips_per_replica: int = 4) -> None:
+def judge(report: ResidueReport, min_flips_per_replica: int = 4, precision: float | None = None) -> None:
     total = sum(report.transitions)
     n = len(report.transitions)
     if len(set(report.dominant)) > 1:
@@ -173,6 +180,10 @@ def judge(report: ResidueReport, min_flips_per_replica: int = 4) -> None:
         report.verdict = "rare_flips"
         report.reason = (f"chi1 flips per replica: {report.transitions}. "
                          f"Fewer than {min_flips_per_replica} in at least one replica.")
+    elif precision is not None and report.standard_error and max(report.standard_error.values()) > precision:
+        report.verdict = "imprecise"
+        report.reason = (f"chi1 flips per replica: {report.transitions}, but the largest population error is "
+                         f"{max(report.standard_error.values()):.3f}, more than the requested {precision:g}.")
     else:
         report.verdict = "ok"
         report.reason = f"chi1 flips per replica: {report.transitions}."
@@ -217,6 +228,7 @@ def diagnose_trajectories(
     pooled_total_ns: float | None = None,
     n_replicas: int | None = None,
     fixed: dict[ResidueKey, str] | None = None,
+    precision: float | None = None,
 ) -> list[ResidueReport]:
     """Diagnose the target side chains.
 
@@ -255,7 +267,14 @@ def diagnose_trajectories(
             total_ns_override=pooled_total_ns,
         )
         if pooled_total_ns is None:
-            judge(rep, min_flips_per_replica)
+            pops, errs = {}, {}
+            for i, name in enumerate(STATE_NAMES):
+                hits = [(s_[s_ >= 0] == i).astype(float) for s_ in states]
+                mean, err, _ = combine_replicas([float(h.mean()) if h.size else 0.0 for h in hits],
+                                                [block_standard_error(h) for h in hits])
+                pops[name], errs[name] = round(mean, 3), round(err, 3)
+            rep.populations, rep.standard_error = pops, errs
+            judge(rep, min_flips_per_replica, precision)
         else:
             judge_pooled(rep, min_flips_per_replica * (n_replicas or len(trajs)))
         reports.append(rep)
@@ -337,12 +356,13 @@ def format_report(reports: list[ResidueReport]) -> str:
         "Rank 1 is the slowest side chain.",
         "",
         f"{'rank':<6}{'residue':<10}{'verdict':<20}{'flips per traj.':<20}"
-        f"{'time between flips':<20}dominant state per replica",
+        f"{'time between flips':<20}{'max error':<11}dominant state per replica",
     ]
     for i, r in enumerate(reports, 1):
         rank_text = str(i) if r.verdict in NEEDS_WORK else "-"
         flips = ",".join(map(str, r.transitions)) or "-"
         dom = ",".join(r.dominant) or "-"
+        err = f"{max(r.standard_error.values()):.3f}" if r.standard_error else "-"
         lines.append(f"{rank_text:<6}{r.label:<10}{r.verdict:<20}{flips:<20}"
-                     f"{r.time_between_flips_text():<20}{dom}")
+                     f"{r.time_between_flips_text():<20}{err:<11}{dom}")
     return "\n".join(lines)

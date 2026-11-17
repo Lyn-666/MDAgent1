@@ -4,7 +4,7 @@ import numpy as np
 
 from mdagent.diagnose import STATE_CENTERS_DEG
 from mdagent.enhanced import KB_KJ, MetadSettings, deposit
-from mdagent.reweight import StopRule, analyze, converged, replay
+from mdagent.reweight import StopRule, analyze, assess, replay
 
 KT = KB_KJ * 300.0
 WEIGHTS = {"g+": 0.2, "t": 0.7, "g-": 0.1}   # The true populations of the toy side chain.
@@ -65,16 +65,86 @@ def test_replay_rebuilds_the_saved_bias():
     assert math.isclose(v[-1], sum(np.interp(chi[-1, i], grid, last[i]) for i in range(2)), rel_tol=1e-12)
 
 
-def _result(ns, pops, spread):
-    return {"ns_per_replica": ns, "residues": [{"residue": "VAL1", "populations": pops, "replica_spread": spread}]}
+def test_reweighting_recovers_the_true_populations_with_honest_errors(tmp_path):
+    s = MetadSettings(pace_ps=1.0)
+    (tmp_path / "enhanced").mkdir()
+    for r in range(2):
+        np.save(tmp_path / "enhanced" / f"replica_{r}_chi.npy", toy_metadynamics(6000, s, seed=10 + r))
+    res = analyze(tmp_path, ["VAL1"], 2, s, 300.0)["residues"][0]
+    for k, true in WEIGHTS.items():
+        assert abs(res["populations"][k] - true) <= max(4 * res["standard_error"][k], 0.03), (k, res)
+        assert 0 < res["standard_error"][k] < 0.1
+    assert min(res["transitions_per_replica"]) > 50 and not res["replicas_disagree"]
 
 
-def test_stop_only_when_replicas_agree_and_nothing_changes():
-    rule = StopRule(tol=0.1, min_ns=2.0)
-    a = {"g+": 0.2, "t": 0.7, "g-": 0.1}
-    b = {"g+": 0.22, "t": 0.69, "g-": 0.09}
-    assert converged(_result(3, b, 0.05), _result(2, a, 0.05), rule)[0]
-    assert not converged(_result(3, b, 0.05), None, rule)[0]                          # Needs a previous check.
-    assert not converged(_result(3, b, 0.30), _result(2, a, 0.05), rule)[0]           # Replicas disagree.
-    assert not converged(_result(3, {"g+": 0.4, "t": 0.5, "g-": 0.1}, 0.05), _result(2, a, 0.05), rule)[0]
-    assert not converged(_result(1, b, 0.05), _result(0.5, a, 0.05), rule)[0]         # Shorter than min_ns.
+# Two coupled side chains: the state of one changes the populations of the other.
+JOINT = np.array([[0.02, 0.15, 0.03],   # rows: chi1 of residue 1 in g+, t, g-
+                  [0.25, 0.05, 0.30],   # columns: chi1 of residue 2 in g+, t, g-
+                  [0.05, 0.10, 0.05]])
+CENTERS = [math.radians(STATE_CENTERS_DEG[k]) for k in ("g+", "t", "g-")]
+
+
+def coupled_energy(x, y):
+    p = sum(JOINT[a, b] * math.exp((math.cos(x - CENTERS[a]) + math.cos(y - CENTERS[b])) / 0.05)
+            for a in range(3) for b in range(3))
+    return -KT * math.log(p)
+
+
+def coupled_metadynamics(n_samples, s, seed):
+    """Two angles, each with its own 1D bias (as in MDAgent), sampled by Monte Carlo."""
+    rng = np.random.default_rng(seed)
+    grid = np.linspace(-math.pi, math.pi, s.grid_points)
+    bias = np.zeros((2, s.grid_points))
+    xy, out = [math.pi, math.pi], []
+
+    def total(a, b):
+        return coupled_energy(a, b) + float(np.interp(a, grid, bias[0])) + float(np.interp(b, grid, bias[1]))
+
+    e = total(*xy)
+    for _ in range(n_samples):
+        for _ in range(20):
+            i = int(rng.integers(2))
+            trial = list(xy)
+            trial[i] = (trial[i] + rng.normal(0, 0.3) + math.pi) % (2 * math.pi) - math.pi
+            et = total(*trial)
+            if et <= e or rng.random() < math.exp(-(et - e) / KT):
+                xy, e = trial, et
+        out.append(list(xy))
+        deposit(bias, grid, np.array(xy), s, KT)
+        e = total(*xy)
+    return np.array(out)
+
+
+def test_reweighting_of_coupled_side_chains(tmp_path):
+    s = MetadSettings(pace_ps=1.0)
+    (tmp_path / "enhanced").mkdir()
+    for r in range(2):
+        np.save(tmp_path / "enhanced" / f"replica_{r}_chi.npy", coupled_metadynamics(5000, s, seed=20 + r))
+    result = analyze(tmp_path, ["VAL1", "LEU2"], 2, s, 300.0)
+    true = [JOINT.sum(axis=1), JOINT.sum(axis=0)]   # Exact populations of each residue alone.
+    for res, exact in zip(result["residues"], true):
+        for k, value in zip(("g+", "t", "g-"), exact):
+            assert abs(res["populations"][k] - value) <= max(4 * res["standard_error"][k], 0.04), (res, exact)
+    assert not result["weights_degenerate"]
+
+
+def _result(ns, errs, transitions=(40, 40), disagree=False, degenerate=False):
+    pops = {"g+": 0.2, "t": 0.7, "g-": 0.1}
+    return {"ns_per_replica": ns, "weights_degenerate": degenerate, "residues": [{
+        "residue": "VAL1", "populations": pops, "standard_error": {k: errs for k in pops},
+        "max_standard_error": errs, "transitions_per_replica": list(transitions), "replicas_disagree": disagree}]}
+
+
+def test_verdicts_separate_reached_stalled_unreliable_and_not_yet():
+    rule = StopRule(min_ns=2.0)
+    assert assess(_result(3, 0.02), None, rule, 0.05) == {"VAL1": "reached"}
+    # All replicas trapped in one state: tiny errors, full agreement, but no transitions. Not reached.
+    assert assess(_result(3, 0.0, transitions=(0, 0)), None, rule, 0.05) == {"VAL1": "stalled"}
+    assert assess(_result(3, 0.02, transitions=(40, 3)), None, rule, 0.05) == {"VAL1": "stalled"}
+    assert assess(_result(3, 0.02, degenerate=True), None, rule, 0.05) == {"VAL1": "unreliable"}
+    assert assess(_result(3, 0.08), None, rule, 0.05) == {"VAL1": "not_yet"}                 # Too uncertain.
+    assert assess(_result(3, 0.02, disagree=True), None, rule, 0.05) == {"VAL1": "not_yet"}
+    assert assess(_result(1, 0.02), None, rule, 0.05) == {"VAL1": "not_yet"}                 # Too short.
+    # Stability is only reported, never a reason by itself.
+    now, before = _result(3, 0.08), _result(2, 0.08)
+    assert assess(now, before, rule, 0.05) == {"VAL1": "not_yet"} and now["residues"][0]["change_since_last"] == 0

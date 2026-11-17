@@ -18,9 +18,12 @@ there.
 Each state gets a population (g+, t, g-; the same state cores as the plain MD
 diagnosis) and a free energy relative to the most populated state.
 
-When to stop: more sampling no longer changes the result when, for every
-residue, the replicas agree on every population within `tol`, and the
-combined estimate changed by less than tol / 2 since the previous check.
+Errors come from block averaging inside each replica and from the spread
+between replicas (uncertainty.py). Each residue then gets a verdict (assess):
+the goal is reached only when the error is at most the user's precision, the
+replicas agree, every replica crossed between states often enough, and the
+weights are not degenerate. Populations that stop changing are only a diagnosis:
+all replicas can be trapped in the same state and still agree.
 """
 
 from __future__ import annotations
@@ -32,17 +35,19 @@ from pathlib import Path
 
 import numpy as np
 
-from .diagnose import STATE_NAMES, assign_states
+from .diagnose import STATE_NAMES, assign_states, count_transitions
 from .enhanced import KB_KJ, MetadSettings, deposit
+from .uncertainty import block_standard_error, combine_replicas, effective_samples
 
 KJ_PER_KCAL = 4.184
 
 
 @dataclass
 class StopRule:
-    tol: float = 0.10            # Largest allowed difference in a population (0 to 1).
-    min_ns: float = 5.0          # Never stop before this length per replica.
-    skip_fraction: float = 0.1   # Leave out this first part of each replica.
+    min_ns: float = 5.0             # Never judge a residue "reached" before this length per replica.
+    skip_fraction: float = 0.1      # Leave out this first part of each replica.
+    min_transitions: int = 10       # Each replica must cross between states at least this often.
+    min_effective_samples: float = 50.0  # Fewer effective samples: the weights are degenerate.
 
 
 def _logsumexp(a: np.ndarray, axis: int = -1) -> np.ndarray:
@@ -67,24 +72,32 @@ def replay(chi: np.ndarray, s: MetadSettings, kt: float) -> tuple[np.ndarray, np
     return v, c
 
 
-def weighted_populations(chi_rad: np.ndarray, weights: np.ndarray) -> dict[str, float]:
-    states = assign_states(np.degrees(chi_rad))
-    ok = states >= 0
-    total = float(np.sum(weights[ok]))
-    if total <= 0:
-        return {name: float("nan") for name in STATE_NAMES}
-    return {name: float(np.sum(weights[ok & (states == k)]) / total) for k, name in enumerate(STATE_NAMES)}
-
-
 def free_energies_kcal(pops: dict[str, float], kt: float) -> dict[str, float | None]:
     """Free energy of each state relative to the most populated one (kcal/mol). None if never seen."""
     top = max(pops.values())
     return {k: (round(-kt * math.log(p / top) / KJ_PER_KCAL, 2) + 0.0 if p > 0 else None) for k, p in pops.items()}
 
 
+def _replica(chi_rad: np.ndarray, weights: np.ndarray) -> dict:
+    """Populations, their errors and the number of transitions for one residue in one replica."""
+    states = assign_states(np.degrees(chi_rad))
+    ok = states >= 0
+    w = np.where(ok, weights, 0.0)
+    total = float(w.sum())
+    pops, errs = {}, {}
+    for k, name in enumerate(STATE_NAMES):
+        hit = (states == k).astype(float)
+        pops[name] = float(np.sum(w * hit) / total) if total > 0 else float("nan")
+        errs[name] = block_standard_error(hit[ok], weights[ok])
+    return {"populations": pops, "errors": errs, "transitions": count_transitions(states)}
+
+
 def analyze(run_dir: Path, labels: list[str], n_replicas: int, s: MetadSettings, temperature_k: float,
             rule: StopRule = StopRule()) -> dict | None:
-    """Reweighted populations of each biased residue, per replica and combined. None if no data yet."""
+    """Reweighted populations of each biased residue, with errors, per replica and combined.
+
+    None if there is no data yet.
+    """
     kt = KB_KJ * temperature_k
     per_rep, n_eff, ns = [], [], []
     for r in range(n_replicas):
@@ -98,49 +111,82 @@ def analyze(run_dir: Path, labels: list[str], n_replicas: int, s: MetadSettings,
         start = int(len(chi) * rule.skip_fraction)
         logw = (v[start:] - c[start:]) / kt
         w = np.exp(logw - logw.max())
-        n_eff.append(round(float(w.sum() ** 2 / np.sum(w * w)), 1))  # Effective number of samples.
+        n_eff.append(round(effective_samples(w), 1))
         ns.append(len(chi) * s.pace_ps / 1000.0)
-        per_rep.append([weighted_populations(chi[start:, i], w) for i in range(len(labels))])
+        per_rep.append([_replica(chi[start:, i], w) for i in range(len(labels))])
     if not per_rep:
         return None
     residues = []
     for i, label in enumerate(labels):
         reps = [p[i] for p in per_rep]
-        pooled = {k: float(np.nanmean([p[k] for p in reps])) for k in STATE_NAMES}
-        spread = max(max(p[k] for p in reps) - min(p[k] for p in reps) for k in STATE_NAMES) if len(reps) > 1 \
-            else float("nan")
-        residues.append({"residue": label, "populations": {k: round(v, 3) for k, v in pooled.items()},
-                         "free_energy_kcal": free_energies_kcal(pooled, kt),
-                         "per_replica": [{k: round(v, 3) for k, v in p.items()} for p in reps],
-                         "replica_spread": round(spread, 3)})
+        pops, errs, disagree = {}, {}, False
+        for k in STATE_NAMES:
+            mean, err, dis = combine_replicas([r["populations"][k] for r in reps], [r["errors"][k] for r in reps])
+            pops[k], errs[k], disagree = mean, err, disagree or dis
+        fe = free_energies_kcal(pops, kt)
+        top = max(pops, key=pops.get)
+        fe_err = {k: (round(kt / KJ_PER_KCAL * math.sqrt((errs[k] / pops[k]) ** 2 + (errs[top] / pops[top]) ** 2), 2)
+                      if pops[k] > 0 and k != top else (0.0 if k == top else None)) for k in STATE_NAMES}
+        residues.append({
+            "residue": label,
+            "populations": {k: round(v, 3) for k, v in pops.items()},
+            "standard_error": {k: round(v, 3) for k, v in errs.items()},
+            "max_standard_error": round(max(errs.values()), 3),
+            "free_energy_kcal": fe, "free_energy_error_kcal": fe_err,
+            "per_replica": [{k: round(v, 3) for k, v in r["populations"].items()} for r in reps],
+            "transitions_per_replica": [r["transitions"] for r in reps],
+            "replicas_disagree": disagree,
+        })
     return {"ns_per_replica": round(min(ns), 6), "n_replicas": len(per_rep), "effective_samples": n_eff,
+            "weights_degenerate": min(n_eff) < rule.min_effective_samples,
             "method": "Tiwary-Parrinello time-dependent reweighting; first "
-                      f"{rule.skip_fraction:.0%} of each replica left out", "residues": residues}
+                      f"{rule.skip_fraction:.0%} of each replica left out; errors from block averaging",
+            "residues": residues}
 
 
-def converged(now: dict, before: dict | None, rule: StopRule) -> tuple[bool, list[str]]:
-    """True when more sampling no longer changes the result. Also returns the residues that still change."""
-    open_ = []
-    prev = {r["residue"]: r["populations"] for r in (before or {}).get("residues", [])}
-    for r in now["residues"]:
-        spread = r["replica_spread"]
-        disagree = not math.isnan(spread) and spread > rule.tol
+def assess(result: dict, previous: dict | None, rule: StopRule, precision: float) -> dict[str, str]:
+    """A verdict for each residue:
+
+    reached     the goal is met: error at most `precision`, replicas agree, every replica crossed
+                between states at least `min_transitions` times, weights not degenerate, long enough
+    stalled     some replica hardly crosses between states: the bias does not push this side chain
+                (a small error then means nothing: all replicas may be trapped in the same state)
+    unreliable  the weights are degenerate, so the populations rest on a few frames
+    not_yet     still too uncertain, or the replicas disagree
+
+    The change since the previous check is only a diagnosis (see change_since_last), never a reason to stop.
+    """
+    prev = {r["residue"]: r["populations"] for r in (previous or {}).get("residues", [])}
+    out = {}
+    for r in result["residues"]:
         old = prev.get(r["residue"])
-        moving = old is None or max(abs(r["populations"][k] - old[k]) for k in STATE_NAMES) > rule.tol / 2
-        if disagree or moving:
-            open_.append(r["residue"])
-    return (not open_ and now["ns_per_replica"] >= rule.min_ns - 1e-9), open_
+        r["change_since_last"] = (round(max(abs(r["populations"][k] - old[k]) for k in STATE_NAMES), 3)
+                                  if old else None)
+        if min(r["transitions_per_replica"]) < rule.min_transitions:
+            out[r["residue"]] = "stalled"
+        elif result["weights_degenerate"]:
+            out[r["residue"]] = "unreliable"
+        elif (r["max_standard_error"] <= precision and not r["replicas_disagree"]
+              and result["ns_per_replica"] >= rule.min_ns - 1e-9):
+            out[r["residue"]] = "reached"
+        else:
+            out[r["residue"]] = "not_yet"
+        r["verdict"] = out[r["residue"]]
+    return out
 
 
 def format_table(result: dict) -> str:
     lines = [f"Reweighted chi1 populations after {result['ns_per_replica']:g} ns per replica "
              f"({result['n_replicas']} replicas; {result['method']}).",
-             f"{'residue':<10}{'g+':>7}{'t':>7}{'g-':>7}   {'free energy (kcal/mol) g+ / t / g-':<36}replica spread"]
+             f"Effective samples per replica: {result['effective_samples']}"
+             + (" (too few: the weights are degenerate)" if result["weights_degenerate"] else "") + ".",
+             f"{'residue':<10}{'g+':>12}{'t':>12}{'g-':>12}   {'transitions':<14}{'verdict':<12}"]
     for r in result["residues"]:
-        p, g = r["populations"], r["free_energy_kcal"]
-        fe = " / ".join("-" if g[k] is None else f"{g[k]:.2f}" for k in STATE_NAMES)
-        spread = "-" if math.isnan(r["replica_spread"]) else f"{r['replica_spread']:.2f}"
-        lines.append(f"{r['residue']:<10}{p['g+']:>7.2f}{p['t']:>7.2f}{p['g-']:>7.2f}   {fe:<36}{spread}")
+        p, e = r["populations"], r["standard_error"]
+        cells = "".join(f"{p[k]:>6.2f}±{e[k]:<5.2f}" for k in STATE_NAMES)
+        trans = ",".join(map(str, r["transitions_per_replica"]))
+        flag = " replicas disagree" if r["replicas_disagree"] else ""
+        lines.append(f"{r['residue']:<10}{cells}   {trans:<14}{r.get('verdict', ''):<12}{flag}")
     return "\n".join(lines)
 
 

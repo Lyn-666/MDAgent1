@@ -147,11 +147,11 @@ def _no_flip_report():
 
 def test_guided_mode_keeps_plain_md_and_marks_the_residue_stalled():
     loop = LoopSettings(max_ns=20.0, no_flip_patience_ns=10.0)
-    auto, next_auto = decide([_no_flip_report()], 11.0, loop, "auto")
-    guided, next_guided = decide([_no_flip_report()], 11.0, loop, "guided")
+    auto, next_auto = decide([_no_flip_report()], 11.0, loop, may_switch=True)
+    guided, next_guided = decide([_no_flip_report()], 11.0, loop, may_switch=False)
     assert auto[0].action == "enhanced_sampling" and next_auto == 0          # Auto switches.
     assert guided[0].action == "extend" and guided[0].stalled and next_guided > 0   # Guided goes on.
-    at_budget, _ = decide([_no_flip_report()], 20.0, loop, "guided")
+    at_budget, _ = decide([_no_flip_report()], 20.0, loop, may_switch=False)
     assert at_budget[0].action == "enhanced_sampling" and not at_budget[0].stalled
 
 
@@ -178,3 +178,29 @@ def test_guided_mode_posts_one_suggestion_and_does_not_switch(tmp_path):
         assert any("does not start by itself" in line for line in logs)
     finally:
         agent.run_loop = agent_run_loop
+
+
+def test_goal_and_permissions_from_the_command_line():
+    from mdagent.agent import RunState
+    from mdagent.cli import _goal_from_args, build_parser
+    from mdagent.simulate import MDSettings
+
+    base = ["run", "--pdb", "x.pdb", "--out", "runs/x", "--around-ligand", "BNZ"]
+    goal = _goal_from_args(build_parser().parse_args(base))
+    assert goal.permissions == ["extend", "add_replicas", "switch_method", "stop_early"] and goal.precision == 0.05
+    goal = _goal_from_args(build_parser().parse_args(base + ["--mode", "guided", "--goal", "Val111 rotamers"]))
+    assert goal.permissions == [] and goal.description == "Val111 rotamers"
+    goal = _goal_from_args(build_parser().parse_args(base + ["--allow", "stop_early", "--precision", "0.02"]))
+    assert goal.permissions == ["stop_early"] and goal.precision == 0.02
+    with pytest.raises(ValueError):
+        _goal_from_args(build_parser().parse_args(base + ["--allow", "fly"]))
+
+    from dataclasses import asdict
+    state = RunState(pdb="x", target_description="t", target=[], n_replicas=1, base_seed=1, md=MDSettings(),
+                     loop=LoopSettings(), goal=asdict(goal))
+    assert state.allowed("stop_early") and not state.allowed("switch_method")
+    state.enhanced["requested"] = True            # resume --enhanced-sampling: the user asked to switch.
+    assert state.allowed("switch_method")
+    old = RunState(pdb="x", target_description="t", target=[], n_replicas=1, base_seed=1, md=MDSettings(),
+                   loop=LoopSettings(), mode="guided")  # A run made before goals existed.
+    assert old.the_goal().permissions == []

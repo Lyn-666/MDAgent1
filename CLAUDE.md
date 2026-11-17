@@ -20,7 +20,7 @@
 
 **用户后来说明的目的（2026-11-17）：** 用户描述任务后，agent 按文献建议方法和设置（普通 MD、自适应采样、增强采样；alchemical 只推荐外部工具），但跑什么由用户决定。默认 agent 自己判断（`--mode auto`）：边跑边分析，自己决定何时换方法、何时停、何时交付。用户指定方法时（`--mode guided`）照做，没有进展就在对话里发消息建议换方法，不暂停、不自己换。核心：再加重复或加长对结果没有增益时，agent 停下。
 
-**用户的开发计划（2026-11-17）：** 1 保存任务目标和权限（目标量、精度、预算；能否延长、加重复、换方法、提前停）；2 区分停止原因（达到目标、采样停滞、预算用完、运行失败；比例不再变化只是诊断，不是停止理由）；3 让分析可信（考虑时间相关性的不确定度、检查权重退化、验证多个耦合 chi1 的重新加权）；4 每轮后选择下一步动作（延长、加重复、重新播种、建议换方法、停止），执行前查权限；5 针对性验证（正常达标、所有重复同时困住、预算用完未达标）；6 完善交付，再扩展方法。**当前先做 1–3。**
+**用户的开发计划（2026-11-17）：** 1 保存任务目标和权限（目标量、精度、预算；能否延长、加重复、换方法、提前停）；2 区分停止原因（达到目标、采样停滞、预算用完、运行失败；比例不再变化只是诊断，不是停止理由）；3 让分析可信（考虑时间相关性的不确定度、检查权重退化、验证多个耦合 chi1 的重新加权）；4 每轮后选择下一步动作（延长、加重复、重新播种、建议换方法、停止），执行前查权限；5 针对性验证（正常达标、所有重复同时困住、预算用完未达标）；6 完善交付，再扩展方法。**1–3 已完成（2026-11-17）；下一步是 4–6。** 5 里"三个场景"的逻辑测试已有（`tests/test_stop_reasons.py`），还缺用真实模拟检查停下时的误差。
 
 ## 用户定下的规则和决定
 
@@ -50,7 +50,9 @@
 - `simulate.py`：分段跑 MD，可续跑；`equilibrate` 是分阶段平衡。
 - `diagnose.py`：侧链 chi1 诊断和排序。脯氨酸和形成二硫键的半胱氨酸（按 SG-SG 距离判断）判为 `fixed_chi1`，跳过。`agent.py`：多轮循环，决定续跑或停止；`run_all` 在普通 MD 后自动做增强采样。
 - `enhanced.py`：chi1 上的 well-tempered metadynamics，在 OpenMM 里实现。一次最多偏置 `max_residues`（默认 10，`--enhanced-max-residues`）个最慢的侧链。各重复轮流跑，每轮 1 ns。
-- `reweight.py`：重放高斯峰重建偏置势，Tiwary–Parrinello 重新加权，算状态比例；`populations.json`。用已知比例的模型测试过。
+- `reweight.py`：重放高斯峰重建偏置势，Tiwary–Parrinello 重新加权，算状态比例和误差；`assess` 给每个侧链判断 reached / stalled / unreliable / not_yet；`populations.json`。用已知比例的模型和两个耦合侧链的模型测试过。
+- `uncertainty.py`：分块平均的误差（考虑时间相关）、合并重复、有效样本数。普通 MD 和增强采样都用。
+- 目标和权限在 `agent.Goal`（`run.json` 的 `goal`）；停下的原因 target_reached / stalled / budget_exhausted / failed 记在 `run.json`（`notes.plain_md_outcome`、`enhanced.outcome`、失败时 `notes.outcome`）。
 - `messages.py`：运行发给对话的消息。
 - `adaptive.py`：可选的 AdaptivePy 自适应采样（`--sampling adaptive`）。
 - `envcheck.py`：启动时检查平台和力场文件。
