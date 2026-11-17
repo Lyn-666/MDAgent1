@@ -36,4 +36,4 @@ argument-hint: "[要求，例如：用 Amber，看苯周围的口袋，先检查
 
 7. **告诉用户：** 运行已在后台开始，关掉 Claude Code 也不会停；日志在 `runs/<名字>.log`；以后用 `/md-status` 查看进度。
 
-不要分析模拟结果（不算状态比例、不判断收敛）。这是项目的规则，见 CLAUDE.md。
+不要自己计算模拟结果。结果由程序算好：增强采样的状态比例在 `runs/<名字>/enhanced/populations.json`，运行发来的消息在 `runs/<名字>/messages.jsonl`。只转述这些文件里的内容。

@@ -13,7 +13,7 @@ Each replica starts from the final state of a plain MD replica. It runs in
 chunks. After each chunk it saves the protein trajectory of that chunk, the
 state, the bias and the chi1 samples, so a stopped run can resume.
 
-This module only runs the simulation and saves the data. It does not analyze it.
+This module runs the simulation and saves the data. reweight.py analyzes it.
 """
 
 from __future__ import annotations
@@ -77,6 +77,21 @@ def chi1_quads(topology: openmm.app.Topology, residues: list[ResidueKey]) -> dic
     return out
 
 
+def deposit(bias: np.ndarray, grid: np.ndarray, x: np.ndarray, s: MetadSettings, kt: float) -> None:
+    """Add one well-tempered Gaussian per residue at the chi1 values x (radians), in place.
+
+    The height shrinks where the bias is already large: h * exp(-V(x) / (kT (gamma - 1))).
+    The analysis (reweight.py) replays exactly these steps to rebuild the bias at any time.
+    """
+    gamma = s.bias_factor
+    sigma = math.radians(s.sigma_deg)
+    for i, xi in enumerate(x):
+        height = s.height_kj * math.exp(-float(np.interp(xi, grid, bias[i])) / (kt * (gamma - 1)))
+        d = (grid - xi + math.pi) % (2 * math.pi) - math.pi
+        bias[i] += height * np.exp(-d * d / (2 * sigma ** 2))
+    bias[:, -1] = bias[:, 0]  # Both ends are the same angle.
+
+
 class ChiBiases:
     """One periodic well-tempered bias on chi1 for each residue, in one force."""
 
@@ -107,17 +122,18 @@ class ChiBiases:
         return float(np.interp(x, self.grid, self.bias[i]))
 
     def deposit(self, x: np.ndarray) -> None:
-        gamma = self.s.bias_factor
-        for i, xi in enumerate(x):
-            height = self.s.height_kj * math.exp(-self.bias_at(i, xi) / (self.kt * (gamma - 1)))
-            d = (self.grid - xi + math.pi) % (2 * math.pi) - math.pi
-            self.bias[i] += height * np.exp(-d * d / (2 * self.sigma ** 2))
-        self.bias[:, -1] = self.bias[:, 0]  # Both ends are the same angle.
+        deposit(self.bias, self.grid, x, self.s, self.kt)
 
     def push(self, context) -> None:
         for i, table in enumerate(self.tables):
             table.setFunctionParameters(self.bias[i].tolist(), -math.pi, math.pi)
         self.force.updateParametersInContext(context)
+
+
+def ns_done(run_dir: Path, replica: int) -> float:
+    """Enhanced sampling already done by a replica (ns)."""
+    path = _paths(run_dir, replica)["progress"]
+    return json.loads(path.read_text())["ns_done"] if path.exists() else 0.0
 
 
 def _paths(run_dir: Path, replica: int) -> dict[str, Path]:
@@ -147,14 +163,20 @@ def run_replica(
     md_settings: MDSettings,
     seed: int,
     log: Callable[[str], None] = print,
+    until_ns: float | None = None,
 ) -> None:
+    """Run one replica up to `until_ns` (default: its full length), one chunk at a time."""
     p = _paths(run_dir, replica)
     p["dir"].mkdir(exist_ok=True)
     quads = chi1_quads(files.topology, residues)
     progress = json.loads(p["progress"].read_text()) if p["progress"].exists() else {"ns_done": 0.0}
-    if progress["ns_done"] >= s.length_ns - 1e-9:
-        log(f"enhanced replica {replica}: already complete ({progress['ns_done']:g} ns).")
+    end = min(s.length_ns, until_ns if until_ns is not None else s.length_ns)
+    if progress["ns_done"] >= end - 1e-9:
+        if progress["ns_done"] >= s.length_ns - 1e-9:
+            log(f"enhanced replica {replica}: already complete ({progress['ns_done']:g} ns).")
         return
+    # Each start gets its own random seed, so the thermostat noise does not repeat.
+    seed += 7919 * round(progress["ns_done"] * 1000)
 
     resuming = progress["ns_done"] > 0
     bias = np.load(p["bias"]) if resuming else None
@@ -169,8 +191,8 @@ def run_replica(
     t0 = time.time()
     ns_start = progress["ns_done"]
     frame_interval = round(s.save_interval_ps * steps_per_ps)
-    while progress["ns_done"] < s.length_ns - 1e-9:
-        chunk_ns = min(s.chunk_ns, s.length_ns - progress["ns_done"])
+    while progress["ns_done"] < end - 1e-9:
+        chunk_ns = min(s.chunk_ns, end - progress["ns_done"])
         n_pace = round(chunk_ns * 1000 / s.pace_ps)
         # One trajectory file per chunk. If a chunk is stopped halfway, running it
         # again overwrites its file.

@@ -20,6 +20,7 @@ OUTPUTS = [
     ("enhanced/replica_*_chunk*.dcd", "enhanced sampling trajectory of replica i, chunk k"),
     ("enhanced/replica_*_chi.npy", "chi1 of each biased residue (radians), one row per pace"),
     ("enhanced/replica_*_bias.npy", "final bias of each biased residue on the chi1 grid (kJ/mol)"),
+    ("enhanced/populations.json", "reweighted chi1 state populations and free energies of the biased residues"),
 ]
 
 

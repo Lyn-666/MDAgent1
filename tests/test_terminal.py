@@ -110,3 +110,29 @@ def test_development_test_can_shorten_equilibration():
 
     plan = RunPlan(target_kind="ligand", ligand="BNZ", questions=[], summary="s", equil_ps=60)
     assert to_argv(plan, "x.pdb", "runs/a")[-2:] == ["--equil-ps", "60"]
+
+
+def test_run_messages_reach_the_conversation_once(project):
+    from mdagent.messages import post
+
+    a = Assistant(root=project, backend="claude", runs=Runs(project),
+                  call=lambda *args: ChatAction(action="answer", reply="ok"))
+    chat = a.message("hello")["chat"]
+    conv = a.store.get(chat)
+    (project / "runs" / "dev").mkdir(parents=True)
+    (project / "runs" / "dev" / "run.json").write_text("{}")
+    conv.runs.append("dev")
+    post(project / "runs" / "dev", "普通 MD 没有进展，建议改用增强采样。", "Plain MD makes no progress.", "suggestion")
+    new = a.sync(chat, "zh")
+    assert [m["text"] for m in new] == ["[dev] 普通 MD 没有进展，建议改用增强采样。"] and new[0]["kind"] == "suggestion"
+    assert a.sync(chat, "zh") == []                                   # Shown once.
+    assert a.store.get(chat).history[-1]["run"] == "dev"              # Saved, so the model sees it too.
+
+    # The terminal prints a run message before the next prompt.
+    post(project / "runs" / "dev", "结果已经可以用了。", "Results are ready.", "done")
+    out = []
+    lines = iter(["hello again", "/quit"])
+    run_terminal(a, "en", read=lambda p="": next(lines), out=out.append, watch_every_s=3600)
+    # A new terminal session starts a new conversation, so the old conversation keeps the message.
+    assert not any("Results are ready." in line for line in out)
+    assert a.sync(chat, "en")[0]["text"] == "[dev] Results are ready."

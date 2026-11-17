@@ -136,3 +136,45 @@ def test_enhanced_sampling_biases_only_the_slowest_residues(tmp_path, monkeypatc
     _, labels = agent.run_all(tmp_path, state, files=object(), log=logs.append)
     assert labels == ["VAL5", "VAL9"] and biased == [[("A", 5), ("A", 9)]]
     assert any("Left out (faster ones): VAL2" in line for line in logs)
+
+
+def _no_flip_report():
+    r = ResidueReport(chain="A", resseq=111, resname="VAL", transitions=[0, 0], occupancies=[{"g+": 0, "t": 1,
+                      "g-": 0}] * 2, dominant=["t", "t"], ns_per_replica=11.0)
+    judge(r)
+    return r
+
+
+def test_guided_mode_keeps_plain_md_and_marks_the_residue_stalled():
+    loop = LoopSettings(max_ns=20.0, no_flip_patience_ns=10.0)
+    auto, next_auto = decide([_no_flip_report()], 11.0, loop, "auto")
+    guided, next_guided = decide([_no_flip_report()], 11.0, loop, "guided")
+    assert auto[0].action == "enhanced_sampling" and next_auto == 0          # Auto switches.
+    assert guided[0].action == "extend" and guided[0].stalled and next_guided > 0   # Guided goes on.
+    at_budget, _ = decide([_no_flip_report()], 20.0, loop, "guided")
+    assert at_budget[0].action == "enhanced_sampling" and not at_budget[0].stalled
+
+
+def test_guided_mode_posts_one_suggestion_and_does_not_switch(tmp_path):
+    from mdagent.agent import Decision, RunState, _post_plain_md_messages, run_all
+    from mdagent.messages import read
+    from mdagent.simulate import MDSettings
+
+    state = RunState(pdb="x", target_description="t", target=[("A", 111)], n_replicas=2, base_seed=1,
+                     md=MDSettings(), loop=LoopSettings(max_ns=20.0), rounds_ns=[1.0, 10.0], mode="guided")
+    stalled = [Decision("VAL111", "extend", "no flip", ("A", 111), stalled=True)]
+    _post_plain_md_messages(tmp_path, state, stalled, 5.0)
+    _post_plain_md_messages(tmp_path, state, stalled, 5.0)                    # Posted once only.
+    msgs = read(tmp_path)
+    assert len(msgs) == 1 and msgs[0]["kind"] == "suggestion" and "VAL111" in msgs[0]["zh"]
+
+    import mdagent.agent as agent
+    final = [Decision("VAL111", "enhanced_sampling", "budget used", ("A", 111))]
+    agent_run_loop = agent.run_loop
+    try:
+        agent.run_loop = lambda *a, **k: final
+        logs = []
+        assert run_all(tmp_path, state, files=object(), log=logs.append) == (final, [])
+        assert any("does not start by itself" in line for line in logs)
+    finally:
+        agent.run_loop = agent_run_loop

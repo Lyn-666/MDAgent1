@@ -76,12 +76,22 @@ def test_plain_md_then_enhanced_sampling_and_resume(tmp_path):
     assert np.load(d / "replica_1_bias.npy").shape == (2, 361)
     traj = md.load_dcd(str(d / "replica_0_chunk001.dcd"), top=str(tmp_path / "protein.pdb"))
     assert traj.n_frames == 2  # 1 ps chunk / 0.5 ps per frame.
-    assert not (d / "results.txt").exists()  # The agent does not analyze.
-    assert any("Enhanced sampling finished" in line for line in logs)
+    # The agent reweights the populations after each round and tells the chat at the end.
+    import json
 
-    # Resume with a longer enhanced sampling: it continues from the saved bias and state.
+    from mdagent.messages import read
+
+    pops = json.loads((d / "populations.json").read_text())
+    assert [r["residue"] for r in pops["residues"]] == labels and pops["n_replicas"] == 2
+    assert any(line.startswith("\nReweighted chi1 populations") for line in logs)
+    assert any(line.startswith("Enhanced sampling for VAL111") for line in logs)
+    assert read(tmp_path)[-1]["kind"] in ("done", "suggestion")
+
+    # Resume with a longer enhanced sampling (as resume --enhanced-ns does): it continues from the
+    # saved bias and state.
     state = RunState.load(tmp_path)
     state.enhanced["settings"]["length_ns"] = 0.003
+    state.enhanced["converged"] = False
     logs.clear()
     run_all(tmp_path, state, log=logs.append)
     assert np.load(d / "replica_0_chi.npy").shape == (30, 2)
