@@ -291,11 +291,31 @@ def main(argv: list[str] | None = None) -> int:
     sys.stdout.reconfigure(line_buffering=True)
     sys.stderr.reconfigure(line_buffering=True)
     args = build_parser().parse_args(argv)
+    if args.command in ("run", "resume"):
+        _record_how_the_run_ends()
     try:
         return args.func(args)
     except ValueError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
+
+
+def _record_how_the_run_ends() -> None:
+    """Leave a trace in the log when a long run ends early.
+
+    A crash in C code (for example in the GPU driver) and a stop signal (SIGTERM, also from the
+    chat's stop button) write the Python stack to stderr, which goes to the log. The stop still
+    happens at once. If a run ends with no trace, it was killed with SIGKILL (for example by the
+    system when memory runs out) or the computer lost power.
+    """
+    import faulthandler
+    import os
+    import signal
+    import time
+
+    print(f"Process {os.getpid()} started at {time.strftime('%Y-%m-%d %H:%M:%S')}.")
+    faulthandler.enable()
+    faulthandler.register(signal.SIGTERM, chain=True)
 
 
 def build_parser() -> argparse.ArgumentParser:

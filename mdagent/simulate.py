@@ -224,7 +224,7 @@ def run_segment(
         done += step
         ns_per_day = (done / steps_per_ps / 1000) / ((time.time() - t1) / 86400)
         log(f"replica {replica}: {done / n_steps:4.0%} of part {part} ({production_ns:g} ns) "
-            f"({ns_per_day:.0f} ns/day)")
+            f"({ns_per_day:.0f} ns/day, {time.strftime('%m-%d %H:%M')})")
 
     tmp = state_path.with_suffix(".tmp")
     sim.saveState(str(tmp))
