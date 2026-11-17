@@ -37,6 +37,9 @@
   .msg { max-width:85%; padding:10px 12px; border-radius:10px; white-space:pre-wrap; line-height:1.5; }
   .user { align-self:flex-end; background:var(--user); }
   .assistant { align-self:flex-start; border:1px solid var(--line); }
+  .assistant.from-run { border-left:4px solid var(--accent); }
+  .assistant.from-run.suggestion { border-left-color:var(--warn); }
+  .assistant.from-run.done { border-left-color:var(--ok); }
   .card { margin-top:8px; padding:10px; border:1px dashed var(--accent); border-radius:8px; font-size:14px; }
   .card details { margin:6px 0; } .card summary { cursor:pointer; color:var(--accent); }
   pre.check { font-size:12px; white-space:pre-wrap; color:var(--muted); margin:6px 0 0; }
@@ -154,12 +157,12 @@ for (const b of document.querySelectorAll("#scope button"))
 function renderLog() {
   log.innerHTML = "";
   if (!messages.length) addBubble("assistant", L().welcome);
-  for (const m of messages) addBubble(m.role, m.text, m.card);
+  for (const m of messages) addBubble(m.role, m.text, m.card, m.run ? "from-run " + (m.kind || "") : "");
 }
 
-function addBubble(role, body, card) {
+function addBubble(role, body, card, extra) {
   const div = document.createElement("div");
-  div.className = "msg " + role;
+  div.className = "msg " + role + (extra ? " " + extra : "");
   div.textContent = body;
   if (card) {
     const c = document.createElement("div");
@@ -190,7 +193,7 @@ async function openChat(id) {
   if (id) {
     const h = await (await fetch("/api/history?chat=" + encodeURIComponent(id))).json();
     if (!h.chat) { chatId = null; store("mdagent-chat", null); }
-    messages = h.history.map(m => ({role: m.role, text: m.text}));
+    messages = h.history.map(m => ({role: m.role, text: m.text, run: m.run, kind: m.kind}));
   }
   renderLog(); refreshChats(); refreshRuns();
 }
@@ -229,7 +232,17 @@ function whereHtml(r) {
   return h + "</ul></details></div>";
 }
 
+async function syncRunMessages() {
+  // Messages that runs wrote since the last look (a suggestion, results ready ...) join the conversation.
+  if (!chatId) return;
+  try {
+    const fresh = await (await fetch(`/api/sync?chat=${encodeURIComponent(chatId)}&lang=${lang}`)).json();
+    if (fresh.length) { messages.push(...fresh); renderLog(); }
+  } catch (e) {}
+}
+
 async function refreshRuns() {
+  syncRunMessages();
   let runs = [];
   try {
     runs = await (await fetch(`/api/runs?all=${showAll}&chat=${encodeURIComponent(chatId || "")}`)).json();

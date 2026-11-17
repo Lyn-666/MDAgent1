@@ -20,7 +20,9 @@ download links. The files stay on the computer that runs the simulation; the
 links let a user who opens the page on another computer (for example through
 SSH port forwarding) get them.
 
-The chat window does not analyze simulation results (project rule).
+The runs analyze their own results (agent.py, reweight.py) and post messages
+(messages.py) that appear in the conversation. The language model only reports
+what those messages and the run list say; it does not compute results itself.
 """
 
 from __future__ import annotations
@@ -48,6 +50,7 @@ from pydantic import BaseModel, Field
 from . import backends
 from .llm import FLAGS, SWITCHES, RunPlan, to_argv
 from .outputs import host, output_files
+from .messages import read as read_messages
 
 INPUT_SUFFIXES = (".pdb", ".parm7", ".prmtop", ".rst7", ".inpcrd")
 SKIP_DIRS = {"runs", "tests", ".git", ".venv", "node_modules", "mdagent.egg-info", "__pycache__"}
@@ -68,6 +71,13 @@ class ChatAction(BaseModel):
     prmtop: Optional[str] = Field(None, description="plan_run: Amber topology file, for a prepared system.")
     inpcrd: Optional[str] = Field(None, description="plan_run: Amber coordinate file, together with prmtop.")
     plan: Optional[RunPlan] = Field(None, description="plan_run: the run settings.")
+    resume_enhanced_sampling: Optional[bool] = Field(
+        None, description="resume: true when the user wants to continue with enhanced sampling (for example after "
+                          "a suggestion that plain MD makes no progress). Null keeps the run's methods.")
+    resume_max_ns: Optional[float] = Field(
+        None, description="resume: a new plain MD budget per replica in ns, if the user asks to run longer.")
+    resume_enhanced_ns: Optional[float] = Field(
+        None, description="resume: a new length per enhanced sampling replica in ns, if the user asks for it.")
     fetch_pdb_ids: list[str] = Field(
         default_factory=list,
         description="PDB IDs (for example 3HTB) that the user wants to use but that are not in the list of input "
@@ -87,7 +97,14 @@ Choose one action for the user's last message:
   enhanced_ns 0.1, equil_ps 60. Never guess a ligand name or residue number: use only names and numbers in the file
   summaries. If anything needed is unclear, use action "answer" and ask.
 - stop: the user asks to stop a run that is running. run_name must be in the run list.
-- resume: the user asks to continue a run that is stopped or failed. run_name must be in the run list.
+- resume: the user asks to continue a run that is stopped, failed or finished. run_name must be in the run list.
+  To switch a run to enhanced sampling, set resume_enhanced_sampling. To run longer, set resume_max_ns or
+  resume_enhanced_ns. A run that is still running must be stopped first: then propose stop and say so.
+
+Modes (RunPlan.mode): if the user names the method to use (for example "only plain MD", "use adaptive
+sampling"), set mode "guided": MDAgent runs only that method and posts suggestions. If the user names no method
+or says MDAgent should decide, leave mode null (auto): MDAgent chooses methods, when to switch and when to stop.
+Messages from runs appear in the conversation as "[run name] ..." from the assistant; use them to answer.
 - answer: everything else, for example progress questions. Answer progress questions only from the run
   list below. If the user asks where the trajectories or other results are, give the computer ("host") and
   the full folder ("folder") from the run list, and the kinds of result files with how many of each
@@ -106,8 +123,20 @@ in fetch_pdb_ids and use action "answer". MDAgent downloads it to structures/<ID
 then the file and its summary are in the list, and you can plan the run.
 
 Nothing starts or stops until the user confirms under your message: on the web page with a button, in the
-terminal by typing y (the "Interface" line below says which). Say what confirming will do. Do not analyze simulation results (populations, convergence): the user does that. Write `reply` in the
-language of the user's last message (Chinese or English), in short plain sentences."""
+terminal by typing y (the "Interface" line below says which). Say what confirming will do. MDAgent analyzes the
+results itself and posts them as run messages; report results only from those messages and the run list, never
+invent numbers. Write `reply` in the language of the user's last message (Chinese or English), in short plain
+sentences.
+
+Method guide (from the literature; recommend in one or two sentences when planning, and say why):
+- Side-chain rotamers in a pocket (default MDAgent task): plain MD with at least 3, better 5 replicas; buried side
+  chains that do not flip in tens of ns need enhanced sampling (mode auto switches by itself). T4L L99A Val111 flips
+  about 0.04 times per ns in plain MD.
+- Pocket shape / conformational ensemble: 5 to 10 independent replicas of about 100 ns.
+- Rare states or exploring new regions: adaptive sampling (sampling "adaptive").
+- A binding affinity number: alchemical free energy calculations (OpenFE, FEP+; about 11 to 20 lambda windows of
+  1 to 5 ns, 3 repeats). MDAgent does not run these: say so and suggest those tools; MDAgent can still check
+  slow pocket side chains first, which also matter for those calculations."""
 
 
 # ---------------------------------------------------------------- messages in two languages
@@ -314,6 +343,7 @@ class Conversation:
     updated: float = 0.0
     history: list = field(default_factory=list)   # [{"role": "user"|"assistant", "text": ...}]
     runs: list = field(default_factory=list)      # Names of runs started in this conversation.
+    seen: dict = field(default_factory=dict)      # Run name -> number of its messages already shown here.
 
 
 class ChatStore:
@@ -413,7 +443,26 @@ class Assistant:
         if self.store is None:
             self.store = ChatStore(self.runs.dir / ".chats")
 
+    def sync(self, chat_id: str | None, lang: str = "zh") -> list[dict]:
+        """Add new messages from this conversation's runs to its history, and return them."""
+        with self.lock:
+            conv = self.store.chats.get(chat_id or "")
+            if conv is None:
+                return []
+            new = []
+            for name in conv.runs:
+                msgs = read_messages(self.runs.dir / name)
+                for m in msgs[conv.seen.get(name, 0):]:
+                    text = f"[{name}] " + (m.get(lang) or m.get("en") or "")
+                    new.append({"role": "assistant", "text": text, "run": name, "kind": m.get("kind", "info")})
+                conv.seen[name] = len(msgs)
+            if new:
+                conv.history += new
+                self.store.save(conv)
+            return new
+
     def message(self, text: str, lang: str = "zh", chat_id: str | None = None) -> dict:
+        self.sync(chat_id, lang)  # The model sees what the runs said before the user's message.
         with self.lock:
             conv = self.store.get(chat_id)
             prompt = self._prompt(conv, text)
@@ -508,7 +557,22 @@ class Assistant:
             if a.action == "resume" and alive:
                 raise ValueError(t(lang, "still_running", name=a.run_name))
             text = t(lang, "card_stop" if a.action == "stop" else "card_resume", name=a.run_name)
-            return {"id": uuid.uuid4().hex, "kind": a.action, "name": a.run_name, "text": text}
+            card = {"id": uuid.uuid4().hex, "kind": a.action, "name": a.run_name, "text": text}
+            if a.action == "resume":
+                argv = ["resume", "--run", f"runs/{a.run_name}"]
+                changed = []
+                if a.resume_enhanced_sampling:
+                    argv.append("--enhanced-sampling")
+                    changed.append("enhanced sampling = on")
+                if a.resume_max_ns is not None:
+                    argv += ["--max-ns", f"{a.resume_max_ns:g}"]
+                    changed.append(f"max_ns = {a.resume_max_ns:g}")
+                if a.resume_enhanced_ns is not None:
+                    argv += ["--enhanced-ns", f"{a.resume_enhanced_ns:g}"]
+                    changed.append(f"enhanced_ns = {a.resume_enhanced_ns:g}")
+                card.update(argv=argv, changed=changed,
+                            command="python -m mdagent " + " ".join(shlex.quote(x) for x in argv))
+            return card
         return None
 
     def confirm(self, card_id: str, lang: str = "zh") -> str:
@@ -521,15 +585,18 @@ class Assistant:
         if card["kind"] == "start":
             pid = self.runs.launch(name, card["argv"])
             conv.runs.append(name)
+            conv.seen[name] = 0
             msg = t(lang, "started_terminal" if self.ui == "terminal" else "started", name=name, pid=pid, host=host(), folder=self.runs.dir.resolve() / name)
         elif card["kind"] == "resume":
-            pid = self.runs.launch(name, ["resume", "--run", f"runs/{name}"], log_suffix=f".resume-{int(time.time())}")
+            argv = card.get("argv") or ["resume", "--run", f"runs/{name}"]
+            pid = self.runs.launch(name, argv, log_suffix=f".resume-{int(time.time())}")
             msg = t(lang, "resumed", name=name, pid=pid)
         else:
             msg = t(lang, "stopped", name=name) if self.runs.stop(name) else t(lang, "was_not_running", name=name)
         with self.lock:
             if name not in conv.runs:
                 conv.runs.append(name)  # A run stopped or resumed here now belongs to this conversation too.
+                conv.seen[name] = len(read_messages(self.runs.dir / name))  # Show only messages from now on.
             conv.history.append({"role": "assistant", "text": msg})
             self.store.save(conv)
         return msg
@@ -620,6 +687,8 @@ def make_handler(assistant: Assistant):
                     self._send(404, b"not found", "text/plain")
                 else:
                     self._send_zip(assistant.runs.dir / name, name)
+            elif url.path == "/api/sync":
+                self._json(assistant.sync(q.get("chat") or None, "en" if q.get("lang") == "en" else "zh"))
             elif url.path == "/api/runs":
                 names = assistant.runs.names()
                 if q.get("all") != "1":

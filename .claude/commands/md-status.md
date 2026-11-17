@@ -17,4 +17,4 @@ argument-hint: "[运行名称，可省略]"
 - 中途停了时：用 `nohup python -m mdagent resume --run runs/<名字> > runs/<名字>.resume.log 2>&1 &` 可以从最后保存的位置接着跑。先问用户要不要续跑，得到同意后再运行。
 - 日志里有报错时：把报错原文告诉用户。
 
-不要分析模拟结果（不算状态比例、不判断收敛）。这是项目的规则，见 CLAUDE.md。
+不要自己计算模拟结果。结果由程序算好：增强采样的状态比例在 `runs/<名字>/enhanced/populations.json`，运行发来的消息在 `runs/<名字>/messages.jsonl`。只转述这些文件里的内容。

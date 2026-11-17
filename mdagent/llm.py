@@ -62,6 +62,10 @@ class RunPlan(BaseModel):
     enhanced_ns: Optional[float] = Field(None, description="Length of each enhanced sampling replica in ns. "
                                                            "Default 20.")
     enhanced_replicas: Optional[int] = Field(None, description="Default 2.")
+    mode: Optional[Literal["auto", "guided"]] = Field(
+        None, description="auto (default): MDAgent chooses the methods, when to switch and when to stop. guided: "
+                          "the user named the method (for example 'only plain MD', 'use adaptive sampling'); MDAgent "
+                          "runs only that and suggests changes in the chat.")
     equil_ps: Optional[float] = Field(None, description="Total equilibration before production, in ps. "
                                                         "Default 600.")
     enhanced_max_residues: Optional[int] = Field(
@@ -134,7 +138,7 @@ FLAGS = [  # RunPlan field -> command line option
     ("first_ns", "--first-ns"), ("extend_ns", "--extend-ns"), ("max_ns", "--max-ns"),
     ("no_flip_patience_ns", "--no-flip-patience-ns"), ("sampling", "--sampling"),
     ("enhanced_ns", "--enhanced-ns"), ("enhanced_replicas", "--enhanced-replicas"),
-    ("enhanced_max_residues", "--enhanced-max-residues"), ("equil_ps", "--equil-ps"),
+    ("enhanced_max_residues", "--enhanced-max-residues"), ("equil_ps", "--equil-ps"), ("mode", "--mode"),
     ("chains", "--chains"), ("uniprot", "--uniprot"), ("termini", "--termini"),
 ]
 SWITCHES = [("check_protonation", "--check-protonation"), ("no_enhanced_sampling", "--no-enhanced-sampling"),

@@ -45,6 +45,13 @@ def _print_summary(decisions, enhanced_labels, run_dir) -> None:
         if enhanced_labels:
             print(f"Enhanced sampling finished for: {', '.join(enhanced_labels)}.")
             print(f"The order of residues in the .npy files: {', '.join(enhanced_labels)}.")
+            pops = Path(run_dir) / "enhanced" / "populations.json"
+            if pops.exists():
+                import json
+
+                from .reweight import format_table
+
+                print(format_table(json.loads(pops.read_text())))
         else:
             print("Enhanced sampling did not run.")
     print("\n".join(describe(run_dir)))
@@ -221,6 +228,7 @@ def cmd_run(args) -> int:
         loop=loop,
         setup=asdict(setup) if setup else {"amber": [str(args.prmtop), str(args.inpcrd)]},
         sampling=args.sampling,
+        mode=args.mode,
         adaptive={"policy": args.adaptive_policy, "n_clusters": args.adaptive_clusters,
                   "full_interval_ps": args.full_save_ps} if args.sampling == "adaptive" else {},
         enhanced={"enabled": not args.no_enhanced_sampling,
@@ -257,8 +265,10 @@ def cmd_resume(args) -> int:
         state.md.platform = args.platform
     if args.enhanced_sampling is not None:
         state.enhanced["enabled"] = args.enhanced_sampling
+        state.enhanced["requested"] = bool(args.enhanced_sampling)  # The user asked for it (guided mode).
     if args.enhanced_ns is not None:
         state.enhanced.setdefault("settings", {})["length_ns"] = args.enhanced_ns
+        state.enhanced["converged"] = False  # The user asked for more: run it, then judge again.
     if not _check_env(state.md.platform):
         return 2
     state.save(run)
@@ -369,6 +379,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Build the system and stop. Start MD later with 'resume'.")
     r.add_argument("--platform", default=None, help="OpenMM platform: CUDA, OpenCL or CPU.")
     r.add_argument("--seed", type=int, default=1)
+    r.add_argument("--mode", default="auto", choices=["auto", "guided"],
+                   help="auto (default): MDAgent chooses when to switch methods and when to stop. guided: run "
+                        "only the method you chose; MDAgent suggests changes in the chat but does not switch.")
     r.add_argument("--sampling", default="continue", choices=["continue", "adaptive"],
                    help="continue: each replica continues its own trajectory (default). adaptive: from "
                         "round 2, AdaptivePy chooses the starting frames (pip install adaptivepy-sampling).")

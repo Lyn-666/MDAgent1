@@ -15,6 +15,7 @@ language model, so they cost no tokens: /runs, /new, /help, /quit.
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 from typing import Callable
 
@@ -86,24 +87,38 @@ def show_runs(assistant, lang: str, out: Callable[[str], None]) -> None:
 def show_card(card: dict, lang: str, out: Callable[[str], None]) -> None:
     T = TEXT[lang]
     out(f"\n[ {card['text']} ]")
-    if card["kind"] == "start":
+    if "changed" in card:
         out(T["changed"] + (", ".join(card["changed"]) if card["changed"] else T["none"]))
-        if card.get("check"):
-            out(T["check"])
-            out("  " + card["check"].replace("\n", "\n  "))
+    if card.get("check"):
+        out(T["check"])
+        out("  " + card["check"].replace("\n", "\n  "))
+    if card.get("command"):
         out(T["command"] + card["command"])
 
 
+def _watch_run_messages(assistant, state: dict, lang: str, out, stop: threading.Event,
+                        every_s: float = 20.0) -> None:
+    """Print messages that runs write while the user is not typing (a suggestion, results ready ...)."""
+    while not stop.wait(every_s):
+        for m in assistant.sync(state.get("chat"), lang):
+            out("\n" + TEXT[lang]["agent"] + m["text"])
+
+
 def run_terminal(assistant, lang: str = "zh", read: Callable[[str], str] = input,
-                 out: Callable[[str], None] = print) -> int:
+                 out: Callable[[str], None] = print, watch_every_s: float = 20.0) -> int:
     """Talk with the assistant in the terminal until /quit, Ctrl+D or Ctrl+C."""
     T = TEXT[lang]
     if read is input:
         _enable_line_editing()
     out(T["hello"].format(backend=BACKEND_NAMES.get(assistant.backend, assistant.backend)))
-    chat_id = None
+    state = {"chat": None}
+    stop = threading.Event()
+    threading.Thread(target=_watch_run_messages, args=(assistant, state, lang, out, stop, watch_every_s),
+                     daemon=True).start()
     try:
         while True:
+            for m in assistant.sync(state["chat"], lang):
+                out(T["agent"] + m["text"])
             text = read("\n" + T["you"]).strip()
             if not text:
                 continue
@@ -116,12 +131,12 @@ def run_terminal(assistant, lang: str = "zh", read: Callable[[str], str] = input
                 show_runs(assistant, lang, out)
                 continue
             if text == "/new":
-                chat_id = None
+                state["chat"] = None
                 out(T["new_chat"])
                 continue
             out(T["thinking"])
-            r = assistant.message(text, lang, chat_id)
-            chat_id = r["chat"]
+            r = assistant.message(text, lang, state["chat"])
+            state["chat"] = r["chat"]
             out(T["agent"] + r["reply"])
             card = r.get("card")
             if card:
@@ -134,6 +149,7 @@ def run_terminal(assistant, lang: str = "zh", read: Callable[[str], str] = input
                     out(T["not_done"])
     except (EOFError, KeyboardInterrupt):
         out("")
+    stop.set()
     out(T["bye"])
     return 0
 

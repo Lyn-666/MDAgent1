@@ -399,3 +399,16 @@ def test_a_stopped_run_leaves_a_trace_in_its_log(tmp_path):
     assert p.wait(timeout=10) == -signal.SIGTERM                 # Stops at once, as before.
     text = log.read_text()
     assert "started at" in text and "most recent call first" in text   # The stack shows where it was.
+
+
+def test_resume_card_can_switch_to_enhanced_sampling(project):
+    run = _finished_run(project)
+    action = ChatAction(action="resume", reply="ok", run_name="demo", resume_enhanced_sampling=True,
+                        resume_max_ns=30)
+    a = _assistant(project, action)
+    launched = []
+    a.runs.launch = lambda name, argv, **kw: launched.append(argv) or 1
+    card = a.message("continue demo with enhanced sampling")["card"]
+    assert card["argv"] == ["resume", "--run", "runs/demo", "--enhanced-sampling", "--max-ns", "30"]
+    a.confirm(card["id"])
+    assert launched == [card["argv"]] and run.exists()
