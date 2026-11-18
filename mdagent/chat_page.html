@@ -193,7 +193,7 @@ async function openChat(id) {
   if (id) {
     const h = await (await fetch("/api/history?chat=" + encodeURIComponent(id))).json();
     if (!h.chat) { chatId = null; store("mdagent-chat", null); }
-    messages = h.history.map(m => ({role: m.role, text: m.text, run: m.run, kind: m.kind}));
+    messages = h.history.map(m => ({role: m.role, text: m.text, run: m.run, kind: m.kind, id: m.id}));
   }
   renderLog(); refreshChats(); refreshRuns();
 }
@@ -237,7 +237,9 @@ async function syncRunMessages() {
   if (!chatId) return;
   try {
     const fresh = await (await fetch(`/api/sync?chat=${encodeURIComponent(chatId)}&lang=${lang}`)).json();
-    if (fresh.length) { messages.push(...fresh); renderLog(); }
+    const shown = new Set(messages.filter(m => m.id).map(m => m.id));
+    const add = fresh.filter(m => !shown.has(m.id));
+    if (add.length) { messages.push(...add); renderLog(); }
   } catch (e) {}
 }
 
