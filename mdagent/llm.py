@@ -28,9 +28,15 @@ MODEL = "claude-opus-5-5"
 class RunPlan(BaseModel):
     """Settings for one `mdagent run`. Leave a field null to keep its default."""
 
-    target_kind: Literal["ligand", "residues"] = Field(
+    target_kind: Literal["ligand", "residues", "distance"] = Field(
         description="'ligand': the target is all protein residues near a ligand in the PDB file. "
-                    "'residues': the target is a list of residues.")
+                    "'residues': the target is a list of residues. Both study side-chain conformations (chi1). "
+                    "'distance': the user wants to know about distances between atoms (a pocket opening, a "
+                    "contact, a gate); give them in `distances`.")
+    distances: Optional[str] = Field(
+        None, description="Only for target_kind 'distance': atom pairs with a cutoff in nm, separated by ';', "
+                          "for example 'A:88:OH-A:111:CG1@0.6'. Use standard PDB atom names (CA, CB, OH, NZ, "
+                          "CG1 ...) and residue numbers from the file summary. Ask if the atoms are unclear.")
     ligand: Optional[str] = Field(None, description="Residue name of the ligand in the PDB file, e.g. BNZ. "
                                                     "Only for target_kind 'ligand'.")
     cutoff_angstrom: Optional[float] = Field(None, description="Distance from the ligand in Å. Default 5.")
@@ -168,7 +174,13 @@ def to_argv(plan: RunPlan, pdb: str | None, out: str, prmtop: str | None = None,
         argv = ["run", "--pdb", str(pdb), "--out", str(out)]
     else:
         raise ValueError("The plan has no input file.")
-    if plan.target_kind == "ligand":
+    if plan.target_kind == "distance":
+        if not plan.distances:
+            raise ValueError("The plan studies distances but gives none.")
+        argv += ["--quantity", "distance", "--distances", plan.distances]
+        if plan.residues:
+            argv += ["--residues", plan.residues]
+    elif plan.target_kind == "ligand":
         if not plan.ligand:
             raise ValueError("The plan targets a ligand but names none.")
         argv += ["--around-ligand", plan.ligand]

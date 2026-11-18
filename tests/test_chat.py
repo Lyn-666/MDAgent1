@@ -445,3 +445,15 @@ def test_a_save_folder_with_files_is_refused(project, tmp_path_factory):
                         save_dir=str(base))
     r = _assistant(project, action).message("run it")
     assert r["card"] is None and "已经有文件" in r["reply"]
+
+
+def test_a_distance_request_becomes_a_distance_run(project):
+    plan = _plan(target_kind="distance", ligand=None, distances="A:88:OH-A:111:CG1@0.6")
+    a = _assistant(project, ChatAction(action="plan_run", reply="ok", run_name="gate", pdb="examples/181L.pdb",
+                                       plan=plan))
+    card = a.message("how often is Tyr88 OH near Val111?")["card"]
+    assert card["argv"][5:9] == ["--quantity", "distance", "--distances", "A:88:OH-A:111:CG1@0.6"]
+    bad = _plan(target_kind="distance", ligand=None, distances="A:88:XX-A:111:CG1@0.6")
+    r = _assistant(project, ChatAction(action="plan_run", reply="ok", run_name="g2", pdb="examples/181L.pdb",
+                                       plan=bad)).message("x")
+    assert r["card"] is None and "A:88:XX is not in the structure" in r["reply"]

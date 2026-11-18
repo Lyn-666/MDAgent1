@@ -73,6 +73,7 @@ class RunState:
     mode: str = "auto"      # "auto": the agent chooses methods and when to stop. "guided": the user chose.
     notes: dict = field(default_factory=dict)     # Which messages were posted already, so each is posted once.
     goal: dict = field(default_factory=dict)      # Goal fields. Empty in runs made before goals existed.
+    distances: list = field(default_factory=list)  # Distance specs (observables.py) for quantity distance_states.
     adaptive: dict = field(default_factory=dict)  # AdaptiveSettings fields
     starts: dict = field(default_factory=dict)    # Round index -> [[replica, part, frame], ...]
 
@@ -85,6 +86,15 @@ class RunState:
             return Goal.for_mode(self.mode)  # Older runs: the defaults of their mode.
         names = set(Goal.__dataclass_fields__)
         return Goal(**{k: v for k, v in self.goal.items() if k in names})
+
+    @property
+    def quantity(self) -> str:
+        return self.the_goal().quantity
+
+    def can_switch(self) -> bool:
+        """May the agent switch to enhanced sampling by itself? Needs the permission, and a quantity that
+        enhanced sampling can push (only chi1 for now)."""
+        return self.allowed("switch_method") and self.quantity == "chi1_populations"
 
     def allowed(self, action: str) -> bool:
         if action == "switch_method" and self.enhanced.get("requested"):
@@ -126,7 +136,7 @@ class Goal:
       stop_early     stop before the budget once the goal is met
     """
 
-    quantity: str = "chi1_populations"
+    quantity: str = "chi1_populations"   # or "distance_states" (observables.py)
     description: str = ""          # The user's own words.
     precision: float = 0.05
     permissions: list = field(default_factory=lambda: list(PERMISSIONS))
@@ -148,12 +158,15 @@ class Decision:
 
 
 def decide(reports: list[ResidueReport], ns_done: float, loop: LoopSettings,
-           may_switch: bool = True) -> tuple[list[Decision], float]:
-    """Return a decision for each residue, and the length of the next round (0 means stop).
+           may_switch: bool = True, bias_available: bool = True) -> tuple[list[Decision], float]:
+    """Return a decision for each item (residue or distance), and the length of the next round (0: stop).
 
-    Without permission to switch methods, a residue with no flip after the patience time does
+    Without permission to switch methods, an item with no state change after the patience time does
     not stop plain MD: the user chose plain MD, so it goes on until the budget (marked stalled).
+    Without an enhanced sampling method for the quantity, such an item gets the action "stalled"
+    instead of "enhanced_sampling" when plain MD stops.
     """
+    need = "enhanced_sampling" if bias_available else "stalled"
     room = round(loop.max_ns - ns_done, 6)
     decisions = []
     for r in reports:
@@ -161,18 +174,19 @@ def decide(reports: list[ResidueReport], ns_done: float, loop: LoopSettings,
             decisions.append(Decision(r.label, "skip", r.reason))
         elif r.verdict == "ok":
             decisions.append(Decision(r.label, "done", f"Sampled well: {r.reason}"))
-        elif sum(r.transitions) == 0 and ns_done >= loop.no_flip_patience_ns and not may_switch and room > 0:
+        elif sum(r.transitions) == 0 and ns_done >= loop.no_flip_patience_ns and not (may_switch and bias_available) \
+                and room > 0:
             decisions.append(Decision(
                 r.label, "extend",
                 f"No flip in {ns_done:g} ns per replica. Plain MD is unlikely to see one, but the user chose "
                 "plain MD, so it goes on until the budget.", stalled=True))
         elif sum(r.transitions) == 0 and ns_done >= loop.no_flip_patience_ns:
             decisions.append(Decision(
-                r.label, "enhanced_sampling",
+                r.label, need,
                 f"No flip in {ns_done:g} ns per replica. Plain MD is unlikely to see one.", cause="stalled"))
         elif room <= 0:
             decisions.append(Decision(
-                r.label, "enhanced_sampling",
+                r.label, need,
                 f"The budget of {loop.max_ns:g} ns per replica is used up. {r.reason}", cause="budget_exhausted"))
         elif sum(r.transitions) == 0:
             decisions.append(Decision(
@@ -199,18 +213,21 @@ def _record(run_dir: Path, state: RunState, reports, decisions, next_ns: float) 
     lines = [f"Round {len(state.rounds_ns)} finished. "
              f"Total: {state.ns_done:g} ns per replica, {state.n_replicas} replicas."]
     for d in decisions:
-        if d.action in ("extend", "enhanced_sampling"):
+        if d.action in ("extend", "enhanced_sampling", "stalled"):
             lines.append(f"  {d.residue}: {d.action}. {d.reason}")
     n_done = sum(d.action == "done" for d in decisions)
     if n_done:
-        lines.append(f"  {n_done} residue(s) are sampled well.")
+        lines.append(f"  {n_done} item(s) are sampled well.")
     if next_ns > 0:
         lines.append(f"Decision: run every replica {next_ns:g} ns longer.")
     else:
         enhanced = [d.residue for d in decisions if d.action == "enhanced_sampling"]
+        stuck = [d.residue for d in decisions if d.action == "stalled"]
         lines.append("Decision: stop plain MD. "
-                     + (f"Enhanced sampling is needed for: {', '.join(enhanced)}."
-                        if enhanced else "All target side chains are sampled well."))
+                     + (f"Enhanced sampling is needed for: {', '.join(enhanced)}. " if enhanced else "")
+                     + (f"Not sampled well, and this quantity has no enhanced sampling method yet: "
+                        f"{', '.join(stuck)}." if stuck else "")
+                     + ("All target items are sampled well." if not enhanced and not stuck else ""))
     text = "\n".join(lines)
     with open(run_dir / "decisions.log", "a") as f:
         f.write(time.strftime("[%Y-%m-%d %H:%M:%S] ") + text + "\n\n")
@@ -288,6 +305,12 @@ def _adaptive_starts(run_dir: Path, state: RunState, part: int, log) -> list[lis
 
 
 def _diagnose_and_decide(run_dir: Path, state: RunState):
+    if state.quantity == "distance_states":
+        reports = _diagnose_distances(run_dir, state)
+        decisions, next_ns = decide(reports, state.ns_done, state.loop, state.allowed("switch_method"),
+                                    bias_available=False)
+        _post_plain_md_messages(run_dir, state, decisions, next_ns)
+        return reports, decisions, next_ns
     fixed = fixed_chi1_residues(run_dir / "protein.pdb")
     if state.sampling == "adaptive":
         # Segments start from different frames on purpose, so judge the pooled flips.
@@ -305,6 +328,21 @@ def _diagnose_and_decide(run_dir: Path, state: RunState):
     return reports, decisions, next_ns
 
 
+def _diagnose_distances(run_dir: Path, state: RunState) -> list[ResidueReport]:
+    """Distances: load only their atoms (sorted, as mdtraj keeps them) and judge each one."""
+    import mdtraj as md
+
+    from .observables import diagnose_distances, distance_atoms, parse_distances
+
+    specs = parse_distances(state.distances)
+    pairs = distance_atoms(md.load_topology(str(run_dir / "protein.pdb")), specs)
+    atoms = sorted({i for pair in pairs for i in pair})
+    where = {a: k for k, a in enumerate(atoms)}
+    trajs = load_run(run_dir, state.target, len(state.rounds_ns), atoms=atoms)
+    return diagnose_distances(trajs, specs, [(where[i], where[j]) for i, j in pairs], state.ns_done,
+                              state.loop.min_flips_per_replica, state.the_goal().precision)
+
+
 def _once(run_dir: Path, state: RunState, key: str, zh: str, en: str, kind: str) -> None:
     """Post a message to the chat, but only once per run."""
     if state.notes.get(key):
@@ -314,21 +352,32 @@ def _once(run_dir: Path, state: RunState, key: str, zh: str, en: str, kind: str)
     state.save(run_dir)
 
 
+def _advice(state: RunState, run_dir: Path) -> tuple[str, str]:
+    """What to try next when plain MD does not sample an item, for this quantity (Chinese, English)."""
+    if state.quantity == "chi1_populations":
+        return (f"建议改用增强采样，可以说“用增强采样继续 {run_dir.name}”（还在运行时先说“停止 {run_dir.name}”）。",
+                f"I suggest enhanced sampling: say \"continue {run_dir.name} with enhanced sampling\" (if it is still "
+                f"running, first say \"stop {run_dir.name}\").")
+    return ("这个量还没有增强采样方法。可以加长普通 MD、增加重复，或者新开一个运行改用自适应采样（--sampling adaptive）；"
+            "如果这个距离本来就很少变化，也可能它只有一个稳定状态。",
+            "This quantity has no enhanced sampling method yet. You can run plain MD longer, add replicas, or start a "
+            "new run with adaptive sampling (--sampling adaptive). The distance may also have only one stable state.")
+
+
 def _post_plain_md_messages(run_dir: Path, state: RunState, decisions: list[Decision], next_ns: float) -> None:
     stalled = [d.residue for d in decisions if d.stalled]
+    advice_zh, advice_en = _advice(state, run_dir)
     if stalled:
         names = ", ".join(stalled)
         _once(run_dir, state, "stalled",
-              f"普通 MD 已经跑了每条 {state.ns_done:g} ns，{names} 的侧链一次都没有翻转。继续跑普通 MD 很可能也看不到翻转。"
-              f"建议改用增强采样。运行会按你的设置继续，直到每条 {state.loop.max_ns:g} ns。"
-              f"要换方法，可以说“停止 {run_dir.name}”，然后说“用增强采样继续 {run_dir.name}”。",
-              f"Plain MD has run {state.ns_done:g} ns per replica, and the side chains of {names} have not flipped "
-              f"once. More plain MD is unlikely to show a flip. I suggest enhanced sampling. The run goes on with your "
-              f"settings until {state.loop.max_ns:g} ns per replica. To switch, say \"stop {run_dir.name}\", then "
-              f"\"continue {run_dir.name} with enhanced sampling\".", "suggestion")
+              f"普通 MD 已经跑了每条 {state.ns_done:g} ns，{names} 一次都没有在状态之间变化。继续跑普通 MD 很可能也看不到。"
+              f"运行会按你的设置继续，直到每条 {state.loop.max_ns:g} ns。" + advice_zh,
+              f"Plain MD has run {state.ns_done:g} ns per replica, and {names} have not changed state once. More plain "
+              f"MD is unlikely to show it. The run goes on with your settings until {state.loop.max_ns:g} ns per "
+              "replica. " + advice_en, "suggestion")
     if next_ns > 0:
         return
-    need = [d.residue for d in decisions if d.action == "enhanced_sampling"]
+    need = [d.residue for d in decisions if d.action in ("enhanced_sampling", "stalled")]
     # Why plain MD stopped. Stalled wins over budget: it says that more plain MD would not help.
     reason = ("target_reached" if not need else
               "stalled" if any(d.cause == "stalled" for d in decisions) else "budget_exhausted")
@@ -343,18 +392,16 @@ def _post_plain_md_messages(run_dir: Path, state: RunState, decisions: list[Deci
               "budget_exhausted": "budget used up"}[reason]
     if not need:
         _once(run_dir, state, "plain_done",
-              f"普通 MD 结束，原因是{why_zh}（每条 {state.ns_done:g} ns）：目标区域的侧链都在状态之间来回了足够多次，"
-              f"比例的误差也不超过 {state.the_goal().precision:g}。",
-              f"Plain MD finished. Stop reason: {why_en} ({state.ns_done:g} ns per replica): every target side chain "
+              f"普通 MD 结束，原因是{why_zh}（每条 {state.ns_done:g} ns）：所有目标都在状态之间来回了足够多次，"
+              f"比例的误差也不超过 {state.the_goal().precision:g}。结果在 {(run_dir / 'status.json').resolve()}。",
+              f"Plain MD finished. Stop reason: {why_en} ({state.ns_done:g} ns per replica): every target item "
               f"crossed between states often enough, and every population error is at most "
-              f"{state.the_goal().precision:g}.", "done")
-    elif not state.allowed("switch_method"):
+              f"{state.the_goal().precision:g}. The results are in {(run_dir / 'status.json').resolve()}.", "done")
+    elif not state.can_switch():
         _once(run_dir, state, "plain_done",
-              f"普通 MD 结束，原因是{why_zh}（每条 {state.ns_done:g} ns）。这些侧链没有采样充分：{', '.join(need)}。"
-              f"建议用增强采样继续，可以说“用增强采样继续 {run_dir.name}”。",
-              f"Plain MD finished. Stop reason: {why_en} ({state.ns_done:g} ns per replica). These side chains are not "
-              f"sampled well: {', '.join(need)}. I suggest continuing with enhanced sampling: say \"continue "
-              f"{run_dir.name} with enhanced sampling\".", "suggestion")
+              f"普通 MD 结束，原因是{why_zh}（每条 {state.ns_done:g} ns）。这些没有采样充分：{', '.join(need)}。" + advice_zh,
+              f"Plain MD finished. Stop reason: {why_en} ({state.ns_done:g} ns per replica). These are not sampled "
+              f"well: {', '.join(need)}. " + advice_en, "suggestion")
     elif state.enhanced.get("enabled", True):
         _once(run_dir, state, "plain_done",
               f"普通 MD 结束，原因是{why_zh}（每条 {state.ns_done:g} ns）。这些侧链普通 MD 采样不到：{', '.join(need)}。"
@@ -382,9 +429,10 @@ def run_all(
     wanted = [d for d in decisions if d.action == "enhanced_sampling"]
     if not wanted:
         return decisions, []
-    if not state.allowed("switch_method"):
-        log("The user chose plain MD (no permission to switch methods), so enhanced sampling does not start by itself. "
-            "Use 'resume --enhanced-sampling' to run it.")
+    if not state.can_switch():
+        log("Enhanced sampling does not start by itself: "
+            + ("there is no permission to switch methods (use 'resume --enhanced-sampling' to run it)."
+               if state.quantity == "chi1_populations" else "this quantity has no enhanced sampling method yet."))
         return decisions, []
     if not state.enhanced.get("enabled", True):
         log("Enhanced sampling is switched off for this run. Use 'resume --enhanced-sampling' to run it.")
