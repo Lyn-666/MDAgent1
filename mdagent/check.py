@@ -14,6 +14,7 @@ sequence is downloaded once to structures/uniprot/<accession>.fasta.
 
 from __future__ import annotations
 
+import json
 import math
 import urllib.error
 import urllib.request
@@ -37,6 +38,29 @@ TAG_WORDS = ("EXPRESSION TAG", "CLONING ARTIFACT", "LINKER", "INITIATING METHION
              "ACETYLATION", "AMIDATION")
 LONG_GAP = 5
 UNIPROT_URL = "https://rest.uniprot.org/uniprotkb/stream?query=accession:{acc}&includeIsoform=true&format=fasta"
+UNIPROT_ENTRY_URL = "https://rest.uniprot.org/uniprotkb/{acc}.json"
+
+
+class InactiveEntry(ValueError):
+    """The UniProt entry no longer exists as such (merged or split into other entries)."""
+
+    def __init__(self, acc: str, reason: str, replacements: list[str]):
+        self.acc, self.reason, self.replacements = acc, reason, replacements
+        how = {"DEMERGED": "split into", "MERGED": "merged into"}.get(reason, "replaced by")
+        super().__init__(f"UniProt entry {acc} is no longer active: it was {how} "
+                         f"{', '.join(replacements) or 'other entries'}")
+
+
+def _why_inactive(acc: str, opener) -> InactiveEntry | None:
+    try:
+        with opener(UNIPROT_ENTRY_URL.format(acc=acc), timeout=60) as r:
+            d = json.loads(r.read().decode())
+    except (urllib.error.URLError, OSError, ValueError):
+        return None
+    if d.get("entryType") != "Inactive":
+        return None
+    why = d.get("inactiveReason") or {}
+    return InactiveEntry(acc, why.get("inactiveReasonType", ""), list(why.get("mergeDemergeTo") or []))
 
 ResKey = tuple[str, int, str]   # (chain, residue number, insertion code)
 
@@ -188,7 +212,7 @@ def uniprot_sequences(acc: str, root: Path = Path("."), opener=None) -> list[tup
         except (urllib.error.URLError, OSError) as e:
             raise ValueError(f"could not download UniProt entry {acc}: {e}") from e
         if not text.startswith(">"):
-            raise ValueError(f"UniProt returned no sequence for {acc}")
+            raise _why_inactive(acc, opener) or ValueError(f"UniProt returned no sequence for {acc}")
         cache.parent.mkdir(parents=True, exist_ok=True)
         cache.write_text(text)
     out, name, seq = [], None, []
@@ -315,9 +339,11 @@ def _check_chain(p: _Pdb, c: str, res: CheckResult, keep_tags: bool, uniprot: st
     refs = [d for d in p.dbref if d["chain"] == c and d["db"] in ("UNP", "UNIPROT")]
     in_ref: set = set()
     ref_pos: dict = {}      # residue key -> (position in the reference, reference length)
-    if uniprot and not refs:
+    if uniprot:
+        # The user's accession replaces the file's record (for example an entry that is no longer active).
         refs = [dict(chain=c, begin=numbering[0][0], end=numbering[-1][0], acc=uniprot, db_begin=None,
                      db_end=None, _user=True)]
+    compared = False  # Tags are judged only against a reference sequence that was really compared.
     if not refs:
         res.problem(f"Chain {c} has no reference sequence in the file (no UniProt DBREF record), so tags and "
                     "sequence changes cannot be checked.",
@@ -325,9 +351,17 @@ def _check_chain(p: _Pdb, c: str, res: CheckResult, keep_tags: bool, uniprot: st
     for d in refs:
         try:
             candidates = fetch(d["acc"], root)
-        except ValueError as e:
-            res.problem(f"Chain {c}: {e}.", "Check the internet connection, or accept with --accept-problems.")
+        except InactiveEntry as e:
+            res.problem(f"Chain {c}: {e}. Tags and sequence changes cannot be checked.",
+                        f"Choose the right entry with --uniprot (one of {', '.join(e.replacements)}), or accept "
+                        "with --accept-problems. The entries can differ in what follows the chain, which decides "
+                        "how the chain ends are treated (--termini).")
             continue
+        except ValueError as e:
+            res.problem(f"Chain {c}: {e}. Tags and sequence changes cannot be checked.",
+                        "Check the internet connection, or accept with --accept-problems.")
+            continue
+        compared = True
         best = None
         for name, ref_seq in candidates:
             for how in ("file", "aligned"):
@@ -357,8 +391,9 @@ def _check_chain(p: _Pdb, c: str, res: CheckResult, keep_tags: bool, uniprot: st
         if not best["mism"] and not best["unexplained"]:
             res.note(f"Chain {c} matches {label} (residues {best['first']}-{best['last']}).")
 
-    # Tags: residues outside the reference range, or marked as tags.
-    if refs:
+    # Tags: residues outside the reference range, or marked as tags. Never without a compared reference:
+    # then nothing is known to be a tag, and nothing is removed.
+    if refs and compared:
         tags = [k for k in numbering if k not in in_ref
                 or any(w in (p.seqadv.get((c, k[0], k[1]), ("", "", ""))[2]) for w in TAG_WORDS)]
         tag_set = set(tags)
