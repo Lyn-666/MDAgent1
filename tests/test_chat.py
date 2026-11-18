@@ -412,3 +412,36 @@ def test_resume_card_can_switch_to_enhanced_sampling(project):
     assert card["argv"] == ["resume", "--run", "runs/demo", "--enhanced-sampling", "--max-ns", "30"]
     a.confirm(card["id"])
     assert launched == [card["argv"]] and run.exists()
+
+
+def test_user_can_choose_the_save_folder(project, tmp_path_factory, monkeypatch):
+    elsewhere = tmp_path_factory.mktemp("data")
+    monkeypatch.setenv("HOME", str(elsewhere))
+    action = ChatAction(action="plan_run", reply="ok", run_name="dev", pdb="examples/181L.pdb", plan=_plan(),
+                        save_dir="~/md_results")
+    a = _assistant(project, action)
+    launched = []
+    a.runs.launch = lambda name, argv, **kw: launched.append(argv) or 1
+    card = a.message("run 181L, save to ~/md_results")["card"]
+    target = elsewhere / "md_results" / "dev"
+    assert card["save_to"] == str(target.resolve()) and str(target.resolve()) in card["save_text"]
+    assert not target.exists()                                      # Nothing happens before the click.
+    msg = a.confirm(card["id"])
+    link = project / "runs" / "dev"
+    assert target.is_dir() and link.is_symlink() and link.resolve() == target.resolve()
+    assert launched[0][:5] == ["run", "--pdb", "examples/181L.pdb", "--out", "runs/dev"]
+    assert str(target.resolve()) in msg                             # The start message names the real folder.
+    (target / "run.json").write_text("{}")
+    (target / "protein.pdb").write_text("ATOM\n")
+    st = a.runs.status("dev")
+    assert st["folder"] == str(target.resolve()) and st["files"][0]["path"] == "protein.pdb"
+
+
+def test_a_save_folder_with_files_is_refused(project, tmp_path_factory):
+    base = tmp_path_factory.mktemp("busy")
+    (base / "dev").mkdir()
+    (base / "dev" / "old.dcd").write_text("x")
+    action = ChatAction(action="plan_run", reply="ok", run_name="dev", pdb="examples/181L.pdb", plan=_plan(),
+                        save_dir=str(base))
+    r = _assistant(project, action).message("run it")
+    assert r["card"] is None and "已经有文件" in r["reply"]

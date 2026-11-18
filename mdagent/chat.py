@@ -78,6 +78,10 @@ class ChatAction(BaseModel):
         None, description="resume: a new plain MD budget per replica in ns, if the user asks to run longer.")
     resume_enhanced_ns: Optional[float] = Field(
         None, description="resume: a new length per enhanced sampling replica in ns, if the user asks for it.")
+    save_dir: Optional[str] = Field(
+        None, description="plan_run: a folder where the user wants the results saved, exactly as the user wrote it "
+                          "(for example /data/lynn/md or ~/results). MDAgent saves the run in <save_dir>/<run_name>. "
+                          "Null when the user names no folder (then runs/<run_name> in the project).")
     fetch_pdb_ids: list[str] = Field(
         default_factory=list,
         description="PDB IDs (for example 3HTB) that the user wants to use but that are not in the list of input "
@@ -100,6 +104,9 @@ Choose one action for the user's last message:
 - resume: the user asks to continue a run that is stopped, failed or finished. run_name must be in the run list.
   To switch a run to enhanced sampling, set resume_enhanced_sampling. To run longer, set resume_max_ns or
   resume_enhanced_ns. A run that is still running must be stopped first: then propose stop and say so.
+
+Save folder: if the user says where to save the results (a folder path), put it in save_dir exactly as written.
+The card shows the full path before anything starts.
 
 Modes (RunPlan.mode): if the user names the method to use (for example "only plain MD", "use adaptive
 sampling"), set mode "guided": MDAgent runs only that method and posts suggestions. If the user names no method
@@ -147,6 +154,10 @@ TEXT = {
         "cannot_use": "\n\n（MDAgent 无法执行这个提议：{e}）",
         "no_settings": "没有给出运行设置",
         "file_missing": "找不到输入文件 {f}",
+        "save_exists": "保存位置 {path} 已经有文件了，请换一个文件夹或运行名",
+        "save_not_writable": "不能在 {path} 里写文件（没有权限）",
+        "save_failed": "没能在 {path} 建立保存文件夹：{e}",
+        "save_where": "结果保存在：{path}",
         "invalid": "设置不是有效的选项",
         "card_start": "开始新的运行“{name}”",
         "card_stop": "停止运行“{name}”",
@@ -173,6 +184,10 @@ TEXT = {
         "cannot_use": "\n\n(MDAgent cannot carry out this proposal: {e})",
         "no_settings": "no run settings were given",
         "file_missing": "input file {f} not found",
+        "save_exists": "the save location {path} already has files; choose another folder or run name",
+        "save_not_writable": "cannot write in {path} (no permission)",
+        "save_failed": "could not create the save folder {path}: {e}",
+        "save_where": "Results are saved in: {path}",
         "invalid": "the settings are not valid options",
         "card_start": "Start a new run '{name}'",
         "card_stop": "Stop run '{name}'",
@@ -548,8 +563,10 @@ class Assistant:
                     raise CheckProblems(check_text)
             changed = [f"{n} = {getattr(a.plan, n)}" for n, _ in FLAGS + SWITCHES
                        if getattr(a.plan, n) not in (None, False)]
+            save_to = self._save_folder(a.save_dir, name, lang)
             return {"id": uuid.uuid4().hex, "kind": "start", "name": name, "argv": argv,
                     "text": t(lang, "card_start", name=name), "changed": changed, "check": check_text,
+                    "save_to": str(save_to), "save_text": t(lang, "save_where", path=save_to),
                     "command": "python -m mdagent " + " ".join(shlex.quote(x) for x in argv)}
         if a.action in ("stop", "resume"):
             if a.run_name not in names:
@@ -578,6 +595,39 @@ class Assistant:
             return card
         return None
 
+    def _save_folder(self, save_dir: str | None, name: str, lang: str) -> Path:
+        """The folder where the run's files will be. With save_dir, <save_dir>/<name>; runs/<name> then links to it."""
+        default = self.runs.dir / name
+        if not save_dir:
+            return default.resolve()
+        base = Path(os.path.expanduser(save_dir.strip()))
+        if not base.is_absolute():
+            base = self.root / base
+        target = (base / name).resolve()
+        if target == default.resolve():
+            return target
+        if target.exists() and (not target.is_dir() or any(target.iterdir())):
+            raise ValueError(t(lang, "save_exists", path=target))
+        probe = target
+        while not probe.exists():
+            probe = probe.parent
+        if not os.access(probe, os.W_OK):
+            raise ValueError(t(lang, "save_not_writable", path=probe))
+        return target
+
+    def _make_save_link(self, card: dict, lang: str) -> str | None:
+        """Create the chosen folder and the link runs/<name> to it. Returns an error message, or None."""
+        target, link = Path(card.get("save_to", "")), self.runs.dir / card["name"]
+        if not card.get("save_to") or target == link.resolve():
+            return None
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            self.runs.dir.mkdir(exist_ok=True)
+            link.symlink_to(target, target_is_directory=True)
+        except OSError as e:
+            return t(lang, "save_failed", path=target, e=e)
+        return None
+
     def confirm(self, card_id: str, lang: str = "zh") -> str:
         with self.lock:
             card = self.pending.pop(card_id, None)
@@ -586,10 +636,13 @@ class Assistant:
         name = card["name"]
         conv = self.store.get(card.get("chat"))
         if card["kind"] == "start":
+            error = self._make_save_link(card, lang)
+            if error:
+                return error
             pid = self.runs.launch(name, card["argv"])
             conv.runs.append(name)
             conv.seen[name] = 0
-            msg = t(lang, "started_terminal" if self.ui == "terminal" else "started", name=name, pid=pid, host=host(), folder=self.runs.dir.resolve() / name)
+            msg = t(lang, "started_terminal" if self.ui == "terminal" else "started", name=name, pid=pid, host=host(), folder=(self.runs.dir / name).resolve())
         elif card["kind"] == "resume":
             argv = card.get("argv") or ["resume", "--run", f"runs/{name}"]
             pid = self.runs.launch(name, argv, log_suffix=f".resume-{int(time.time())}")

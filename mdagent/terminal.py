@@ -87,6 +87,8 @@ def show_runs(assistant, lang: str, out: Callable[[str], None]) -> None:
 def show_card(card: dict, lang: str, out: Callable[[str], None]) -> None:
     T = TEXT[lang]
     out(f"\n[ {card['text']} ]")
+    if card.get("save_text"):
+        out(card["save_text"])
     if "changed" in card:
         out(T["changed"] + (", ".join(card["changed"]) if card["changed"] else T["none"]))
     if card.get("check"):
