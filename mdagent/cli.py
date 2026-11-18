@@ -90,10 +90,26 @@ def _run_and_record(work, run_dir):
     from .agent import record_failure
 
     try:
-        return work()
+        result = work()
     except Exception as e:
         record_failure(Path(run_dir), e)
         raise
+    _write_report(Path(run_dir))
+    return result
+
+
+def _write_report(run_dir: Path) -> None:
+    """Step 6: the result report, and a message in the chat that says where it is."""
+    from .messages import post
+    from .report import write
+
+    zh, en = write(run_dir)
+    print(f"Result report: {en.resolve()} (Chinese: {zh.resolve()})")
+    post(run_dir, f"完整的结果报告写好了：{zh.resolve()}（英文版 {en.name}）。里面有每个项目的比例和误差、是否达到要求、"
+                  "停下的原因、采取过的动作、可信度和限制、文件位置，以及还剩的问题。",
+         f"The full result report is ready: {en.resolve()} (Chinese: {zh.name}). It has every item's populations "
+         "and errors, whether the goal was met, why it stopped, the actions taken, trust and limits, the files, "
+         "and the open questions.", "done")
 
 
 def _goal_from_args(args):
@@ -534,6 +550,16 @@ def build_parser() -> argparse.ArgumentParser:
     isrc.add_argument("--prmtop", help="Amber topology (.parm7/.prmtop). Residue numbers start at 1.")
     i.set_defaults(func=cmd_info)
 
+    rp = sub.add_parser("report", help="Write the result report of a run again (report.zh.md, report.en.md).")
+    rp.add_argument("--run", required=True)
+    rp.set_defaults(func=cmd_report)
+
+    cp = sub.add_parser("compare", help="Do two runs agree within their errors? For example an early-stopped run "
+                                        "and a longer reference run.")
+    cp.add_argument("--run", required=True)
+    cp.add_argument("--reference", required=True)
+    cp.set_defaults(func=cmd_compare)
+
     st = sub.add_parser("start", help="Start here: choose the language, the language model (Claude or ChatGPT) "
                                       "and where to talk (web page or terminal).")
     st.add_argument("--backend", default=None, choices=["claude", "codex", "api"],
@@ -590,6 +616,22 @@ def cmd_chat(args) -> int:
         return run_terminal(assistant, args.lang)
     serve(Path.cwd(), args.backend, args.port, open_browser=not args.no_browser)
     return 0
+
+
+def cmd_report(args) -> int:
+    from .report import write
+
+    for path in write(Path(args.run)):
+        print(f"Written: {path.resolve()}")
+    return 0
+
+
+def cmd_compare(args) -> int:
+    from .report import compare
+
+    table, agree = compare(Path(args.run), Path(args.reference))
+    print(table)
+    return 0 if agree else 1
 
 
 def cmd_start(args) -> int:
