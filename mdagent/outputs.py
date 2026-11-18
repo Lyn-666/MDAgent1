@@ -15,6 +15,8 @@ from pathlib import Path
 # Result files, as glob patterns relative to the run folder, with a short description.
 # The plain MD pattern also matches the full-system files of adaptive sampling (.full.dcd).
 OUTPUTS = [
+    ("report.*.md", "result report: results with errors, stop reasons, actions, limits (Chinese and English)"),
+    ("status.json", "latest plain MD diagnosis: populations, errors and verdict of every item"),
     ("protein.pdb", "topology for all .dcd files (protein atoms only)"),
     ("replica_*_part*.dcd", "plain MD trajectory of replica i, round k"),
     ("enhanced/replica_*_chunk*.dcd", "enhanced sampling trajectory of replica i, chunk k"),

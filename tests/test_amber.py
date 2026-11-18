@@ -49,6 +49,7 @@ def test_run_with_prepared_amber_system(tmp_path):
                "--replicas", "1", "--first-ns", "0.002", "--max-ns", "0.002", "--equil-ps", "3",
                "--save-ps", "0.5", "--platform", "CPU", "--no-enhanced-sampling", "--out", str(out)])
     assert rc == 0
+    assert "Result report" in (out / "report.en.md").read_text().splitlines()[0].replace("MDAgent result report", "Result report")
     state = json.loads((out / "run.json").read_text())
     assert state["setup"] == {"amber": [str(PRMTOP), str(INPCRD)]}
     assert state["target"] == [["1", 3], ["1", 4], ["1", 5]]
