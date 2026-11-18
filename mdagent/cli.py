@@ -30,13 +30,30 @@ from .target import Target, parse_residue_spec, resolve_target
 def _target_from_args(args) -> Target:
     if args.around_ligand:
         return Target(ligand=args.around_ligand, cutoff_nm=args.cutoff_angstrom / 10.0)
+    if not args.residues and getattr(args, "distances", None):
+        # A distance run without a target region: the target is the residues of the distance atoms.
+        from .observables import parse_distances
+
+        res = {(c, n) for s in parse_distances(args.distances) for c, n in s.residues()}
+        return Target(residues=tuple(sorted(res, key=lambda k: (k[0] or "", k[1]))))
     return Target(residues=parse_residue_spec(args.residues))
+
+
+def _check_distances(args, structure: str | Path) -> list:
+    """Parse --distances and find every atom in the structure. Raises ValueError with a clear message."""
+    import mdtraj as md
+
+    from .observables import distance_atoms, parse_distances
+
+    specs = parse_distances(args.distances)
+    distance_atoms(md.load_topology(str(structure)), specs)
+    return specs
 
 
 def _print_summary(decisions, enhanced_labels, run_dir) -> None:
     from .outputs import describe
 
-    flagged = [d.residue for d in decisions if d.action == "enhanced_sampling"]
+    flagged = [d.residue for d in decisions if d.action in ("enhanced_sampling", "stalled")]
     print("\nSummary")
     if not flagged:
         print("Plain MD sampled all target side chains well. No enhanced sampling was needed.")
@@ -82,7 +99,10 @@ def _run_and_record(work, run_dir):
 def _goal_from_args(args):
     from .agent import PERMISSIONS, Goal
 
-    goal = Goal.for_mode(args.mode, description=args.goal, precision=args.precision)
+    from .observables import QUANTITIES
+
+    goal = Goal.for_mode(args.mode, description=args.goal, precision=args.precision,
+                         quantity=QUANTITIES[getattr(args, "quantity", "chi1")])
     if args.allow is not None:
         allowed = [a.strip() for a in args.allow.split(",") if a.strip() and a.strip() != "none"]
         unknown = [a for a in allowed if a not in PERMISSIONS]
@@ -180,6 +200,22 @@ def cmd_run(args) -> int:
         print(f"error: {out} already has a run. Use 'resume --run {out}' to continue it.",
               file=sys.stderr)
         return 2
+    if args.distances and args.quantity == "chi1":
+        args.quantity = "distance"
+        print("Note: --distances given, so the quantity is distance.")
+    if args.quantity == "chi1" and not (args.residues or args.around_ligand):
+        print("error: give the target with --residues or --around-ligand.", file=sys.stderr)
+        return 2
+    if args.quantity == "distance":
+        if not args.distances:
+            print("error: --quantity distance needs --distances, for example \"A:88:OH-A:111:CG1@0.6\".",
+                  file=sys.stderr)
+            return 2
+        if args.sampling == "adaptive":
+            print("error: adaptive sampling does not support --quantity distance yet.", file=sys.stderr)
+            return 2
+        if args.pdb:
+            _check_distances(args, args.pdb)  # Fail before building if an atom is not there.
     if args.enhanced_max_residues < 1:
         print("error: --enhanced-max-residues must be 1 or more.", file=sys.stderr)
         return 2
@@ -248,6 +284,7 @@ def cmd_run(args) -> int:
 
     if check is not None:
         built, setup = _build_from_pdb(args, keys, out, check.remove_residues, check.cap_ends)
+    specs = _check_distances(args, out / "protein.pdb") if args.quantity == "distance" else []
 
     loop = LoopSettings(
         first_ns=min(args.first_ns, args.max_ns),
@@ -267,6 +304,7 @@ def cmd_run(args) -> int:
         sampling=args.sampling,
         mode=args.mode,
         goal=asdict(_goal_from_args(args)),
+        distances=[s.label for s in specs],
         adaptive={"policy": args.adaptive_policy, "n_clusters": args.adaptive_clusters,
                   "full_interval_ps": args.full_save_ps} if args.sampling == "adaptive" else {},
         enhanced={"enabled": not args.no_enhanced_sampling,
@@ -279,7 +317,9 @@ def cmd_run(args) -> int:
         print(f"To start MD: python -m mdagent resume --run {out}")
         return 0
     goal = state.the_goal()
-    print(f"Goal: {goal.quantity} of the target side chains, standard error at most {goal.precision:g}"
+    what = (f"near/far populations of {', '.join(state.distances)}" if state.distances
+            else "chi1 populations of the target side chains")
+    print(f"Goal: {what}, standard error at most {goal.precision:g}"
           + (f" ({goal.description})" if goal.description else "") + ".")
     print("The agent may by itself: " + (", ".join(goal.permissions) or "nothing (it only suggests)") + ".")
     print(f"Plan: {args.replicas} replicas. Round 1 is {loop.first_ns:g} ns per replica. "
@@ -366,8 +406,11 @@ def _record_how_the_run_ends() -> None:
     import time
 
     print(f"Process {os.getpid()} started at {time.strftime('%Y-%m-%d %H:%M:%S')}.")
-    faulthandler.enable()
-    faulthandler.register(signal.SIGTERM, chain=True)
+    try:
+        faulthandler.enable()
+        faulthandler.register(signal.SIGTERM, chain=True)
+    except (OSError, ValueError, AttributeError):
+        pass  # stderr is not a real file (for example inside a test); nothing to write the stack to.
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -391,7 +434,13 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Build and run even if the structure check finds problems.")
     r.add_argument("--equil-ps", type=float, default=600.0,
                    help="Equilibration length: restrained heating, restrained NPT, restraint release, free NPT.")
-    g = r.add_mutually_exclusive_group(required=True)
+    r.add_argument("--quantity", default="chi1", choices=["chi1", "distance"],
+                   help="What you want to know. chi1 (default): the rotamer states of the target side chains. "
+                        "distance: how often atom distances are near or far (give them with --distances).")
+    r.add_argument("--distances", default=None,
+                   help="For --quantity distance: atom pairs and cutoffs (nm), separated by ';', for example "
+                        "\"A:88:OH-A:111:CG1@0.6;A:99:CA-A:133:CA@1.2\". The chain may be left out.")
+    g = r.add_mutually_exclusive_group(required=False)
     g.add_argument("--residues", help="Target residues, for example 'A:99-120,A:133'.")
     g.add_argument("--around-ligand", help="Target = residues near this ligand (residue name in the PDB).")
     r.add_argument("--cutoff-angstrom", type=float, default=5.0)

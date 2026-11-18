@@ -107,11 +107,23 @@ def count_transitions(states: np.ndarray) -> int:
     return int(np.count_nonzero(s[1:] != s[:-1]))
 
 
-def occupancy(states: np.ndarray) -> dict[str, float]:
+def occupancy(states: np.ndarray, names: list[str] = STATE_NAMES) -> dict[str, float]:
     s = states[states >= 0]
     if len(s) == 0:
-        return {name: 0.0 for name in STATE_NAMES}
-    return {name: float(np.mean(s == i)) for i, name in enumerate(STATE_NAMES)}
+        return {name: 0.0 for name in names}
+    return {name: float(np.mean(s == i)) for i, name in enumerate(names)}
+
+
+def populations_with_errors(states: list[np.ndarray], names: list[str]) -> tuple[dict, dict, bool]:
+    """Mean population of each state over replicas, its error (time correlation and replica spread),
+    and whether two replicas differ beyond their errors."""
+    pops, errs, differ = {}, {}, False
+    for i, name in enumerate(names):
+        hits = [(s_[s_ >= 0] == i).astype(float) for s_ in states]
+        mean, err, dis = combine_replicas([float(h.mean()) if h.size else 0.0 for h in hits],
+                                          [block_standard_error(h) for h in hits])
+        pops[name], errs[name], differ = round(mean, 3), round(err, 3), differ or dis
+    return pops, errs, differ
 
 
 @dataclass
@@ -128,10 +140,14 @@ class ResidueReport:
     reason: str = ""
     populations: dict | None = None   # Mean over replicas.
     standard_error: dict | None = None  # Of each population, allowing for time correlation.
+    name: str = ""            # Label of an item that is not a residue (for example a distance).
+    quantity: str = "chi1"    # What has the states: "chi1" or "distance" (observables.py).
+    extra: dict | None = None  # Other numbers worth showing, for example the mean distance.
+    replicas_differ: bool | None = None  # Replica populations differ beyond their errors (None: not computed).
 
     @property
     def label(self) -> str:
-        return f"{self.resname}{self.resseq}"
+        return self.name or f"{self.resname}{self.resseq}"
 
     @property
     def total_ns(self) -> float:
@@ -152,7 +168,7 @@ class ResidueReport:
             return 0.0
         return max(
             max(o[n] for o in self.occupancies) - min(o[n] for o in self.occupancies)
-            for n in STATE_NAMES
+            for n in self.occupancies[0]
         )
 
     def time_between_flips_text(self) -> str:
@@ -166,27 +182,30 @@ class ResidueReport:
 def judge(report: ResidueReport, min_flips_per_replica: int = 4, precision: float | None = None) -> None:
     total = sum(report.transitions)
     n = len(report.transitions)
-    if len(set(report.dominant)) > 1:
+    q = "chi1" if report.quantity == "chi1" else "The distance"
+    if len(set(report.dominant)) > 1 and (total == 0 or report.replicas_differ is not False):
         # Checked first: replicas can end up in different states with zero flips
-        # during production, if they separated during equilibration.
+        # during production, if they separated during equilibration. With flips, a different
+        # most-populated state counts only if the populations differ beyond their errors:
+        # with two states near 50/50 the most-populated one differs by chance.
         report.verdict = "replicas_disagree"
         report.reason = (f"Replicas spend most time in different states ({', '.join(report.dominant)}). "
-                         f"chi1 flips per replica: {report.transitions}.")
+                         f"{q} state changes per replica: {report.transitions}.")
     elif total == 0:
         report.verdict = "no_flip"
-        report.reason = (f"chi1 stayed in state {report.dominant[0]} in all {n} replicas. "
+        report.reason = (f"{q} stayed in state {report.dominant[0]} in all {n} replicas. "
                          "It may be trapped, or it may have only one stable state.")
     elif min(report.transitions) < min_flips_per_replica:
         report.verdict = "rare_flips"
-        report.reason = (f"chi1 flips per replica: {report.transitions}. "
+        report.reason = (f"{q} state changes per replica: {report.transitions}. "
                          f"Fewer than {min_flips_per_replica} in at least one replica.")
     elif precision is not None and report.standard_error and max(report.standard_error.values()) > precision:
         report.verdict = "imprecise"
-        report.reason = (f"chi1 flips per replica: {report.transitions}, but the largest population error is "
+        report.reason = (f"{q} state changes per replica: {report.transitions}, but the largest population error is "
                          f"{max(report.standard_error.values()):.3f}, more than the requested {precision:g}.")
     else:
         report.verdict = "ok"
-        report.reason = f"chi1 flips per replica: {report.transitions}."
+        report.reason = f"{q} state changes per replica: {report.transitions}."
 
 
 def judge_pooled(report: ResidueReport, min_total_flips: int) -> None:
@@ -267,13 +286,7 @@ def diagnose_trajectories(
             total_ns_override=pooled_total_ns,
         )
         if pooled_total_ns is None:
-            pops, errs = {}, {}
-            for i, name in enumerate(STATE_NAMES):
-                hits = [(s_[s_ >= 0] == i).astype(float) for s_ in states]
-                mean, err, _ = combine_replicas([float(h.mean()) if h.size else 0.0 for h in hits],
-                                                [block_standard_error(h) for h in hits])
-                pops[name], errs[name] = round(mean, 3), round(err, 3)
-            rep.populations, rep.standard_error = pops, errs
+            rep.populations, rep.standard_error, rep.replicas_differ = populations_with_errors(states, STATE_NAMES)
             judge(rep, min_flips_per_replica, precision)
         else:
             judge_pooled(rep, min_flips_per_replica * (n_replicas or len(trajs)))
@@ -321,17 +334,19 @@ def _quiet_c_output():
 
 
 def load_run(run_dir: str | Path, target: list[ResidueKey], n_parts: int,
-             join: bool = True) -> list[md.Trajectory]:
+             join: bool = True, atoms: list[int] | None = None) -> list[md.Trajectory]:
     """Load parts 0 .. n_parts-1 of each replica and join them into one trajectory per replica.
 
-    Only the atoms of the target residues are kept, so long runs fit in memory.
+    Only the atoms of the target residues are kept, so long runs fit in memory. With `atoms`
+    (indices in protein.pdb), exactly those atoms are kept, in that order.
     With join=False, return every part as its own trajectory: replica 0 parts,
     then replica 1 parts, and so on.
     """
     run_dir = Path(run_dir)
     top = md.load_topology(str(run_dir / "protein.pdb"))
     wanted = set(target)
-    atoms = [a.index for a in top.atoms if (a.residue.chain.chain_id, a.residue.resSeq) in wanted]
+    if atoms is None:
+        atoms = [a.index for a in top.atoms if (a.residue.chain.chain_id, a.residue.resSeq) in wanted]
     replicas = sorted({int(p.name.split("_")[1]) for p in run_dir.glob("replica_*_part000.dcd")})
     if not replicas:
         raise FileNotFoundError(f"No trajectories in {run_dir}.")

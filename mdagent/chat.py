@@ -105,6 +105,11 @@ Choose one action for the user's last message:
   To switch a run to enhanced sampling, set resume_enhanced_sampling. To run longer, set resume_max_ns or
   resume_enhanced_ns. A run that is still running must be stopped first: then propose stop and say so.
 
+What to measure: side-chain conformations (rotamers) of a region -> target_kind "ligand" or "residues".
+A distance between atoms (a pocket opening or closing, a contact forming, a gate) -> target_kind "distance"
+with `distances`. MDAgent has enhanced sampling only for side chains; for distances it runs plain MD and says
+when that is not enough.
+
 Save folder: if the user says where to save the results (a folder path), put it in save_dir exactly as written.
 The card shows the full path before anything starts.
 
@@ -551,6 +556,12 @@ class Assistant:
                 build_parser().parse_args(argv)  # The same checks as the command line.
             except SystemExit:
                 raise ValueError(t(lang, "invalid"))
+            if a.plan.target_kind == "distance" and a.pdb:
+                import mdtraj as md
+
+                from .observables import distance_atoms, parse_distances
+
+                distance_atoms(md.load_topology(str(self.root / a.pdb)), parse_distances(a.plan.distances))
             check_text = None
             if a.pdb and not a.prmtop:
                 from .check import check_structure
