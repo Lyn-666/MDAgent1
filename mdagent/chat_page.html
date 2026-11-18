@@ -168,6 +168,7 @@ function addBubble(role, body, card, extra) {
     const c = document.createElement("div");
     c.className = "card";
     c.innerHTML = `<div>${escapeHtml(card.text)}</div>` +
+      (card.save_text ? `<div>${escapeHtml(card.save_text)}</div>` : "") +
       (card.changed && card.changed.length ? `<div>${L().changed}${escapeHtml(card.changed.join(", "))}</div>` : "") +
       (card.command ? `<code>${escapeHtml(card.command)}</code>` : "") +
       (card.check ? `<details><summary>${L().check}</summary><pre class="check">${escapeHtml(card.check)}</pre></details>` : "");
