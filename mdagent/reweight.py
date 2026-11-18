@@ -37,7 +37,7 @@ import numpy as np
 
 from .diagnose import STATE_NAMES, assign_states, count_transitions
 from .enhanced import KB_KJ, MetadSettings, deposit
-from .uncertainty import block_standard_error, combine_replicas, effective_samples
+from .uncertainty import block_standard_error, combine_replicas, effective_samples, error_parts
 
 KJ_PER_KCAL = 4.184
 
@@ -119,10 +119,14 @@ def analyze(run_dir: Path, labels: list[str], n_replicas: int, s: MetadSettings,
     residues = []
     for i, label in enumerate(labels):
         reps = [p[i] for p in per_rep]
-        pops, errs, disagree = {}, {}, False
+        pops, errs, disagree, worst, from_replicas = {}, {}, False, -1.0, False
         for k in STATE_NAMES:
-            mean, err, dis = combine_replicas([r["populations"][k] for r in reps], [r["errors"][k] for r in reps])
+            values, errors = [r["populations"][k] for r in reps], [r["errors"][k] for r in reps]
+            mean, err, dis = combine_replicas(values, errors)
             pops[k], errs[k], disagree = mean, err, disagree or dis
+            if err > worst:
+                within, between = error_parts(values, errors)
+                worst, from_replicas = err, between > within
         fe = free_energies_kcal(pops, kt)
         top = max(pops, key=pops.get)
         fe_err = {k: (round(kt / KJ_PER_KCAL * math.sqrt((errs[k] / pops[k]) ** 2 + (errs[top] / pops[top]) ** 2), 2)
@@ -136,6 +140,7 @@ def analyze(run_dir: Path, labels: list[str], n_replicas: int, s: MetadSettings,
             "per_replica": [{k: round(v, 3) for k, v in r["populations"].items()} for r in reps],
             "transitions_per_replica": [r["transitions"] for r in reps],
             "replicas_disagree": disagree,
+            "error_from_replicas": from_replicas,
         })
     return {"ns_per_replica": round(min(ns), 6), "n_replicas": len(per_rep), "effective_samples": n_eff,
             "weights_degenerate": min(n_eff) < rule.min_effective_samples,

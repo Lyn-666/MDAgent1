@@ -117,7 +117,8 @@ def diagnose_distances(trajs: list[md.Trajectory], specs: list[DistanceSpec], pa
                             dominant=[max(o, key=o.get) for o in occ], ns_per_replica=ns_per_replica,
                             extra={"mean_nm_per_replica": [round(float(v.mean()), 3) for v in values],
                                    "cutoff_nm": spec.cutoff_nm})
-        rep.populations, rep.standard_error, rep.replicas_differ = populations_with_errors(states, DISTANCE_STATES)
+        (rep.populations, rep.standard_error, rep.replicas_differ,
+         rep.error_from_replicas) = populations_with_errors(states, DISTANCE_STATES)
         judge(rep, min_flips_per_replica, precision)
         reports.append(rep)
     return rank(reports)

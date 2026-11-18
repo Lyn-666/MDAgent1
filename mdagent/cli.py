@@ -102,7 +102,8 @@ def _goal_from_args(args):
     from .observables import QUANTITIES
 
     goal = Goal.for_mode(args.mode, description=args.goal, precision=args.precision,
-                         quantity=QUANTITIES[getattr(args, "quantity", "chi1")])
+                         quantity=QUANTITIES[getattr(args, "quantity", "chi1")],
+                         max_replicas=getattr(args, "max_replicas", 10), extend_factor=getattr(args, "extend_factor", 2.0))
     if args.allow is not None:
         allowed = [a.strip() for a in args.allow.split(",") if a.strip() and a.strip() != "none"]
         unknown = [a for a in allowed if a not in PERMISSIONS]
@@ -479,6 +480,10 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--allow", default=None,
                    help="What the agent may do by itself, comma separated: extend, add_replicas, switch_method, "
                         "stop_early; or 'none'. Default: all in auto mode, none in guided mode.")
+    r.add_argument("--max-replicas", type=int, default=10,
+                   help="With permission add_replicas, the agent adds replicas up to this number (default 10).")
+    r.add_argument("--extend-factor", type=float, default=2.0,
+                   help="With permission extend, the agent may run up to this many times the first budget.")
     r.add_argument("--sampling", default="continue", choices=["continue", "adaptive"],
                    help="continue: each replica continues its own trajectory (default). adaptive: from "
                         "round 2, AdaptivePy chooses the starting frames (pip install adaptivepy-sampling).")

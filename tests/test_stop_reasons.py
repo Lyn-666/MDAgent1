@@ -66,7 +66,10 @@ def test_goal_reached_stops_early_when_allowed(tmp_path, fake_run):
 def test_all_replicas_trapped_is_stalled_not_converged(tmp_path, fake_run):
     # Tiny errors and identical replicas, but no transitions: never "reached".
     ns, outcome, msgs = fake_run(_state(tmp_path, ["switch_method", "stop_early"]), se_at=lambda ns: 0.0, transitions=(0, 0))
-    assert ns == 6.0 and outcome["reason"] == "stalled"
+    # Stuck at the checks after 2, 3 and 4 ns (min_ns is 2): it stops early instead of using all 6 ns.
+    assert ns == 4.0 and outcome["reason"] == "stalled"
+    actions = RunState.load(tmp_path).notes["actions"]
+    assert actions[-1]["action"] == "stop" and "3 checks" in actions[-1]["reason"]
     assert any("推不动" in m["zh"] for m in msgs) and msgs[-1]["kind"] == "suggestion"
 
 
@@ -104,3 +107,27 @@ def test_plain_md_stop_reasons(tmp_path):
         state.notes = {}
         _post_plain_md_messages(tmp_path, state, decisions, 0.0)
         assert state.notes["plain_md_outcome"]["reason"] == reason
+
+
+def test_enhanced_adds_a_replica_when_the_spread_dominates(tmp_path, fake_run, monkeypatch):
+    base = _result
+
+    def spread_result(ns, se, transitions):
+        res = base(ns, se, transitions)
+        res["residues"][0]["error_from_replicas"] = True
+        return res
+    monkeypatch.setattr(__import__(__name__), "_result", spread_result)
+    state = _state(tmp_path, ["switch_method", "stop_early", "add_replicas"])
+    ns, outcome, msgs = fake_run(state, se_at=lambda ns: 0.08 if ns < 3 else 0.03)
+    saved = RunState.load(tmp_path)
+    assert saved.enhanced["settings"]["n_replicas"] == 4                  # One more at the checks after 1 and 2 ns.
+    assert any(a["action"] == "add_replicas" and a["executed"] for a in saved.notes["actions"])
+    assert json.loads((tmp_path / "enhanced" / "replica_3.json").read_text())["ns_done"] == 3.0  # Caught up.
+
+
+def test_enhanced_runs_longer_than_its_budget_only_with_permission(tmp_path, fake_run):
+    ns, outcome, _ = fake_run(_state(tmp_path, ["switch_method", "stop_early", "extend"]),
+                              se_at=lambda ns: 0.08 if ns < 8 else 0.03)
+    assert ns == 8.0 and outcome["reason"] == "target_reached"               # 6 ns budget, extended.
+    saved = RunState.load(tmp_path)
+    assert any(a["action"] == "extend_budget" and a["executed"] for a in saved.notes["actions"])

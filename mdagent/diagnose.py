@@ -42,7 +42,7 @@ import mdtraj as md
 import numpy as np
 
 from .target import ResidueKey
-from .uncertainty import block_standard_error, combine_replicas
+from .uncertainty import block_standard_error, combine_replicas, error_parts
 
 STATE_CENTERS_DEG = {"g+": 60.0, "t": 180.0, "g-": -60.0}
 STATE_NAMES = list(STATE_CENTERS_DEG)
@@ -114,16 +114,21 @@ def occupancy(states: np.ndarray, names: list[str] = STATE_NAMES) -> dict[str, f
     return {name: float(np.mean(s == i)) for i, name in enumerate(names)}
 
 
-def populations_with_errors(states: list[np.ndarray], names: list[str]) -> tuple[dict, dict, bool]:
+def populations_with_errors(states: list[np.ndarray], names: list[str]) -> tuple[dict, dict, bool, bool]:
     """Mean population of each state over replicas, its error (time correlation and replica spread),
-    and whether two replicas differ beyond their errors."""
-    pops, errs, differ = {}, {}, False
+    whether two replicas differ beyond their errors, and whether the largest error comes mainly from
+    the spread between replicas (then more replicas help more than longer ones)."""
+    pops, errs, differ, worst, from_replicas = {}, {}, False, -1.0, False
     for i, name in enumerate(names):
         hits = [(s_[s_ >= 0] == i).astype(float) for s_ in states]
-        mean, err, dis = combine_replicas([float(h.mean()) if h.size else 0.0 for h in hits],
-                                          [block_standard_error(h) for h in hits])
+        values = [float(h.mean()) if h.size else 0.0 for h in hits]
+        errors = [block_standard_error(h) for h in hits]
+        mean, err, dis = combine_replicas(values, errors)
         pops[name], errs[name], differ = round(mean, 3), round(err, 3), differ or dis
-    return pops, errs, differ
+        if err > worst:
+            within, between = error_parts(values, errors)
+            worst, from_replicas = err, between > within
+    return pops, errs, differ, from_replicas
 
 
 @dataclass
@@ -144,6 +149,7 @@ class ResidueReport:
     quantity: str = "chi1"    # What has the states: "chi1" or "distance" (observables.py).
     extra: dict | None = None  # Other numbers worth showing, for example the mean distance.
     replicas_differ: bool | None = None  # Replica populations differ beyond their errors (None: not computed).
+    error_from_replicas: bool = False    # The largest error comes mainly from the spread between replicas.
 
     @property
     def label(self) -> str:
@@ -286,7 +292,8 @@ def diagnose_trajectories(
             total_ns_override=pooled_total_ns,
         )
         if pooled_total_ns is None:
-            rep.populations, rep.standard_error, rep.replicas_differ = populations_with_errors(states, STATE_NAMES)
+            (rep.populations, rep.standard_error, rep.replicas_differ,
+             rep.error_from_replicas) = populations_with_errors(states, STATE_NAMES)
             judge(rep, min_flips_per_replica, precision)
         else:
             judge_pooled(rep, min_flips_per_replica * (n_replicas or len(trajs)))
