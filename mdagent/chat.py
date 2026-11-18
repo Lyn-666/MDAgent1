@@ -452,9 +452,12 @@ class Assistant:
             new = []
             for name in conv.runs:
                 msgs = read_messages(self.runs.dir / name)
-                for m in msgs[conv.seen.get(name, 0):]:
+                for i in range(conv.seen.get(name, 0), len(msgs)):
+                    m = msgs[i]
                     text = f"[{name}] " + (m.get(lang) or m.get("en") or "")
-                    new.append({"role": "assistant", "text": text, "run": name, "kind": m.get("kind", "info")})
+                    # The id lets the page show each message once, even if it also arrives with the history.
+                    new.append({"role": "assistant", "text": text, "run": name, "kind": m.get("kind", "info"),
+                                "id": f"{name}#{i}"})
                 conv.seen[name] = len(msgs)
             if new:
                 conv.history += new
