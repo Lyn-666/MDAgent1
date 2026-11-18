@@ -89,8 +89,9 @@ class RunPlan(BaseModel):
     chains: Optional[str] = Field(None, description="Keep only these protein chains, for example 'A' or 'A,B'.")
     keep_tags: Optional[bool] = Field(None, description="True: keep tag residues at the chain ends. Default false "
                                                         "(tags are removed).")
-    uniprot: Optional[str] = Field(None, description="UniProt accession of the reference sequence, only for files "
-                                                     "that have none.")
+    uniprot: Optional[str] = Field(None, description="UniProt accession of the reference sequence: for files that "
+                                                     "have none, or when the structure check says the file's entry is "
+                                                     "no longer active (use the one the user chooses).")
     termini: Optional[Literal["auto", "charged", "capped"]] = Field(
         None, description="Chain ends. auto (default): neutral ACE/NME caps where the real protein continues "
                           "beyond the structure, charged ends otherwise. charged: always NH3+/COO-. capped: always "

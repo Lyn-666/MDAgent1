@@ -45,7 +45,7 @@
 代码在 `mdagent/`，完整流程写在 README 的“完整流程”。
 
 - `fetch.py`：按 PDB 编号从 RCSB 下载到 `structures/<ID>.pdb`。
-- `check.py`：搭体系前的结构检查。按 DBREF/SEQADV 和 UniProt（含异构体，缓存在 `structures/uniprot/`）逐位比对；找标签、多拷贝、金属、末端帽、未知残基、长缺口、断链；判断每条链两端是否要加帽。
+- `check.py`：搭体系前的结构检查。拿不到参考序列（下载失败或 UniProt 条目已失效）时不判断标签、不删任何残基；失效条目会列出替代编号；`--uniprot` 可以替换文件里的编号。 按 DBREF/SEQADV 和 UniProt（含异构体，缓存在 `structures/uniprot/`）逐位比对；找标签、多拷贝、金属、末端帽、未知残基、长缺口、断链；判断每条链两端是否要加帽。
 - `build.py`：搭体系（PDBFixer）。选链、去标签、加帽（CHARMM 下帽并入末端残基作为补丁，Amber 下是单独残基）、质子化、加水和离子。`load_amber` 原样读入用户准备好的 Amber 体系（配体保留）。
 - `protonation.py`：PROPKA 和手动质子化。
 - `simulate.py`：分段跑 MD，可续跑；`equilibrate` 是分阶段平衡。
@@ -57,7 +57,7 @@
 - `messages.py`：运行发给对话的消息。
 - `policy.py`：第 4 步，每轮后选下一步动作（停、加长、加重复并补跑、超出预算延长、建议重新播种），先查权限；没有权限就在对话里建议。记录在 `run.json` 的 `notes.actions`。增强采样的同类规则写在 `agent.run_all` 的循环里。
 - `report.py`：第 6 步，运行结束时写 `report.zh.md`、`report.en.md`（结论、误差、停下原因、动作、限制、文件、遗留问题）；`compare` 判断两个运行是否在误差内一致（|z| ≤ 2）。命令 `report`、`compare`。
-- `scripts/step5_validation.sh`：第 5 步在 GPU 上跑的场景（达标、困住、预算用完、增强采样，加参考运行），汇总在 `runs/val_summary.txt`。
+- `scripts/step5_validation.sh`：第 5 步在 GPU 上跑的场景（达标、困住、预算用完、增强采样，加参考运行），汇总在 `runs/val_<蛋白>_summary.txt`。默认用 1UBQ（用户要求换掉 181L 作为主例子；`--uniprot P0CG48 --termini charged`），也可用 181L。
 - `observables.py`：结果量层。每个量换成逐帧的状态，再用同一套诊断、误差和停下判断。`chi1`（g+/t/g-）和 `distance`（近/远，`A:88:OH-A:111:CG1@0.6`，阈值 ±0.05 nm 的缓冲）。`--quantity`、`--distances`；对话里 `target_kind` 为 `distance`。
 - `adaptive.py`：可选的 AdaptivePy 自适应采样（`--sampling adaptive`）。
 - `envcheck.py`：启动时检查平台和力场文件。

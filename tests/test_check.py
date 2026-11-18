@@ -122,3 +122,43 @@ def test_cap_ends_follow_the_reference_sequence(root):
     r = check_structure(REPO / "examples" / "181L.pdb", root=root)
     assert r.cap_ends == {"A": (False, True)}   # Starts at Met1; residues 163-164 are missing.
     assert any("covers residues 1-162 of the 164-residue reference" in t for t in _texts(r, "note"))
+
+
+def test_without_a_usable_reference_nothing_is_removed(root):
+    """A reference that cannot be fetched must not turn the whole protein into "tags" to remove."""
+    from mdagent.check import InactiveEntry
+
+    def inactive(acc, root):
+        raise InactiveEntry(acc, "DEMERGED", ["P0CG47", "P0CG48"])
+
+    def offline(acc, root):
+        raise ValueError(f"could not download UniProt entry {acc}: no network")
+
+    for fetch, words in [(inactive, "no longer active: it was split into P0CG47, P0CG48"),
+                         (offline, "could not download")]:
+        r = check_structure(REPO / "examples" / "181L.pdb", root=root, fetch=fetch)
+        assert r.remove_residues == []
+        problems = _texts(r, "problem")
+        assert any(words in t for t in problems) and not any("tag" in t for t in _texts(r, "note"))
+
+
+def test_uniprot_option_replaces_the_files_reference(root):
+    # 181L names P00720; giving another entry must use it (here it does not fit, so differences appear).
+    r = check_structure(REPO / "examples" / "181L.pdb", root=root, uniprot="P01116")
+    assert any("UniProt P01116" in t for t in _texts(r, "problem") + _texts(r, "note"))
+
+
+def test_an_inactive_entry_is_explained(tmp_path):
+    import io
+    import json
+
+    from mdagent.check import InactiveEntry, uniprot_sequences
+
+    def opener(url, timeout):
+        if url.endswith(".json"):
+            body = {"entryType": "Inactive", "inactiveReason": {"inactiveReasonType": "DEMERGED",
+                                                                "mergeDemergeTo": ["P0CG47", "P0CG48"]}}
+            return io.BytesIO(json.dumps(body).encode())
+        return io.BytesIO(b"")
+    with pytest.raises(InactiveEntry, match="split into P0CG47, P0CG48"):
+        uniprot_sequences("P62988", tmp_path, opener=opener)

@@ -159,6 +159,9 @@ def _structure_check(args):
     check = check_structure(args.pdb, chains=_chain_list(args.chains), keep_tags=args.keep_tags,
                             uniprot=args.uniprot, root=Path.cwd())
     print(check.report())
+    termini = getattr(args, "termini", "auto")
+    if termini != "auto":
+        print(f"  note: chain ends: --termini {termini} replaces the suggestion above.")
     return check
 
 
@@ -654,7 +657,8 @@ def cmd_fetch(args) -> int:
 def _add_check_options(p) -> None:
     p.add_argument("--chains", help="Keep only these protein chains, for example 'A' or 'A,B'.")
     p.add_argument("--keep-tags", action="store_true", help="Keep tag residues at the chain ends.")
-    p.add_argument("--uniprot", help="UniProt accession of the reference sequence, for files without one.")
+    p.add_argument("--uniprot", help="UniProt accession of the reference sequence: for files without one, or to "
+                                     "replace the file's (for example an entry that is no longer active).")
 
 
 def cmd_check(args) -> int:
