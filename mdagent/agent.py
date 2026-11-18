@@ -140,6 +140,8 @@ class Goal:
     description: str = ""          # The user's own words.
     precision: float = 0.05
     permissions: list = field(default_factory=lambda: list(PERMISSIONS))
+    max_replicas: int = 10          # add_replicas stops here (literature: 5 to 10 replicas).
+    extend_factor: float = 2.0      # extend may run to this many times the first budget.
 
     @classmethod
     def for_mode(cls, mode: str, **kw) -> "Goal":
@@ -271,6 +273,12 @@ def run_loop(
         full_ps = AdaptiveSettings.from_dict(state.adaptive).full_interval_ps if adaptive else None
         starts = _adaptive_starts(run_dir, state, part, log) if adaptive and part > 0 else None
         for i in range(state.n_replicas):
+            if not adaptive:
+                for p in range(part):  # A replica added later (policy: add_replicas) first catches up.
+                    if not part_path(run_dir, i, p, ".state.xml").exists():
+                        log(f"replica {i}: catching up with round {p + 1} ({state.rounds_ns[p]:g} ns).")
+                        run_segment(files, run_dir, i, p, state.base_seed + 1000 * p + i, state.rounds_ns[p],
+                                    state.md, log)
             if part_path(run_dir, i, part, ".state.xml").exists():
                 log(f"replica {i}: round {part + 1} is already complete.")
                 continue
@@ -309,6 +317,7 @@ def _diagnose_and_decide(run_dir: Path, state: RunState):
         reports = _diagnose_distances(run_dir, state)
         decisions, next_ns = decide(reports, state.ns_done, state.loop, state.allowed("switch_method"),
                                     bias_available=False)
+        next_ns = _apply_policy(run_dir, state, reports, decisions, next_ns)
         _post_plain_md_messages(run_dir, state, decisions, next_ns)
         return reports, decisions, next_ns
     fixed = fixed_chi1_residues(run_dir / "protein.pdb")
@@ -324,8 +333,25 @@ def _diagnose_and_decide(run_dir: Path, state: RunState):
             min_flips_per_replica=state.loop.min_flips_per_replica, fixed=fixed,
             precision=state.the_goal().precision)
     decisions, next_ns = decide(reports, state.ns_done, state.loop, state.allowed("switch_method"))
+    next_ns = _apply_policy(run_dir, state, reports, decisions, next_ns)
     _post_plain_md_messages(run_dir, state, decisions, next_ns)
     return reports, decisions, next_ns
+
+
+def _apply_policy(run_dir: Path, state: RunState, reports, decisions, next_ns: float) -> float:
+    """Choose the next action (policy.py) once per round; a resumed run keeps the choice it made."""
+    from .policy import plain_md_next
+
+    key = {"ns": state.ns_done, "max_ns": state.loop.max_ns, "n_replicas": state.n_replicas,
+           "permissions": sorted(state.the_goal().permissions)}
+    done = state.notes.get("policy_round")
+    if done and done.get("key") == key:
+        return done["next_ns"]  # Same round, same budget: keep the choice (no second message, no second replica).
+    next_ns = plain_md_next(run_dir, state, reports, decisions, next_ns)
+    key.update(max_ns=state.loop.max_ns, n_replicas=state.n_replicas)  # As the policy left them.
+    state.notes["policy_round"] = {"key": key, "next_ns": next_ns}
+    state.save(run_dir)
+    return next_ns
 
 
 def _diagnose_distances(run_dir: Path, state: RunState) -> list[ResidueReport]:
@@ -421,6 +447,7 @@ def run_all(
     Returns the plain MD decisions and the labels of the residues that got enhanced sampling.
     """
     from .enhanced import MetadSettings, ns_done, run_replica
+    from .policy import Action, record
     from .reweight import StopRule, analyze, assess, format_table
     from .reweight import save as save_populations
 
@@ -484,7 +511,8 @@ def run_all(
             if done < settings.length_ns - 1e-9:
                 target = min(done + settings.chunk_ns, settings.length_ns)
                 for r in range(n_rep):  # The replicas take turns, so they can be compared after each round.
-                    start = part_path(run_dir, r, last, ".state.xml")
+                    # A replica added later starts from the end of a plain MD replica, with its own seed.
+                    start = part_path(run_dir, r % state.n_replicas, last, ".state.xml")
                     run_replica(files, run_dir, r, start, residues, settings, state.md,
                                 seed=state.base_seed + 50000 + r, log=log, until_ns=target)
                 done = target
@@ -506,7 +534,41 @@ def run_all(
                       "yet, even if the replicas look alike (they may all be trapped in the same state). A common "
                       "cause is coupling to another slow motion.", "suggestion")
             if reached and may_stop:
+                record(run_dir, state, Action("enhanced_sampling", "stop", True, "Every residue reached the goal.", done))
                 break
+            open_ = [k for k, v in verdicts.items() if v != "reached"]
+            # Stop when every open residue stays stuck: more of the same bias is unlikely to help.
+            if open_ and all(verdicts[k] == "stalled" for k in open_) and done >= rule.min_ns - 1e-9:
+                es["stall_checks"] = es.get("stall_checks", 0) + 1
+            else:
+                es["stall_checks"] = 0
+            if es["stall_checks"] >= 3 and may_stop:
+                record(run_dir, state, Action("enhanced_sampling", "stop", True,
+                                              f"{', '.join(open_)} stayed stuck for 3 checks in a row.", done))
+                break
+            # More replicas when the error comes mainly from the spread between them.
+            spread = [r_["residue"] for r_ in result["residues"]
+                      if r_.get("verdict") == "not_yet" and (r_.get("error_from_replicas") or r_["replicas_disagree"])]
+            if spread and n_rep < state.the_goal().max_replicas and done < settings.length_ns - 1e-9:
+                why = (f"The error of {', '.join(spread)} comes mainly from the spread between replicas.")
+                if state.allowed("add_replicas"):
+                    n_rep += 1
+                    settings.n_replicas = n_rep
+                    es["settings"] = asdict(settings)
+                    record(run_dir, state, Action("enhanced_sampling", "add_replicas", True,
+                                                  why + f" Now {n_rep} replicas.", done),
+                           f"{run_dir.name}：{', '.join(spread)} 的误差主要来自各条重复之间的差别。增加一条增强采样重复，"
+                           f"共 {n_rep} 条；它会先补跑到每条 {done:g} ns。",
+                           f"{run_dir.name}: the error of {', '.join(spread)} comes mainly from the spread between "
+                           f"replicas. Adding one enhanced sampling replica, now {n_rep}; it first catches up to "
+                           f"{done:g} ns.")
+                else:
+                    record(run_dir, state, Action("enhanced_sampling", "add_replicas", False, why, done),
+                           f"{run_dir.name}：{', '.join(spread)} 的误差主要来自各条重复之间的差别，建议增加重复"
+                           "（需要允许 add_replicas）。",
+                           f"{run_dir.name}: the error of {', '.join(spread)} comes mainly from the spread between "
+                           "replicas; I suggest more replicas (needs permission add_replicas).", "suggestion",
+                           once_key="said_add_enhanced_replicas")
             if reached:
                 _once(run_dir, state, "enhanced_reached",
                       f"增强采样已经达到你要的精度（每条 {done:g} ns，误差不超过 {precision:g}）。"
@@ -515,6 +577,27 @@ def run_all(
                       f"most {precision:g}). The run goes on to {settings.length_ns:g} ns as you set it; say "
                       f"\"stop {run_dir.name}\" to end it now.", "info")
             if done >= settings.length_ns - 1e-9:
+                # Budget used up. Run longer only with permission, only up to the limit, and only if some open
+                # residue is not stuck (more time does not help a bias that does not push).
+                first = es.setdefault("first_length_ns", settings.length_ns)
+                cap = state.the_goal().extend_factor * first
+                movable = [k for k in open_ if verdicts[k] != "stalled"]
+                if not reached and movable and done < cap - 1e-9:
+                    if state.allowed("extend"):
+                        settings.length_ns = round(min(cap, settings.length_ns + max(settings.chunk_ns, first / 2)), 6)
+                        es["settings"] = asdict(settings)
+                        record(run_dir, state, Action("enhanced_sampling", "extend_budget", True,
+                                                      f"{', '.join(movable)} need more data. New length "
+                                                      f"{settings.length_ns:g} ns (limit {cap:g}).", done),
+                               f"{run_dir.name}：增强采样的预算用完了，{', '.join(movable)} 还不够精确，但没有卡住。"
+                               f"延长到每条 {settings.length_ns:g} ns（最多 {cap:g} ns）。",
+                               f"{run_dir.name}: the enhanced sampling budget is used up; {', '.join(movable)} are not "
+                               f"precise yet but not stuck. Extending to {settings.length_ns:g} ns per replica (at most "
+                               f"{cap:g}).")
+                        state.save(run_dir)
+                        continue
+                    record(run_dir, state, Action("enhanced_sampling", "extend_budget", False,
+                                                  f"Budget used up; {', '.join(movable)} need more data.", done))
                 break
         outcome = _enhanced_outcome(verdicts, done, settings.length_ns)
         es["outcome"] = outcome

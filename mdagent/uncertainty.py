@@ -56,13 +56,25 @@ def effective_samples(weights: np.ndarray) -> float:
     return float(w.sum() ** 2 / np.sum(w * w)) if w.size else 0.0
 
 
+def error_parts(values: list[float], errors: list[float]) -> tuple[float, float]:
+    """The two parts of the error of a mean over replicas: inside the replicas, and between them.
+
+    When the part between replicas is larger, more independent replicas reduce the error faster
+    than longer replicas (agent policy: add replicas).
+    """
+    v = np.asarray(values, dtype=float)
+    e = np.nan_to_num(np.asarray(errors, dtype=float), nan=0.0)
+    within = float(math.sqrt(np.sum(e ** 2)) / len(v))
+    between = float(np.std(v, ddof=1) / math.sqrt(len(v))) if len(v) > 1 else 0.0
+    return within, between
+
+
 def combine_replicas(values: list[float], errors: list[float], min_diff: float = 0.05) -> tuple[float, float, bool]:
     """Mean over replicas, its standard error, and whether two replicas clearly disagree."""
     v = np.asarray(values, dtype=float)
     e = np.nan_to_num(np.asarray(errors, dtype=float), nan=0.0)
     mean = float(np.mean(v))
-    within = float(math.sqrt(np.sum(e ** 2)) / len(v))
-    between = float(np.std(v, ddof=1) / math.sqrt(len(v))) if len(v) > 1 else 0.0
+    within, between = error_parts(values, errors)
     disagree = any(abs(v[i] - v[j]) > max(min_diff, 3 * math.sqrt(e[i] ** 2 + e[j] ** 2))
                    for i in range(len(v)) for j in range(i + 1, len(v)))
     return mean, max(within, between), disagree
