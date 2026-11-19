@@ -21,9 +21,10 @@ def _state(tmp_path, permissions, ns=(1.0, 5.0), max_ns=20.0, replicas=3):
     return s
 
 
-def _report(verdict, transitions=(6, 6, 6), from_replicas=False):
+def _report(verdict, transitions=(6, 6, 6), differ=False):
     return ResidueReport(chain="A", resseq=111, resname="VAL", transitions=list(transitions), occupancies=[],
-                         dominant=["t"] * len(transitions), verdict=verdict, error_from_replicas=from_replicas)
+                         dominant=["t"] * len(transitions), verdict=verdict, replicas_differ=differ,
+                         error_from_replicas=differ)
 
 
 def test_rule1_stop_when_done_unless_stopping_early_is_not_allowed(tmp_path):
@@ -36,18 +37,30 @@ def test_rule1_stop_when_done_unless_stopping_early_is_not_allowed(tmp_path):
     assert "没有允许提前停" in read(tmp_path)[-1]["zh"]
 
 
+def test_rule3_needs_real_disagreement_and_the_first_half_of_the_budget(tmp_path):
+    ext = [Decision("VAL111", "extend", "imprecise")]
+    noisy = _report("imprecise")
+    noisy.error_from_replicas = True              # Spread larger than the inner error, but no clear disagreement.
+    state = _state(tmp_path, ["add_replicas"])
+    plain_md_next(tmp_path, state, [noisy], ext, 5.0)
+    assert state.n_replicas == 3
+    late = _state(tmp_path, ["add_replicas"], ns=(1.0, 5.0, 5.0))   # 11 of 20 ns: too late to catch up.
+    plain_md_next(tmp_path, late, [_report("imprecise", differ=True)], ext, 5.0)
+    assert late.n_replicas == 3
+
+
 def test_rule3_add_replicas_when_the_error_comes_from_their_spread(tmp_path):
     ext = [Decision("VAL111", "extend", "imprecise")]
     state = _state(tmp_path, ["add_replicas"])
-    assert plain_md_next(tmp_path, state, [_report("imprecise", from_replicas=True)], ext, 5.0) == 5.0
+    assert plain_md_next(tmp_path, state, [_report("imprecise", differ=True)], ext, 5.0) == 5.0
     assert state.n_replicas == 5 and state.notes["actions"][-1] == {**state.notes["actions"][-1],
                                                                    "action": "add_replicas", "executed": True}
     state = _state(tmp_path, [], replicas=3)                                         # No permission.
-    plain_md_next(tmp_path, state, [_report("imprecise", from_replicas=True)], ext, 5.0)
+    plain_md_next(tmp_path, state, [_report("imprecise", differ=True)], ext, 5.0)
     assert state.n_replicas == 3 and not state.notes["actions"][-1]["executed"]
     assert read(tmp_path)[-1]["kind"] == "suggestion"
     state = _state(tmp_path, ["add_replicas"], replicas=10)                          # At the limit.
-    plain_md_next(tmp_path, state, [_report("imprecise", from_replicas=True)], ext, 5.0)
+    plain_md_next(tmp_path, state, [_report("imprecise", differ=True)], ext, 5.0)
     assert state.n_replicas == 10
 
 

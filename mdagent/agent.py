@@ -547,10 +547,11 @@ def run_all(
                                               f"{', '.join(open_)} stayed stuck for 3 checks in a row.", done))
                 break
             # More replicas when the error comes mainly from the spread between them.
+            # More replicas only when they clearly disagree, and only in the first half of the length.
             spread = [r_["residue"] for r_ in result["residues"]
-                      if r_.get("verdict") == "not_yet" and (r_.get("error_from_replicas") or r_["replicas_disagree"])]
-            if spread and n_rep < state.the_goal().max_replicas and done < settings.length_ns - 1e-9:
-                why = (f"The error of {', '.join(spread)} comes mainly from the spread between replicas.")
+                      if r_.get("verdict") == "not_yet" and r_["replicas_disagree"]]
+            if spread and n_rep < state.the_goal().max_replicas and done < 0.5 * settings.length_ns:
+                why = (f"The replicas clearly disagree about {', '.join(spread)}.")
                 if state.allowed("add_replicas"):
                     n_rep += 1
                     settings.n_replicas = n_rep

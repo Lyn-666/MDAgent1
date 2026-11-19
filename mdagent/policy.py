@@ -4,9 +4,12 @@ Plain MD (after agent.decide has judged every item), in this order:
 1. Everything is sampled well: stop. Without permission to stop early, go on to the planned budget.
 2. An item does not change state at all: switch to enhanced sampling if that is allowed and exists for
    the quantity (agent.decide and agent.run_all do this); otherwise suggest it and go on.
-3. Items change state, but their error comes mainly from the spread between replicas: add two
-   independent replicas (permission add_replicas, at most Goal.max_replicas). More replicas reduce
-   such an error faster than longer ones (Knapp et al. 2018; Grossfield et al. 2018).
+3. Items change state, but the replicas clearly disagree (populations differ by more than three
+   combined errors): add two independent replicas (permission add_replicas, at most Goal.max_replicas),
+   but only in the first half of the budget, because new replicas must first run all earlier rounds.
+   More replicas help such an error more than longer ones (Knapp et al. 2018; Grossfield et al. 2018).
+   A plain "the spread between replicas is larger than the error inside them" is not enough: with three
+   replicas that estimate is too noisy, and it made the agent add replicas every round.
 4. Items change state but are not precise enough, and the budget is used up: run longer than the
    budget (permission extend, at most Goal.extend_factor times the first budget). Otherwise stop.
 5. Replicas sit in different states and never change: suggest restarting from chosen frames (adaptive
@@ -92,27 +95,27 @@ def plain_md_next(run_dir, state, reports, decisions, next_ns: float) -> float:
     flipping = [d for d in open_ if by_label.get(d.residue) is not None and sum(by_label[d.residue].transitions) > 0]
 
     # Rule 3: the error comes mainly from the spread between replicas.
-    if next_ns > 0 and state.sampling != "adaptive":
-        spread = [d.residue for d in flipping if by_label[d.residue].error_from_replicas
+    if next_ns > 0 and state.sampling != "adaptive" and ns < 0.5 * state.loop.max_ns:
+        spread = [d.residue for d in flipping if by_label[d.residue].replicas_differ
                   or by_label[d.residue].verdict == "replicas_disagree"]
         if spread and state.n_replicas < goal.max_replicas:
             add = min(2, goal.max_replicas - state.n_replicas)
-            why = (f"The error of {', '.join(spread)} comes mainly from the spread between replicas, so more "
-                   "independent replicas help more than longer ones.")
+            why = (f"The replicas clearly disagree about {', '.join(spread)}, so more independent replicas help "
+                   "more than longer ones.")
             if state.allowed("add_replicas"):
                 state.n_replicas += add
                 record(run_dir, state, Action("plain_md", "add_replicas", True,
                                               why + f" Now {state.n_replicas} replicas.", ns),
-                       f"{name}：{', '.join(spread)} 的误差主要来自各条重复之间的差别，加更多独立重复比加长更有用。"
+                       f"{name}：各条重复对 {', '.join(spread)} 的结果明显不一致，加更多独立重复比加长更有用。"
                        f"现在加 {add} 条，共 {state.n_replicas} 条；新的重复会先补跑到每条 {ns:g} ns。",
-                       f"{name}: the error of {', '.join(spread)} comes mainly from the spread between replicas; more "
+                       f"{name}: the replicas clearly disagree about {', '.join(spread)}; more "
                        f"independent replicas help more than longer ones. Adding {add}, now {state.n_replicas}; the new "
                        f"ones first catch up to {ns:g} ns.")
             else:
                 record(run_dir, state, Action("plain_md", "add_replicas", False, why, ns),
-                       f"{name}：{', '.join(spread)} 的误差主要来自各条重复之间的差别。建议增加重复（需要允许 add_replicas）。",
-                       f"{name}: the error of {', '.join(spread)} comes mainly from the spread between replicas. I "
-                       "suggest more replicas (needs permission add_replicas).", "suggestion",
+                       f"{name}：各条重复对 {', '.join(spread)} 的结果明显不一致。建议增加重复（需要允许 add_replicas）。",
+                       f"{name}: the replicas clearly disagree about {', '.join(spread)}. I suggest more replicas "
+                       "(needs permission add_replicas).", "suggestion",
                        once_key="said_add_replicas")
 
     # Rule 4: the budget is used up, items change state but are not precise enough, none is stuck.
