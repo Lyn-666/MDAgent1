@@ -1,4 +1,4 @@
-# conda env create -f environment.yml && conda activate mdagent && pip install -e .
+# conda env create -f environment.yml && conda activate mdagent && python -m pip install -e .
 # On a Linux computer with an NVIDIA GPU, conda-forge installs OpenMM with CUDA.
 name: mdagent
 channels:
