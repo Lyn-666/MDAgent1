@@ -3,6 +3,7 @@
 name: mdagent
 channels:
   - conda-forge
+  - nodefaults
 dependencies:
   - python=3.11
   - openmm>=8.6
