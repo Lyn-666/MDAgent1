@@ -19,6 +19,8 @@
 #                  early-stopped results agree with them within their errors.
 # 181L (T4 lysozyme L99A): the same scenarios with Arg80/Lys135/Lys162, Lys162-Asp159, Val111, Arg145-Glu11.
 #
+# Over SSH, start it inside tmux (or with nohup), so that closing the window does not stop it.
+# Running the script again skips finished scenarios and continues one that was stopped halfway.
 # Usage (from the MDAgent1 folder, mdagent environment active):
 #   bash scripts/step5_validation.sh                         # 1UBQ, all scenarios (about a night)
 #   bash scripts/step5_validation.sh 1UBQ budget_chi1 extend_chi1   # only some
@@ -60,6 +62,12 @@ P=runs/val_${SYSTEM}
 for name in "${ORDER[@]}"; do
   out=${P}_$name
   if [ -e "$out/report.en.md" ]; then echo "$name: already done"; continue; fi
+  if [ -e "$out/run.json" ]; then
+    # Stopped halfway (for example the SSH window closed without tmux): continue where it stopped.
+    echo "$(date '+%F %T') $name: continuing (python -m mdagent resume --run $out)"
+    python -m mdagent resume --run "$out" >> "$out.log" 2>&1 || echo "$name: ended with an error, see $out.log"
+    continue
+  fi
   echo "$(date '+%F %T') $name: python -m mdagent run $COMMON ${RUN[$name]} --out $out"
   python -m mdagent run $COMMON ${RUN[$name]} --out "$out" > "$out.log" 2>&1 || echo "$name: ended with an error, see $out.log"
 done
