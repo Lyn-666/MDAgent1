@@ -60,7 +60,7 @@
 - `scripts/step5_validation.sh`：第 5 步在 GPU 上跑的场景（达标、困住、预算用完、增强采样，加参考运行），汇总在 `runs/val_<蛋白>_summary.txt`。默认用 1UBQ（用户要求换掉 181L 作为主例子；`--uniprot P0CG48 --termini charged`），也可用 181L。
 - `observables.py`：结果量层。每个量换成逐帧的状态，再用同一套诊断、误差和停下判断。`chi1`（g+/t/g-）和 `distance`（近/远，`A:88:OH-A:111:CG1@0.6`，阈值 ±0.05 nm 的缓冲）。`--quantity`、`--distances`；对话里 `target_kind` 为 `distance`。
 - `adaptive.py`：可选的 AdaptivePy 自适应采样（`--sampling adaptive`）。
-- `envcheck.py`：启动时检查平台和力场文件。
+- `envcheck.py`：启动时检查平台和力场文件；用选中的平台先算一个两原子体系，算不了就停下并说明修法（例如 CUDA 组件比驱动新时的 PTX 错误，改装匹配的 `cuda-version`）。
 - `backends.py`：语言模型后台（`claude -p`、`codex exec`、Anthropic API），统一返回结构化结果。claude 后台会去掉环境里的 `ANTHROPIC_API_KEY`，以使用 Claude Code 的订阅登录。
 - `chat.py`、`chat_page.html`：`chat` 命令，本地网页（`http://localhost:8765`），多个对话，存在 `runs/.chats/`。运行卡片显示电脑名、完整路径、文件列表和下载链接（`/api/file`、`/api/download`，只提供 `outputs.py` 列出的文件）。
 - `outputs.py`：列出一个运行的结果文件（`protein.pdb`、轨迹、chi1 和偏置势数据），以及电脑名和完整路径。命令行的 Summary 和网页都用它。
@@ -76,5 +76,6 @@
 - **用户的电脑：** 项目在 `~/Desktop/MDAgent1`，conda 环境 `mdagent`，OpenMM 8.6.1 带 CUDA，GPU 上约每天 300 到 600 ns。用户有 Claude 订阅，但没有 API 密钥。
 - **不要在用户的 conda 环境里装 openmm-plumed：** conda-forge 上的版本会把 OpenMM 降到 8.2 并丢掉 CUDA，而且其中的 PLUMED 不带 OPES。
 - **云端会话**（Claude Code 网页版的临时容器）：没有 GPU，只适合很短的流程测试；装不了 AdaptivePy；没有 API 密钥。改动直接推送到 GitHub `Lyn-666/MDAgent1` 的 `main` 分支。最早的 `zcorn2017/binding-lang` 仓库已恢复原样，不再使用。
+- **第一位测试者（2026-11-19，masi-pc）：** `~/.condarc` 里有 `solver: classic`，conda 卡在 “Collecting package metadata”，加 `--solver=libmamba` 解决；直接用 `pip` 会跑到系统旧 pip，要用 `python -m pip`；CUDA 报 PTX 版本错误（conda 的 CUDA 组件比驱动新），要装匹配的 `cuda-version`。
 - **用户怎样打开网页（还没确认）：** 截图里浏览器是 Mac 上的 Chrome，地址是 `localhost:8765`，但运行的进程号是 1749823，macOS 上不会出现这么大的进程号。所以模拟很可能跑在一台 Linux 电脑上，网页经 SSH 端口转发打开，结果文件在那台 Linux 电脑上。
 - **只能在用户电脑上验证的事项：** 网页下载链接经端口转发是否可用（还没验证）；AdaptivePy 的真实调用（已验证可用）；Claude Code 后台（已验证可用）；Codex 后台（还没验证；测试者会用到，公开前要验证）；`start` 加终端模式用 Claude 跑完开发测试（已验证可用）；181L 完整运行在 11-16 00:23 左右、增强采样第 1 条轨迹 5.4 ns 处停了，日志没有报错。已排除重启（11-17 08:47，非正常关机）和 SSH 断开（在 tmux 里跑，KillUserProcesses=no）；系统日志显示整台电脑在 11-16 00:22:54 之后就没有任何记录，直到 11-17 08:47 重启，所以是整机死机（不是程序或内存的问题），原因可能是 GPU、驱动、电源或散热。现在 run/resume 会在日志里记下进程号、开始时间、崩溃或 SIGTERM 时的调用栈，进度行带时间；CHARMM 加帽体系在 GPU 上的长时间运行（还没验证）；第 5 步第一次跑（1UBQ reach_chi1，11-19）：加重复的规则太激进，重复从 3 条加到 10 条（已改：只在重复明显不一致、且预算用了不到一半时加）；后来速度从 646 掉到 4 ns/day，同时一个 python 进程占了 23.4 GB 显存、GPU 使用率 0%，说明 OpenMM 悄悄改用了 CPU（已改：总是明确指定平台，GPU 不能用就报错）；占显存的是不是 MDAgent 自己的进程，还在确认。
