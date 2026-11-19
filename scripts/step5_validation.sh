@@ -28,6 +28,7 @@
 # Results: runs/val_<protein>_<name>/report.en.md and report.zh.md; summary in runs/val_<protein>_summary.txt.
 set -u
 cd "$(dirname "$0")/.."
+mkdir -p runs   # a fresh clone has no runs folder, and the logs below are written into it
 SYSTEM=${1:-1UBQ}
 [ $# -gt 0 ] && shift
 
