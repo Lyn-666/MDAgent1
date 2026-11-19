@@ -115,12 +115,14 @@ def test_enhanced_adds_a_replica_when_the_spread_dominates(tmp_path, fake_run, m
     def spread_result(ns, se, transitions):
         res = base(ns, se, transitions)
         res["residues"][0]["error_from_replicas"] = True
+        res["residues"][0]["replicas_disagree"] = se > 0.05   # They disagree until the precision is reached.
         return res
     monkeypatch.setattr(__import__(__name__), "_result", spread_result)
     state = _state(tmp_path, ["switch_method", "stop_early", "add_replicas"])
     ns, outcome, msgs = fake_run(state, se_at=lambda ns: 0.08 if ns < 3 else 0.03)
     saved = RunState.load(tmp_path)
-    assert saved.enhanced["settings"]["n_replicas"] == 4                  # One more at the checks after 1 and 2 ns.
+    assert saved.enhanced["settings"]["n_replicas"] == 4                  # One more at the checks after 1 and 2 ns
+    # (not after 3 ns: that is half of the 6 ns length, too late for a new replica to catch up).
     assert any(a["action"] == "add_replicas" and a["executed"] for a in saved.notes["actions"])
     assert json.loads((tmp_path / "enhanced" / "replica_3.json").read_text())["ns_done"] == 3.0  # Caught up.
 

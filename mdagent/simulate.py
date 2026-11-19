@@ -80,7 +80,12 @@ def make_simulation(files: SystemFiles, s: MDSettings, seed: int, extra_forces=(
     integrator = openmm.LangevinMiddleIntegrator(
         s.temperature_k * unit.kelvin, 1.0 / unit.picosecond, s.timestep_fs * unit.femtosecond)
     integrator.setRandomNumberSeed(seed)
-    platform = openmm.Platform.getPlatformByName(s.platform) if s.platform else None
+    # Always name the platform. Without one, OpenMM silently falls back to the CPU when the GPU cannot
+    # create a context (busy or in a bad state), and the run goes on about 100 times slower. Named, it fails
+    # with an error instead (stop reason "failed", told in the chat).
+    from .envcheck import fastest_platform
+
+    platform = openmm.Platform.getPlatformByName(s.platform or fastest_platform())
     return app.Simulation(files.topology, system, integrator, platform)
 
 
@@ -202,6 +207,7 @@ def run_segment(
         sim.context.setPositions(positions)
         sim.context.setVelocities(velocities)
 
+    log(f"replica {replica}: part {part} runs on {sim.context.getPlatform().getName()}.")
     interval = round(s.save_interval_ps * steps_per_ps)
     sim.reporters.append(app.DCDReporter(
         str(part_path(out_dir, replica, part, ".dcd")), interval,
