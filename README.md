@@ -10,9 +10,11 @@
 
 ```bash
 git clone https://github.com/Lyn-666/MDAgent1.git && cd MDAgent1
-conda env create -f environment.yml && conda activate mdagent && pip install -e .
+conda env create -f environment.yml && conda activate mdagent && python -m pip install -e .
 pytest -q tests -m "not slow"     # 快速测试，约 2 分钟，应该全部通过
 ```
+
+如果 conda 长时间停在“Collecting package metadata”，看一下 `conda config --show-sources`。里面有 `solver: classic` 时，conda 用的是很慢的旧求解器；在 `conda env create` 后面加上 `--solver=libmamba` 就能只为这次安装换成快的求解器。请用 `python -m pip`，不要直接用 `pip`：直接用时可能运行到系统自带的旧 pip，它会提示“Defaulting to user installation”并安装失败。
 
 **2. 跑一个几分钟的测试：** 用自带的 T4 溶菌酶（`examples/181L.pdb`），看苯周围的口袋。181L 和它的 UniProt 参考序列有两处差异，所以要加 `--accept-problems`。
 
@@ -136,7 +138,7 @@ python -m mdagent run --pdb examples/181L.pdb --around-ligand BNZ --out runs/fir
 
 ```bash
 git clone https://github.com/Lyn-666/MDAgent1.git && cd MDAgent1
-conda env create -f environment.yml && conda activate mdagent && pip install -e .
+conda env create -f environment.yml && conda activate mdagent && python -m pip install -e .
 
 # 开始。agent 自己决定跑多久，每条轨迹最多 20 ns。
 # 181L 和 UniProt 参考序列有两处差异，所以要加 --accept-problems（见"结构检查"）。
@@ -430,7 +432,7 @@ claude
 python -m mdagent ask --pdb examples/181L.pdb --out runs/a "用 CHARMM，看苯周围的口袋，0.1 M KCl，先检查质子化"
 ```
 
-和 `start` 一样，它用 Claude Code 或 Codex 的登录（`--backend claude` 或 `--backend codex`，默认选第一个装好的）。有 Anthropic API 密钥时也可以用 `--backend api`，这时要先 `pip install -e ".[llm]"`。它不是对话：说一句话，程序显示设置和命令，你输入 `y` 后开始。适合写进脚本。
+和 `start` 一样，它用 Claude Code 或 Codex 的登录（`--backend claude` 或 `--backend codex`，默认选第一个装好的）。有 Anthropic API 密钥时也可以用 `--backend api`，这时要先 `python -m pip install -e ".[llm]"`。它不是对话：说一句话，程序显示设置和命令，你输入 `y` 后开始。适合写进脚本。
 
 语言模型只负责填一张固定的设置表，表里每一项都对应 `mdagent run` 的一个选项。你没提到的项留空，保持默认值。程序会把 PDB 文件的概况告诉 Claude：有哪些链、残基编号范围和配体名称。所以 Claude 不需要猜配体名称；你说的配体在文件里找不到时，它会提问。
 
