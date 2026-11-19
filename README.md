@@ -18,6 +18,8 @@ pytest -q tests -m "not slow"     # 快速测试，约 2 分钟，应该全部�
 
 装好后运行 `python -m openmm.testInstallation`，确认 CUDA 一行写着 “Successfully computed forces”。如果 CUDA 报 `CUDA_ERROR_UNSUPPORTED_PTX_VERSION`，说明 conda 装的 CUDA 组件比显卡驱动新。运行 `nvidia-smi`，看第一行的 “CUDA Version”（新驱动写成 “CUDA UMD Version”，例如 13.3），然后运行 `conda install -c conda-forge cuda-version=13.3 --solver=libmamba`，把版本号换成你看到的。MDAgent 启动时也会用选中的平台先算一个小体系，算不了就停下并给出同样的提示。
 
+如果测试或模拟随机出现 “Segmentation fault”，可能是 CPU 有不稳定的核（一些 Intel 13、14 代 CPU 有这个问题）。运行 `python scripts/find_bad_cores.py`，它逐个核做同样的计算，找出算错或崩溃的核，最后给出只用好核的 `taskset -c ...` 命令。
+
 **2. 跑一个几分钟的测试：** 用自带的 T4 溶菌酶（`examples/181L.pdb`），看苯周围的口袋。181L 和它的 UniProt 参考序列有两处差异，所以要加 `--accept-problems`。
 
 ```bash
