@@ -48,9 +48,9 @@ def platform_fix(name: str, error: str, names: list[str]) -> str:
     text = f"The {name} platform cannot compute forces: {error}"
     if name == "CUDA" and ("PTX" in error or "CUDA_ERROR_UNSUPPORTED" in error):
         text += ("\nThe CUDA parts that conda installed are newer than the NVIDIA driver on this computer. "
-                 "Run nvidia-smi and read 'CUDA Version' in the top line (for example 12.4). Then, in the "
+                 "Run nvidia-smi and read the CUDA version in the top line ('CUDA Version', or 'CUDA UMD Version' in newer drivers, for example 13.3). Then, in the "
                  "mdagent environment, install CUDA parts that match the driver, for example:\n"
-                 "    conda install -c conda-forge cuda-version=12.4\n"
+                 "    conda install -c conda-forge cuda-version=13.3 --solver=libmamba\n"
                  "and check again with: python -m openmm.testInstallation")
     others = [p for p in GPU_PLATFORMS if p in names and p != name]
     if others:
