@@ -69,6 +69,9 @@ class Step:
     # Items left out because plain MD cannot answer them within the limits (label -> "stuck" or "hopeless").
     # They are reported as INSUFFICIENT_EVIDENCE on their own; the other items go on to their precision.
     set_aside: dict = field(default_factory=dict)
+    # Whether this look could have stopped, so it counts against stop_looks. A look at which some item still
+    # has too few state changes cannot stop (STOP needs adequate sampling), so it spends none of alpha.
+    counted: bool = False
 
 
 def z_bonferroni(alpha: float, looks: int) -> float:
@@ -114,7 +117,7 @@ def allocate(items: list, n: int, ns: float, z: float, tolerance: float, max_n: 
     return best
 
 
-def next_step(items: list, n: int, ns: float, look: int, tests_before: int, z: float, tolerance: float,
+def _next_step(items: list, n: int, ns: float, look: int, tests_before: int, z: float, tolerance: float,
               limits: Limits, equil_ns: float = 0.6) -> Step:
     """One decision after look number `look` (1 = the first). `tests_before`: earlier looks that could stop.
 
@@ -124,7 +127,6 @@ def next_step(items: list, n: int, ns: float, look: int, tests_before: int, z: f
     whole run stop with INSUFFICIENT_EVIDENCE.
     """
     planning = look == 1
-    tests = tests_before + (0 if planning else 1)
     max_n, max_ns = limits.max_replicas, limits.max_ns
     spent = n * ns
     aside = {}
@@ -139,6 +141,11 @@ def next_step(items: list, n: int, ns: float, look: int, tests_before: int, z: f
             if own is None or own[2] > limits.give_up_factor * limits.budget_ns:
                 aside[i.label] = "hopeless"
     active = [i for i in items if i.label not in aside]
+    # Only a look that could have stopped counts as a test: not the planning look, and not a look at which an
+    # item still has too few state changes (STOP needs adequate sampling, so no false stop can happen there).
+    could_stop = (not planning and bool(active)
+                  and all(i.transitions and min(i.transitions) >= limits.min_transitions for i in active))
+    tests = tests_before + (1 if could_stop else 0)
     left_out = (f" Left out, plain MD cannot answer them within the limits: {', '.join(aside)}."
                 if aside and active else "")
     if not active:
@@ -184,3 +191,14 @@ def next_step(items: list, n: int, ns: float, look: int, tests_before: int, z: f
         new_ns = min(max_ns, ns + limits.chunk_ns)
     return Step(CONTINUE, new_n, round(new_ns, 6), why + left_out, planning,
                 "projected" if adequate else "too_few_changes", aside)
+
+
+def next_step(items: list, n: int, ns: float, look: int, tests_before: int, z: float, tolerance: float,
+              limits: Limits, equil_ns: float = 0.6) -> Step:
+    """See _next_step. Also says whether the look counted against stop_looks (Step.counted)."""
+    step = _next_step(items, n, ns, look, tests_before, z, tolerance, limits, equil_ns)
+    aside = set(step.set_aside)
+    active = [i for i in items if i.label not in aside]
+    step.counted = (look != 1 and bool(active)
+                    and all(i.transitions and min(i.transitions) >= limits.min_transitions for i in active))
+    return step

@@ -356,7 +356,7 @@ def run_agent(pool, order, design, targets, ref, model) -> Trial:
         items = [ItemState(k, ests[k]["se"], ests[k]["within"], ests[k]["between"], ests[k]["transitions"],
                            online[k]["populations"]) for k in pool.labels]
         step = next_step(items, n, ns, looks, tests, z, targets.population, limits, pool.equilibration_ns)
-        tests += 0 if step.planning else 1
+        tests += 1 if step.counted else 0
         if step.action != "continue":
             t.decision, t.reason = step.action, step.reason
             break

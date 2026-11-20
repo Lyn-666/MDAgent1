@@ -292,7 +292,7 @@ def allocation_next(run_dir, state, reports, decisions) -> float:
     step = next_step(items, n, ns, look, alloc["tests"], precision.z, goal.precision, limits,
                      state.md.equilibration_ps / 1000.0)
     alloc["looks"] = look
-    alloc["tests"] += 0 if step.planning else 1
+    alloc["tests"] += 1 if step.counted else 0
     what = f"{n} × {ns:g} ns"
     why_zh = STEP_ZH.get(step.kind, step.reason)
     # Items plain MD cannot answer are set aside on their own: told once, marked for the report, while the
