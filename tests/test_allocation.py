@@ -99,7 +99,9 @@ def test_projection_runs_are_calibrated_for_their_stop_looks(tmp_path):
     state = _backbone_run(tmp_path)
     p = state.precision()
     assert p.criterion == "confidence" and p.looks == 3 and p.z == pytest.approx(z_bonferroni(0.05, 3))
-    assert state.budget_ns() == 3 * 1.0                        # the user's plan: 3 replicas x 1 ns, never more
+    assert state.budget_ns() == 10 * 1.0                       # the user's limits: at most 10 replicas x 1 ns
+    state.goal["permissions"] = ["stop_early"]
+    assert state.budget_ns() == 3 * 1.0                        # no adding replicas: the 3 it starts with
     assert state.max_ns_per_replica() == 1.0
 
 
