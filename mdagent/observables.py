@@ -11,6 +11,10 @@ Supported quantities:
 - "distance" (goal quantity "distance_states"): the distance between two atoms, with two
   states, "near" (below a cutoff) and "far". Good for a pocket that opens and closes,
   a contact that forms and breaks, or a gate. No enhanced sampling for it yet.
+- "backbone" (goal quantity "backbone_basins"): backbone basins (basins.py): the Ramachandran
+  regions of a residue ("rama:A:73") or the type of a beta turn ("turn:A:52"). Besides the
+  populations, the free-energy difference, the rates between the two main basins and the
+  phi/psi landscape are reported, each judged on its own. No enhanced sampling for it yet.
 
 A distance is written as "A:88:OH-A:111:CG1@0.6": chain, residue number and atom name
 of each atom, then the cutoff in nm. The chain may be left out ("88:OH-111:CG1@0.6"),
@@ -25,9 +29,10 @@ from dataclasses import dataclass
 import mdtraj as md
 import numpy as np
 
-from .diagnose import ResidueReport, count_transitions, judge, occupancy, populations_with_errors, rank
+from .diagnose import (ResidueReport, count_transitions, error_split, judge, occupancy,
+                       populations_with_errors, rank)
 
-QUANTITIES = {"chi1": "chi1_populations", "distance": "distance_states"}
+QUANTITIES = {"chi1": "chi1_populations", "distance": "distance_states", "backbone": "backbone_basins"}
 DISTANCE_STATES = ["near", "far"]
 _ATOM = r"(?:([A-Za-z0-9]):)?(-?\d+):([A-Za-z0-9']+)"
 _SPEC = re.compile(rf"^\s*{_ATOM}\s*-\s*{_ATOM}\s*@\s*([0-9.]+)\s*$")
@@ -119,6 +124,37 @@ def diagnose_distances(trajs: list[md.Trajectory], specs: list[DistanceSpec], pa
                                    "cutoff_nm": spec.cutoff_nm})
         (rep.populations, rep.standard_error, rep.replicas_differ,
          rep.error_from_replicas) = populations_with_errors(states, DISTANCE_STATES)
+        rep.error_within, rep.error_between = error_split(states, DISTANCE_STATES)
+        judge(rep, min_flips_per_replica, precision)
+        reports.append(rep)
+    return rank(reports)
+
+
+def diagnose_backbone(trajs, sets: list, quads: list, ns_per_replica: float, ns_per_frame: float,
+                      min_flips_per_replica: int = 4, precision=None) -> list[ResidueReport]:
+    """One report per backbone observable (basins.BasinSet), judged like a side chain (diagnose.judge).
+
+    `quads` are the dihedral atom indices of each set in the loaded trajectories. The populations,
+    free-energy difference, rates and landscape come from basins.summarize, the same numbers the
+    offline benchmark uses.
+    """
+    from .basins import angles, assign, summarize
+
+    reports = []
+    for k, (spec, q) in enumerate(zip(sets, quads)):
+        values = [angles(t, q) for t in trajs]
+        states = [assign(v, spec) for v in values]
+        est = summarize(states, values, spec.names, ns_per_frame)
+        occ = [occupancy(s, spec.names) for s in states]
+        rep = ResidueReport(chain=spec.chain or "", resseq=spec.resseq, resname="", name=spec.label,
+                            quantity="backbone", transitions=est["transitions"], occupancies=occ,
+                            dominant=[max(o, key=o.get) for o in occ], ns_per_replica=ns_per_replica)
+        (rep.populations, rep.standard_error, rep.replicas_differ,
+         rep.error_from_replicas) = populations_with_errors(states, spec.names)
+        rep.error_within, rep.error_between = est["within"], est["between"]
+        rep.extra = {"dg_kt": est["dg_kt"], "dg_se": est["dg_se"], "rates": est["rates"],
+                     "split_js": est["split_js"], "basins": spec.names,
+                     "angles": [f"{a} of residue {spec.resseq + off}" for off, a in spec.dihedrals]}
         judge(rep, min_flips_per_replica, precision)
         reports.append(rep)
     return rank(reports)

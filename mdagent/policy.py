@@ -153,3 +153,91 @@ def plain_md_next(run_dir, state, reports, decisions, next_ns: float) -> float:
             record(run_dir, state, Action("plain_md", "extend_budget", False,
                                           f"Budget used up; {names} need more data.", ns))
     return next_ns
+
+
+STEP_ZH = {
+    "converged": "所有项目都已足够精确，而且采样充分",
+    "looks_used": "可用的查看次数用完了，还没达到精度",
+    "budget_used": "预算用完了，还没达到精度",
+    "stuck": "有项目一直没有在状态之间变化，普通 MD 回答不了",
+    "hopeless": "按投影，达到精度需要的计算量远超预算，再跑普通 MD 也达不到",
+    "too_few_changes": "状态变化还太少，误差还不可信，先跑长一些",
+    "projected": "按投影，这是达到精度花费最少的分配",
+}
+
+
+def allocation_next(run_dir, state, reports, decisions) -> float:
+    """Projection allocation (allocation.py) in the live loop. Returns the length of the next round (0: stop).
+
+    May raise state.n_replicas (new replicas first catch up, see agent.run_loop). Items that decide() has
+    already handed to enhanced sampling are left out. Every choice is kept in run.json (notes["actions"],
+    notes["allocation"]) and told in the chat with its reason.
+    """
+    from .allocation import CONTINUE, INSUFFICIENT, STOP, ItemState, Limits, next_step
+
+    goal, ns, n, name = state.the_goal(), state.ns_done, state.n_replicas, run_dir.name
+    by = {r.label: r for r in reports}
+    live = [d for d in decisions if d.action not in ("skip", "enhanced_sampling") and d.residue in by]
+    if not live:
+        return 0.0
+    precision = state.precision()
+    items = [ItemState(d.residue, by[d.residue].standard_error or {}, by[d.residue].error_within or 0.0,
+                       by[d.residue].error_between or 0.0, by[d.residue].transitions, by[d.residue].verdict == "ok")
+             for d in live]
+    alloc = state.notes.setdefault("allocation", {"looks": 0, "tests": 0})
+    limits = Limits(max_replicas=goal.max_replicas if state.allowed("add_replicas") else n,
+                    max_ns=state.max_ns_per_replica(), budget_ns=state.budget_ns(), chunk_ns=state.loop.extend_ns,
+                    patience_ns=state.loop.no_flip_patience_ns, stop_looks=goal.stop_looks,
+                    min_transitions=state.loop.min_flips_per_replica)
+    look = alloc["looks"] + 1
+    step = next_step(items, n, ns, look, alloc["tests"], precision.z, goal.precision, limits,
+                     state.md.equilibration_ps / 1000.0)
+    alloc["looks"] = look
+    alloc["tests"] += 0 if step.planning else 1
+    what = f"{n} × {ns:g} ns"
+    why_zh = STEP_ZH.get(step.kind, step.reason)
+    if step.action == STOP:
+        room = round(state.loop.max_ns - ns, 6)
+        if not state.allowed("stop_early") and room > 0:
+            record(run_dir, state, Action("plain_md", "extend", True, "Precise enough, but stopping early is "
+                                          "not allowed; running to the planned length.", ns))
+            return min(state.loop.extend_ns, room)
+        state.notes["allocation_decision"] = {"decision": STOP, "kind": step.kind, "reason": step.reason,
+                                              "look": look, "replicas": n, "ns_per_replica": ns}
+        record(run_dir, state, Action("plain_md", "stop", True, f"STOP at look {look} ({what}): {step.reason}.", ns),
+               f"{name}：第 {look} 次查看（{what}），决定：停止（STOP）。{why_zh}。",
+               f"{name}: look {look} ({what}). Decision: STOP. {step.reason[0].upper() + step.reason[1:]}.")
+        return 0.0
+    if step.action == INSUFFICIENT:
+        for d in live:
+            if by[d.residue].verdict == "ok":
+                continue
+            stuck = sum(by[d.residue].transitions) == 0
+            to_es = state.can_switch() and state.enhanced.get("enabled", True)
+            d.action = "enhanced_sampling" if to_es else "stalled"
+            d.cause = "stalled" if stuck else "insufficient_evidence"
+        state.notes["allocation_decision"] = {"decision": INSUFFICIENT, "kind": step.kind, "reason": step.reason,
+                                              "look": look, "replicas": n, "ns_per_replica": ns}
+        record(run_dir, state, Action("plain_md", "insufficient_evidence", True,
+                                      f"INSUFFICIENT_EVIDENCE at look {look} ({what}): {step.reason}.", ns),
+               f"{name}：第 {look} 次查看（{what}），决定：证据不足（INSUFFICIENT_EVIDENCE）。{why_zh}。"
+               "这是一个结论，不是失败：现有数据撑不起要求的精度。",
+               f"{name}: look {look} ({what}). Decision: INSUFFICIENT_EVIDENCE. "
+               f"{step.reason[0].upper() + step.reason[1:]}. That is an answer, not a failure: the data cannot "
+               "support the asked precision.", "suggestion")
+        return 0.0
+    assert step.action == CONTINUE
+    added = step.replicas - n
+    if added > 0:
+        state.n_replicas = step.replicas
+    plan = f"{step.replicas} × {step.ns:g} ns"
+    record(run_dir, state, Action("plain_md", "add_replicas" if added > 0 else "extend", True,
+                                  f"Look {look}{' (planning only)' if step.planning else ''} at {what}: {step.reason}. "
+                                  f"Next: {plan}.", ns),
+           f"{name}：第 {look} 次查看（{what}{'，只做规划，不会在这次停' if step.planning else ''}）。"
+           f"决定：{'增加 ' + str(added) + ' 条重复（先补跑到同样长度），' if added > 0 else ''}"
+           f"每条跑到 {step.ns:g} ns，共 {plan}。理由：{why_zh}。",
+           f"{name}: look {look} at {what}{' (planning only: this look may not stop)' if step.planning else ''}. "
+           f"Decision: {'add ' + str(added) + ' replicas (they first catch up), ' if added > 0 else ''}"
+           f"run every replica to {step.ns:g} ns, {plan} in total. Reason: {step.reason}.")
+    return round(step.ns - ns, 6)

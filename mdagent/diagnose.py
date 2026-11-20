@@ -114,6 +114,18 @@ def occupancy(states: np.ndarray, names: list[str] = STATE_NAMES) -> dict[str, f
     return {name: float(np.mean(s == i)) for i, name in enumerate(names)}
 
 
+def error_split(states: list[np.ndarray], names: list[str]) -> tuple[float, float]:
+    """(inside, between) error parts of the state whose population is least certain."""
+    best = (-1.0, 0.0, 0.0)
+    for i, _ in enumerate(names):
+        hits = [(s_[s_ >= 0] == i).astype(float) for s_ in states]
+        values = [float(h.mean()) if h.size else 0.0 for h in hits]
+        within, between = error_parts(values, [block_standard_error(h) for h in hits])
+        if max(within, between) > best[0]:
+            best = (max(within, between), within, between)
+    return best[1], best[2]
+
+
 def populations_with_errors(states: list[np.ndarray], names: list[str]) -> tuple[dict, dict, bool, bool]:
     """Mean population of each state over replicas, its error (time correlation and replica spread),
     whether two replicas differ beyond their errors, and whether the largest error comes mainly from
@@ -151,6 +163,8 @@ class ResidueReport:
     extra: dict | None = None  # Other numbers worth showing, for example the mean distance.
     replicas_differ: bool | None = None  # Replica populations differ beyond their errors (None: not computed).
     error_from_replicas: bool = False    # The largest error comes mainly from the spread between replicas.
+    error_within: float | None = None    # Worst state: error part inside the replicas (allocation.py).
+    error_between: float | None = None   # Worst state: spread between the replicas.
 
     @property
     def label(self) -> str:
@@ -191,7 +205,7 @@ def judge(report: ResidueReport, min_flips_per_replica: int = 4, precision=None)
     p = Precision.of(precision)
     total = sum(report.transitions)
     n = len(report.transitions)
-    q = "chi1" if report.quantity == "chi1" else "The distance"
+    q = {"chi1": "chi1", "backbone": "The backbone basin"}.get(report.quantity, "The distance")
     if len(set(report.dominant)) > 1 and (total == 0 or report.replicas_differ is not False):
         # Checked first: replicas can end up in different states with zero flips
         # during production, if they separated during equilibration. With flips, a different
@@ -304,6 +318,7 @@ def diagnose_trajectories(
         if pooled_total_ns is None:
             (rep.populations, rep.standard_error, rep.replicas_differ,
              rep.error_from_replicas) = populations_with_errors(states, STATE_NAMES)
+            rep.error_within, rep.error_between = error_split(states, STATE_NAMES)
             judge(rep, min_flips_per_replica, precision)
         else:
             judge_pooled(rep, min_flips_per_replica * (n_replicas or len(trajs)))

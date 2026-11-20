@@ -107,8 +107,15 @@ Choose one action for the user's last message:
 
 What to measure: side-chain conformations (rotamers) of a region -> target_kind "ligand" or "residues".
 A distance between atoms (a pocket opening or closing, a contact forming, a gate) -> target_kind "distance"
-with `distances`. MDAgent has enhanced sampling only for side chains; for distances it runs plain MD and says
-when that is not enough.
+with `distances`. Backbone conformations (Ramachandran / phi-psi basin populations, transitions between them,
+a phi/psi free-energy landscape, the type of a beta turn) -> target_kind "backbone" with `backbone`
+("rama:A:73", "turn:A:52"). MDAgent has enhanced sampling only for side chains; for the others it runs plain MD
+and says when that is not enough.
+
+How to spend the time: if the user lets MDAgent decide how many replicas, how long and when to stop, or asks to
+minimise the cost for a required accuracy, set allocation "projection". If the user also restricts the method
+to standard (unbiased, plain) MD, keep mode null and set allow "extend,add_replicas,stop_early": MDAgent may
+then choose replicas, lengths and the stop, but never switches to enhanced sampling.
 
 Save folder: if the user says where to save the results (a folder path), put it in save_dir exactly as written.
 The card shows the full path before anything starts.
@@ -562,6 +569,14 @@ class Assistant:
                 from .observables import distance_atoms, parse_distances
 
                 distance_atoms(md.load_topology(str(self.root / a.pdb)), parse_distances(a.plan.distances))
+            if a.plan.target_kind == "backbone" and a.pdb:
+                import mdtraj as md
+
+                from .basins import dihedral_atoms, parse_sets
+
+                top = md.load_topology(str(self.root / a.pdb))
+                for s in parse_sets(a.plan.backbone):
+                    dihedral_atoms(top, s)
             check_text = None
             if a.pdb and not a.prmtop:
                 from .check import check_structure
