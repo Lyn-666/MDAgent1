@@ -82,3 +82,40 @@ def test_a_typo_in_the_criterion_is_refused():
 
     with pytest.raises(ValueError, match="unknown precision criterion"):
         Precision(criterion="confidance")
+def test_error_floor_for_states_seen_rarely_or_never():
+    from mdagent.diagnose import populations_with_errors
+    from mdagent.uncertainty import floor_from_samples, floor_from_transitions
+
+    # Never seen: the floor reflects how little was seen; it shrinks with more state changes.
+    assert floor_from_transitions(0.0, 8, 3) > 0.02
+    assert floor_from_transitions(0.0, 800, 3) < 0.002
+    # Well sampled two-state case: about 2 p (1 - p) / sqrt(N).
+    assert abs(floor_from_transitions(0.5, 100, 0) - 0.05) < 0.002
+    assert 0 < floor_from_samples(0.999, 1600) < 0.002
+
+    # Three replicas that never leave state 0: the population of state 1 is 0, but its error is not.
+    stuck = [np.zeros(400, dtype=int) for _ in range(3)]
+    pops, errs, _, _ = populations_with_errors(stuck, ["a", "b"])
+    assert pops["b"] == 0 and errs["b"] > 0.1
+
+
+def test_compare_counts_tiny_differences_as_the_same(tmp_path):
+    import json
+
+    from mdagent import report
+
+    def write(folder, p, e):
+        folder.mkdir()
+        (folder / "result.json").write_text(json.dumps({"p": p, "e": e}))
+        return folder
+
+    a, b = write(tmp_path / "a", 0.999, 0.0), write(tmp_path / "b", 0.998, 0.0)
+    fake = {a: [{"label": "VAL26", "populations": {"t": 0.999}, "standard_error": {"t": 0.0}}],
+            b: [{"label": "VAL26", "populations": {"t": 0.998}, "standard_error": {"t": 0.0}}]}
+    old = report.final_results
+    report.final_results = lambda run: fake[run]
+    try:
+        text, agree = report.compare(a, b)
+    finally:
+        report.final_results = old
+    assert agree, text

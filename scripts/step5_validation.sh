@@ -52,7 +52,7 @@ declare -A RUN=(
   [trapped_dist]="--distances $DIST_SLOW --first-ns 1 --extend-ns 2 --max-ns 6 --no-flip-patience-ns 3"
   [budget_chi1]="--residues $FAST --precision 0.01 --first-ns 1 --extend-ns 1 --max-ns 2 --allow switch_method,stop_early"
   [extend_chi1]="--residues $FAST --precision 0.01 --first-ns 1 --extend-ns 1 --max-ns 2 --allow extend,switch_method,stop_early"
-  [enhanced_chi1]="--residues $SLOW --first-ns 1 --extend-ns 2 --max-ns 3 --no-flip-patience-ns 3 --enhanced-ns 20"
+  [enhanced_chi1]="--residues $SLOW --first-ns 1 --extend-ns 2 --max-ns 3 --no-flip-patience-ns 3 --enhanced-ns 20 --allow switch_method,stop_early"
   [ref_enhanced_chi1]="--residues $SLOW --first-ns 1 --extend-ns 2 --max-ns 3 --no-flip-patience-ns 3 --enhanced-ns 20 --allow switch_method --seed 7"
 )
 ORDER=(reach_chi1 ref_reach_chi1 reach_dist ref_reach_dist trapped_chi1 trapped_dist budget_chi1 extend_chi1

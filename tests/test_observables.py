@@ -54,7 +54,8 @@ def test_distances_are_judged_like_side_chains():
     assert ok.verdict == "ok" and ok.quantity == "distance" and abs(ok.populations["near"] - 0.5) < 0.1
     assert ok.label == "A:1:A-A:2:B@0.6" and ok.extra["cutoff_nm"] == 0.6
     trapped = diagnose_distances(stuck, spec, [(0, 1)], 10.0, precision=0.1)[0]
-    assert trapped.verdict == "no_flip" and trapped.standard_error["near"] == 0   # Agree, tiny error, not done.
+    # Trapped: not done, and the error is not 0 any more (error floor): nothing was seen to change.
+    assert trapped.verdict == "no_flip" and trapped.standard_error["near"] > 0.1
 
     # No enhanced sampling for distances: a stuck distance is "stalled", not "enhanced_sampling".
     loop = LoopSettings(max_ns=20.0, no_flip_patience_ns=10.0)
@@ -74,7 +75,7 @@ def test_command_line_checks_the_distance_atoms_before_building(tmp_path, capsys
 
 
 @pytest.mark.slow
-def test_plain_md_on_a_distance(tmp_path):
+def test_plain_md_on_a_distance(tmp_path, capsys):
     """Tiny peptide on CPU, quantity distance: plain MD runs, no enhanced sampling, a stop reason is kept."""
     from dataclasses import asdict
 
@@ -100,3 +101,10 @@ def test_plain_md_on_a_distance(tmp_path):
     status = json.loads((tmp_path / "status.json").read_text())
     assert status["residues"][0]["name"] == "A:108:CA-A:114:CA@1" and status["residues"][0]["populations"]
     assert read(tmp_path)  # The chat was told how plain MD ended.
+    # `mdagent diagnose` judges the distance, like the run did, not the chi1 of the two residues.
+    from mdagent.cli import main
+
+    capsys.readouterr()
+    assert main(["diagnose", "--run", str(tmp_path)]) == 0
+    shown = capsys.readouterr().out
+    assert "A:108:CA-A:114:CA@1" in shown and "108" not in shown.replace("A:108:CA-A:114:CA@1", "")

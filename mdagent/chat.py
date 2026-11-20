@@ -76,6 +76,9 @@ class ChatAction(BaseModel):
                           "a suggestion that plain MD makes no progress). Null keeps the run's methods.")
     resume_max_ns: Optional[float] = Field(
         None, description="resume: a new plain MD budget per replica in ns, if the user asks to run longer.")
+    resume_replicas: Optional[int] = Field(
+        None, description="resume: the new total number of plain MD replicas, if the user agrees to add replicas "
+                          "(for example 'add 2 replicas' to a run with 3 -> 5).")
     resume_enhanced_ns: Optional[float] = Field(
         None, description="resume: a new length per enhanced sampling replica in ns, if the user asks for it.")
     save_dir: Optional[str] = Field(
@@ -112,10 +115,17 @@ a phi/psi free-energy landscape, the type of a beta turn) -> target_kind "backbo
 ("rama:A:73", "turn:A:52"). MDAgent has enhanced sampling only for side chains; for the others it runs plain MD
 and says when that is not enough.
 
-How to spend the time: if the user lets MDAgent decide how many replicas, how long and when to stop, or asks to
-minimise the cost for a required accuracy, set allocation "projection". If the user also restricts the method
-to standard (unbiased, plain) MD, keep mode null and set allow "extend,add_replicas,stop_early": MDAgent may
-then choose replicas, lengths and the stop, but never switches to enhanced sampling.
+"Stop when you see X" (a side chain reaching a state, a pocket opening) -> target_kind "change" with `observe`.
+
+The user's time and replica numbers are limits, never exceeded. The agent stops early when the goal is reached
+or going on would not help, and only suggests a longer run, more replicas or another method; the user confirms.
+To add replicas to a stopped run, set resume_replicas (the new total).
+
+How to spend the time within those limits: if the user lets MDAgent decide how many replicas, how long and when
+to stop, or asks to minimise the cost for a required accuracy, set allocation "projection" (the user's max_ns,
+max_replicas and budget_ns stay the limits). If the user also restricts the method to standard (unbiased,
+plain) MD, keep mode null and set allow "extend,add_replicas,stop_early": MDAgent may then choose replicas,
+lengths and the stop within the limits, but never switches to enhanced sampling.
 
 Save folder: if the user says where to save the results (a folder path), put it in save_dir exactly as written.
 The card shows the full path before anything starts.
@@ -577,6 +587,11 @@ class Assistant:
                 top = md.load_topology(str(self.root / a.pdb))
                 for s in parse_sets(a.plan.backbone):
                     dihedral_atoms(top, s)
+            if a.plan.target_kind == "change" and a.pdb:
+                from .cli import _check_events
+                from .observables import parse_events
+
+                _check_events(parse_events(a.plan.observe), self.root / a.pdb)
             check_text = None
             if a.pdb and not a.prmtop:
                 from .check import check_structure
@@ -613,6 +628,9 @@ class Assistant:
                 if a.resume_max_ns is not None:
                     argv += ["--max-ns", f"{a.resume_max_ns:g}"]
                     changed.append(f"max_ns = {a.resume_max_ns:g}")
+                if a.resume_replicas is not None:
+                    argv += ["--replicas", str(a.resume_replicas)]
+                    changed.append(f"replicas = {a.resume_replicas}")
                 if a.resume_enhanced_ns is not None:
                     argv += ["--enhanced-ns", f"{a.resume_enhanced_ns:g}"]
                     changed.append(f"enhanced_ns = {a.resume_enhanced_ns:g}")

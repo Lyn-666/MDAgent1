@@ -28,14 +28,16 @@ MODEL = "claude-opus-5-5"
 class RunPlan(BaseModel):
     """Settings for one `mdagent run`. Leave a field null to keep its default."""
 
-    target_kind: Literal["ligand", "residues", "distance", "backbone"] = Field(
+    target_kind: Literal["ligand", "residues", "distance", "backbone", "change"] = Field(
         description="'ligand': the target is all protein residues near a ligand in the PDB file. "
                     "'residues': the target is a list of residues. Both study side-chain conformations (chi1). "
                     "'distance': the user wants to know about distances between atoms (a pocket opening, a "
                     "contact, a gate); give them in `distances`. "
                     "'backbone': the user wants backbone conformations: Ramachandran (phi/psi) basin populations, "
                     "transitions between them, a phi/psi free-energy landscape, or the type of a beta turn; give "
-                    "them in `backbone`.")
+                    "them in `backbone`. "
+                    "'change': the user wants to stop once a given change is seen (a side chain reaches a state, "
+                    "a pocket opens); give it in `observe`.")
     backbone: Optional[str] = Field(
         None, description="Only for target_kind 'backbone', separated by ';': 'rama:A:73' for the phi/psi basins of "
                           "residue 73 ('rama:A:70-74' for a range), 'turn:A:52' for the beta turn whose residue i+1 "
@@ -47,6 +49,13 @@ class RunPlan(BaseModel):
         None, description="Only if the user gives a total budget: production ns of all replicas together.")
     max_replicas: Optional[int] = Field(
         None, description="Only if the user limits the number of replicas. Default 10.")
+    observe: Optional[str] = Field(
+        None, description="Only for target_kind 'change': item=state, separated by ';'. A side chain: "
+                          "'A:111=t' (states g+, t, g-). A distance: 'A:88:OH-A:111:CG1@0.6=far' (near or far).")
+    hold_ps: Optional[float] = Field(None, description="Only for 'change': how long (ps) the new state must last to "
+                                                       "count. Default 100.")
+    seen_in: Optional[int] = Field(None, description="Only for 'change': in how many replicas it must be seen. "
+                                                     "Default 1.")
     distances: Optional[str] = Field(
         None, description="Only for target_kind 'distance': atom pairs with a cutoff in nm, separated by ';', "
                           "for example 'A:88:OH-A:111:CG1@0.6'. Use standard PDB atom names (CA, CB, OH, NZ, "
@@ -96,8 +105,9 @@ class RunPlan(BaseModel):
                           "time). Default standard_error.")
     allow: Optional[str] = Field(
         None, description="Only if the user says what MDAgent may do by itself: comma separated from extend, "
-                          "add_replicas, switch_method, stop_early, or 'none'. Default: all in auto mode, none in "
-                          "guided mode.")
+                          "add_replicas, switch_method, stop_early, or 'none'. Default: only stop_early in auto mode (the "
+                          "time and replica numbers are limits; other changes are suggested and the user confirms), "
+                          "none in guided mode.")
     equil_ps: Optional[float] = Field(None, description="Total equilibration before production, in ps. "
                                                         "Default 600.")
     enhanced_max_residues: Optional[int] = Field(
@@ -173,6 +183,7 @@ def make_plan(request: str, summary: str, client=None, backend: str = "api") -> 
 FLAGS = [  # RunPlan field -> command line option
     ("cutoff_angstrom", "--cutoff-angstrom"), ("forcefield", "--forcefield"), ("ph", "--ph"),
     ("protonation", "--protonation"), ("ion_conc", "--ion-conc"), ("cation", "--cation"),
+    ("hold_ps", "--hold-ps"), ("seen_in", "--seen-in"),
     ("box_shape", "--box-shape"), ("padding_nm", "--padding-nm"), ("replicas", "--replicas"),
     ("first_ns", "--first-ns"), ("extend_ns", "--extend-ns"), ("max_ns", "--max-ns"),
     ("no_flip_patience_ns", "--no-flip-patience-ns"), ("sampling", "--sampling"),
@@ -200,7 +211,13 @@ def to_argv(plan: RunPlan, pdb: str | None, out: str, prmtop: str | None = None,
         argv = ["run", "--pdb", str(pdb), "--out", str(out)]
     else:
         raise ValueError("The plan has no input file.")
-    if plan.target_kind == "distance":
+    if plan.target_kind == "change":
+        if not plan.observe:
+            raise ValueError("The plan waits for a change but gives none.")
+        argv += ["--observe", plan.observe]
+        if plan.residues:
+            argv += ["--residues", plan.residues]
+    elif plan.target_kind == "distance":
         if not plan.distances:
             raise ValueError("The plan studies distances but gives none.")
         argv += ["--quantity", "distance", "--distances", plan.distances]
@@ -265,6 +282,7 @@ def ask(request: str, pdb: str, out: str, assume_yes: bool = False, planner=None
                if getattr(plan, name) not in (None, False)]
     target = (f"residues within {plan.cutoff_angstrom or 5:g} Å of {plan.ligand}" if plan.target_kind == "ligand"
               else f"backbone basins {plan.backbone}" if plan.target_kind == "backbone"
+              else f"the change {plan.observe}" if plan.target_kind == "change"
               else f"distances {plan.distances}" if plan.target_kind == "distance"
               else f"residues {plan.residues}")
     print(f"\nTarget: {target}")

@@ -37,6 +37,12 @@ def _target_from_args(args) -> Target:
 
         res = {(s.chain, s.resseq + off) for s in parse_sets(args.backbone) for off, _ in s.dihedrals}
         return Target(residues=tuple(sorted(res, key=lambda k: (k[0] or "", k[1]))))
+    if not args.residues and getattr(args, "observe", None):
+        # A run that waits for a change: the target is the residues named in the changes.
+        from .observables import parse_events
+
+        res = {(c, n) for s in parse_events(args.observe) for c, n in s.residues()}
+        return Target(residues=tuple(sorted(res, key=lambda k: (k[0] or "", k[1]))))
     if not args.residues and getattr(args, "distances", None):
         # A distance run without a target region: the target is the residues of the distance atoms.
         from .observables import parse_distances
@@ -68,6 +74,17 @@ def _check_distances(args, structure: str | Path) -> list:
     specs = parse_distances(args.distances)
     distance_atoms(md.load_topology(str(structure)), specs)
     return specs
+
+
+def _check_events(events, structure: str | Path) -> None:
+    """Find every atom of the distance changes in the structure. Raises ValueError with a clear message."""
+    import mdtraj as md
+
+    from .observables import distance_atoms
+
+    dists = [e.distance for e in events if e.distance is not None]
+    if dists:
+        distance_atoms(md.load_topology(str(structure)), dists)
 
 
 def _print_summary(decisions, enhanced_labels, run_dir) -> None:
@@ -144,7 +161,8 @@ def _goal_from_args(args):
                          stop_looks=getattr(args, "stop_looks", 3),
                          alpha=getattr(args, "alpha", 0.05),
                          quantity=QUANTITIES[getattr(args, "quantity", "chi1")],
-                         max_replicas=getattr(args, "max_replicas", 10), extend_factor=getattr(args, "extend_factor", 2.0))
+                         max_replicas=getattr(args, "max_replicas", 10), extend_factor=getattr(args, "extend_factor", 2.0),
+                         hold_ps=getattr(args, "hold_ps", 100.0), seen_in=getattr(args, "seen_in", 1))
     if args.allow is not None:
         allowed = [a.strip() for a in args.allow.split(",") if a.strip() and a.strip() != "none"]
         unknown = [a for a in allowed if a not in PERMISSIONS]
@@ -247,6 +265,24 @@ def cmd_run(args) -> int:
         print(f"error: {out} already has a run. Use 'resume --run {out}' to continue it.",
               file=sys.stderr)
         return 2
+    if args.observe:
+        if args.quantity not in ("chi1", "event") or args.distances:
+            print("error: --observe is a goal of its own; do not combine it with --quantity distance or --distances. "
+                  "Write a distance change in --observe, for example \"A:88:OH-A:111:CG1@0.6=far\".", file=sys.stderr)
+            return 2
+        args.quantity = "event"
+        print("Note: --observe given, so the run stops once the change is seen.")
+        from .observables import parse_events
+        try:
+            events = parse_events(args.observe)
+            if args.pdb:
+                _check_events(events, args.pdb)
+        except ValueError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 2
+    elif args.quantity == "event":
+        print("error: --quantity event needs --observe, for example \"A:111=t\".", file=sys.stderr)
+        return 2
     if args.distances and args.quantity == "chi1":
         args.quantity = "distance"
         print("Note: --distances given, so the quantity is distance.")
@@ -345,6 +381,9 @@ def cmd_run(args) -> int:
         built, setup = _build_from_pdb(args, keys, out, check.remove_residues, check.cap_ends)
     specs = _check_distances(args, out / "protein.pdb") if args.quantity == "distance" else []
     basin_sets = _check_backbone(args, out / "protein.pdb") if args.quantity == "backbone" else []
+    from .observables import parse_events
+    if args.quantity == "event":
+        _check_events(parse_events(args.observe), out / "protein.pdb")
 
     loop = LoopSettings(
         first_ns=min(args.first_ns, args.max_ns),
@@ -367,6 +406,7 @@ def cmd_run(args) -> int:
         distances=[s.label for s in specs],
         backbone=[s.label for s in basin_sets],
         notes={"replicas_at_start": args.replicas},
+        events=[e.label for e in parse_events(args.observe)] if args.quantity == "event" else [],
         adaptive={"policy": args.adaptive_policy, "n_clusters": args.adaptive_clusters,
                   "full_interval_ps": args.full_save_ps} if args.sampling == "adaptive" else {},
         enhanced={"enabled": not args.no_enhanced_sampling,
@@ -379,11 +419,16 @@ def cmd_run(args) -> int:
         print(f"To start MD: python -m mdagent resume --run {out}")
         return 0
     goal = state.the_goal()
-    what = (f"near/far populations of {', '.join(state.distances)}" if state.distances
-            else f"backbone basins of {', '.join(state.backbone)} (populations, dG, rates, phi/psi landscape)"
-            if state.backbone else "chi1 populations of the target side chains")
-    print(f"Goal: {what}, {state.precision().describe()}"
-          + (f" ({goal.description})" if goal.description else "") + ".")
+    if state.events:
+        print(f"Goal: see the change {', '.join(state.events)} (the new state lasts at least {goal.hold_ps:g} ps, in "
+              f"{goal.seen_in} replica(s)); stop once it is seen"
+              + (f" ({goal.description})" if goal.description else "") + ".")
+    else:
+        what = (f"near/far populations of {', '.join(state.distances)}" if state.distances
+                else f"backbone basins of {', '.join(state.backbone)} (populations, dG, rates, phi/psi landscape)"
+                if state.backbone else "chi1 populations of the target side chains")
+        print(f"Goal: {what}, {state.precision().describe()}"
+              + (f" ({goal.description})" if goal.description else "") + ".")
     print("The agent may by itself: " + (", ".join(goal.permissions) or "nothing (it only suggests)") + ".")
     if goal.allocation == "projection":
         print(f"Plan: the agent decides how many replicas, how long and when to stop, for the least compute. It "
@@ -410,8 +455,20 @@ def cmd_resume(args) -> int:
 
     run = Path(args.run)
     state = RunState.load(run)
+    changed = False
     if args.max_ns is not None:
         state.loop.max_ns = args.max_ns
+        changed = True
+    if args.replicas is not None:
+        if args.replicas < state.n_replicas:
+            print(f"error: the run has {state.n_replicas} replicas; --replicas can only add more.", file=sys.stderr)
+            return 2
+        changed = changed or args.replicas > state.n_replicas
+        state.n_replicas = args.replicas
+    if changed:
+        # The user gave a new limit: decide again, and say again how plain MD ends.
+        for key in ("plain_done", "said_extend", "said_no_gain", "said_add_replicas", "stalled"):
+            state.notes.pop(key, None)
     if args.platform is not None:
         state.md.platform = args.platform
     if args.enhanced_sampling is not None:
@@ -431,18 +488,16 @@ def cmd_resume(args) -> int:
 
 
 def cmd_diagnose(args) -> int:
-    from .agent import RunState
-    from .diagnose import diagnose_trajectories, fixed_chi1_residues, format_report, load_run
+    from .agent import RunState, diagnose_run
+    from .diagnose import format_report
 
     run = Path(args.run)
     state = RunState.load(run)
     if not state.rounds_ns:
         print("No round has finished yet.")
         return 0
-    reports = diagnose_trajectories(
-        load_run(run, state.target, len(state.rounds_ns)), state.target, state.ns_done,
-        min_flips_per_replica=state.loop.min_flips_per_replica, fixed=fixed_chi1_residues(run / "protein.pdb"))
-    print(format_report(reports))
+    # The same diagnosis as the run itself: distances for a distance run, chi1 otherwise.
+    print(format_report(diagnose_run(run, state)))
     return 0
 
 
@@ -503,6 +558,14 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Build and run even if the structure check finds problems.")
     r.add_argument("--equil-ps", type=float, default=600.0,
                    help="Equilibration length: restrained heating, restrained NPT, restraint release, free NPT.")
+    r.add_argument("--observe", default=None,
+                   help="Stop once this change is seen, instead of measuring populations. item=state, separated by "
+                        "';': \"A:111=t\" (side chain 111 enters t; states g+, t, g-) or "
+                        "\"A:88:OH-A:111:CG1@0.6=far\" (the distance becomes far; near or far).")
+    r.add_argument("--hold-ps", type=float, default=100.0,
+                   help="--observe: the new state must last this long (ps) to count as seen (default 100).")
+    r.add_argument("--seen-in", type=int, default=1,
+                   help="--observe: in how many replicas the change must be seen (default 1).")
     r.add_argument("--backbone", default=None,
                    help="For --quantity backbone: backbone basins, separated by ';'. rama:A:73 is the phi/psi "
                         "region of residue 73 (alphaR, beta, alphaL); turn:A:52 is the type of the beta turn whose "
@@ -518,9 +581,11 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--stop-looks", type=int, default=3,
                    help="With --allocation projection: the agent may stop at no more than this many looks, and its "
                         "intervals are calibrated for that many (default 3).")
-    r.add_argument("--quantity", default="chi1", choices=["chi1", "distance", "backbone"],
+    r.add_argument("--quantity", default="chi1", choices=["chi1", "distance", "backbone", "event"],
                    help="What you want to know. chi1 (default): the rotamer states of the target side chains. "
-                        "distance: how often atom distances are near or far (give them with --distances).")
+                        "distance: how often atom distances are near or far (give them with --distances). "
+                        "backbone: backbone basins (give them with --backbone). event: stop once a change is "
+                        "seen (give it with --observe).")
     r.add_argument("--distances", default=None,
                    help="For --quantity distance: atom pairs and cutoffs (nm), separated by ';', for example "
                         "\"A:88:OH-A:111:CG1@0.6;A:99:CA-A:133:CA@1.2\". The chain may be left out.")
@@ -570,7 +635,8 @@ def build_parser() -> argparse.ArgumentParser:
                         "--criterion confidence and sequence, and by 'compare'.")
     r.add_argument("--allow", default=None,
                    help="What the agent may do by itself, comma separated: extend, add_replicas, switch_method, "
-                        "stop_early; or 'none'. Default: all in auto mode, none in guided mode.")
+                        "stop_early; or 'none'. Default: only stop_early in auto mode (time and replicas are "
+                        "limits; the agent suggests the rest), none in guided mode.")
     r.add_argument("--max-replicas", type=int, default=10,
                    help="With permission add_replicas, the agent adds replicas up to this number (default 10).")
     r.add_argument("--extend-factor", type=float, default=2.0,
@@ -595,6 +661,8 @@ def build_parser() -> argparse.ArgumentParser:
     u = sub.add_parser("resume", help="Continue a run. Finishes a stopped round, then decides again.")
     u.add_argument("--run", required=True)
     u.add_argument("--max-ns", type=float, default=None, help="New budget per replica (ns).")
+    u.add_argument("--replicas", type=int, default=None,
+                   help="New number of plain MD replicas (more than now). New replicas first catch up.")
     u.add_argument("--platform", default=None)
     u.add_argument("--enhanced-ns", type=float, default=None,
                    help="New length of each enhanced sampling replica (ns). A larger value continues it.")
