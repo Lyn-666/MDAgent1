@@ -74,8 +74,12 @@ class RunPlan(BaseModel):
                           "runs only that and suggests changes in the chat.")
     goal: Optional[str] = Field(None, description="What the user wants to know, in the user's own words.")
     precision: Optional[float] = Field(
-        None, description="Largest allowed standard error of a chi1 state population (0 to 1), only if the user "
+        None, description="Largest allowed error of a chi1 state population (0 to 1), only if the user "
                           "states a precision (for example 'within 5%' -> 0.05). Default 0.05.")
+    criterion: Optional[Literal["standard_error", "confidence", "sequence"]] = Field(
+        None, description="Only if the user asks for a careful or a quick judgement of when to stop. "
+                          "confidence or sequence: wider intervals, so it does not stop too early (costs more "
+                          "time). Default standard_error.")
     allow: Optional[str] = Field(
         None, description="Only if the user says what MDAgent may do by itself: comma separated from extend, "
                           "add_replicas, switch_method, stop_early, or 'none'. Default: all in auto mode, none in "
@@ -154,7 +158,7 @@ FLAGS = [  # RunPlan field -> command line option
     ("no_flip_patience_ns", "--no-flip-patience-ns"), ("sampling", "--sampling"),
     ("enhanced_ns", "--enhanced-ns"), ("enhanced_replicas", "--enhanced-replicas"),
     ("enhanced_max_residues", "--enhanced-max-residues"), ("equil_ps", "--equil-ps"), ("mode", "--mode"),
-    ("goal", "--goal"), ("precision", "--precision"), ("allow", "--allow"),
+    ("goal", "--goal"), ("precision", "--precision"), ("criterion", "--criterion"), ("allow", "--allow"),
     ("chains", "--chains"), ("uniprot", "--uniprot"), ("termini", "--termini"),
 ]
 SWITCHES = [("check_protonation", "--check-protonation"), ("no_enhanced_sampling", "--no-enhanced-sampling"),

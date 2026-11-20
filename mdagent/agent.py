@@ -41,6 +41,7 @@ from .diagnose import ResidueReport, diagnose_trajectories, fixed_chi1_residues,
 from .adaptive import AdaptiveSettings, choose_starts
 from .messages import post
 from .simulate import MDSettings, SystemFiles, load_inputs, part_path, run_segment
+from .uncertainty import Precision, planned_looks
 
 
 @dataclass
@@ -91,6 +92,13 @@ class RunState:
     def quantity(self) -> str:
         return self.the_goal().quantity
 
+    def precision(self) -> "Precision":
+        """The precision the goal asks for, with the number of decision points this budget allows."""
+        g = self.the_goal()
+        factor = g.extend_factor if "extend" in g.permissions else 1.0
+        return Precision(epsilon=g.precision, criterion=g.criterion, alpha=g.alpha,
+                         looks=planned_looks(self.loop.first_ns, self.loop.extend_ns, self.loop.max_ns, factor))
+
     def can_switch(self) -> bool:
         """May the agent switch to enhanced sampling by itself? Needs the permission, and a quantity that
         enhanced sampling can push (only chi1 for now)."""
@@ -128,7 +136,11 @@ class Goal:
 
     quantity: the result the user cares about. Supported now: "chi1_populations" (the state
       populations of the target side chains).
-    precision: the largest allowed standard error of any state population (0 to 1).
+    precision: the tolerance on any state population (0 to 1).
+    criterion: what has to be at most `precision`. "standard_error" (the default, and what
+      every run before this field meant), or "confidence" / "sequence", which widen the
+      interval because the agent judges the same growing data many times before it stops
+      (uncertainty.Precision). The budget comparison (budget.py) shows what each costs.
     permissions: actions the agent may take without asking:
       extend         run longer than the planned budget when the goal is not met yet
       add_replicas   start more independent replicas
@@ -139,6 +151,8 @@ class Goal:
     quantity: str = "chi1_populations"   # or "distance_states" (observables.py)
     description: str = ""          # The user's own words.
     precision: float = 0.05
+    criterion: str = "standard_error"  # How precision is measured: see uncertainty.Precision.
+    alpha: float = 0.05               # Allowed chance of being outside the interval.
     permissions: list = field(default_factory=lambda: list(PERMISSIONS))
     max_replicas: int = 10          # add_replicas stops here (literature: 5 to 10 replicas).
     extend_factor: float = 2.0      # extend may run to this many times the first budget.
@@ -268,6 +282,7 @@ def run_loop(
         part = len(state.rounds_ns)
         state.pending_round_ns = next_ns
         state.save(run_dir)
+        round_started = time.time()
         log(f"\nRound {part + 1}: running {state.n_replicas} replicas for {next_ns:g} ns each.")
         adaptive = state.sampling == "adaptive"
         full_ps = AdaptiveSettings.from_dict(state.adaptive).full_interval_ps if adaptive else None
@@ -291,6 +306,10 @@ def run_loop(
                         start_frame=start, full_interval_ps=full_ps)
         state.rounds_ns.append(next_ns)
         state.pending_round_ns = 0.0
+        # Measured cost of this round, so the cost model can be checked against the clock (cost.py).
+        state.notes.setdefault("rounds", []).append(
+            {"ns": round(next_ns, 6), "n_replicas": state.n_replicas,
+             "seconds": round(time.time() - round_started, 1)})
         state.save(run_dir)
 
         reports, decisions, next_ns = _diagnose_and_decide(run_dir, state)
@@ -331,7 +350,7 @@ def _diagnose_and_decide(run_dir: Path, state: RunState):
         reports = diagnose_trajectories(
             load_run(run_dir, state.target, len(state.rounds_ns)), state.target, state.ns_done,
             min_flips_per_replica=state.loop.min_flips_per_replica, fixed=fixed,
-            precision=state.the_goal().precision)
+            precision=state.precision())
     decisions, next_ns = decide(reports, state.ns_done, state.loop, state.allowed("switch_method"))
     next_ns = _apply_policy(run_dir, state, reports, decisions, next_ns)
     _post_plain_md_messages(run_dir, state, decisions, next_ns)
@@ -366,7 +385,7 @@ def _diagnose_distances(run_dir: Path, state: RunState) -> list[ResidueReport]:
     where = {a: k for k, a in enumerate(atoms)}
     trajs = load_run(run_dir, state.target, len(state.rounds_ns), atoms=atoms)
     return diagnose_distances(trajs, specs, [(where[i], where[j]) for i, j in pairs], state.ns_done,
-                              state.loop.min_flips_per_replica, state.the_goal().precision)
+                              state.loop.min_flips_per_replica, state.precision())
 
 
 def _once(run_dir: Path, state: RunState, key: str, zh: str, en: str, kind: str) -> None:
@@ -419,10 +438,10 @@ def _post_plain_md_messages(run_dir: Path, state: RunState, decisions: list[Deci
     if not need:
         _once(run_dir, state, "plain_done",
               f"普通 MD 结束，原因是{why_zh}（每条 {state.ns_done:g} ns）：所有目标都在状态之间来回了足够多次，"
-              f"比例的误差也不超过 {state.the_goal().precision:g}。结果在 {(run_dir / 'status.json').resolve()}。",
+              f"{state.precision().describe(zh=True)}。结果在 {(run_dir / 'status.json').resolve()}。",
               f"Plain MD finished. Stop reason: {why_en} ({state.ns_done:g} ns per replica): every target item "
-              f"crossed between states often enough, and every population error is at most "
-              f"{state.the_goal().precision:g}. The results are in {(run_dir / 'status.json').resolve()}.", "done")
+              f"crossed between states often enough, with {state.precision().describe()}. "
+              f"The results are in {(run_dir / 'status.json').resolve()}.", "done")
     elif not state.can_switch():
         _once(run_dir, state, "plain_done",
               f"普通 MD 结束，原因是{why_zh}（每条 {state.ns_done:g} ns）。这些没有采样充分：{', '.join(need)}。" + advice_zh,
@@ -490,11 +509,11 @@ def run_all(
     labels = [f"{es['resnames'][f'{c}:{n}']}{n}" for c, n in residues]
     rule = StopRule(**{k: v for k, v in es.get("stop_rule", {}).items() if k in StopRule.__dataclass_fields__})
     rule.min_ns = min(rule.min_ns, settings.length_ns)  # A short test run may be judged at its own length.
-    precision = state.the_goal().precision
+    precision = state.precision()
     may_stop = state.allowed("stop_early")
     log(f"\nEnhanced sampling (well-tempered metadynamics on chi1) for {', '.join(labels)}: "
         f"{n_rep} replicas, up to {settings.length_ns:g} ns each, starting from the end of plain MD. Goal: every "
-        f"population with a standard error of at most {precision:g}. "
+        f"{precision.describe()}. "
         + ("It stops as soon as the goal is reached." if may_stop else
            "It runs the full length (no permission to stop early) and says when the goal is reached."))
     last = len(state.rounds_ns) - 1
@@ -572,10 +591,10 @@ def run_all(
                            once_key="said_add_enhanced_replicas")
             if reached:
                 _once(run_dir, state, "enhanced_reached",
-                      f"增强采样已经达到你要的精度（每条 {done:g} ns，误差不超过 {precision:g}）。"
+                      f"增强采样已经达到你要的精度（每条 {done:g} ns，{precision.describe(zh=True)}）。"
                       f"运行会按你的设置跑满 {settings.length_ns:g} ns；想提前结束可以说“停止 {run_dir.name}”。",
                       f"Enhanced sampling has reached the precision you asked for ({done:g} ns per replica, errors at "
-                      f"most {precision:g}). The run goes on to {settings.length_ns:g} ns as you set it; say "
+                      f"{precision.describe()}). The run goes on to {settings.length_ns:g} ns as you set it; say "
                       f"\"stop {run_dir.name}\" to end it now.", "info")
             if done >= settings.length_ns - 1e-9:
                 # Budget used up. Run longer only with permission, only up to the limit, and only if some open
@@ -630,7 +649,8 @@ def _enhanced_outcome(verdicts: dict[str, str], done: float, length: float) -> d
             "residues": dict(verdicts), "time": time.strftime("%Y-%m-%d %H:%M:%S")}
 
 
-def _post_outcome(run_dir: Path, outcome: dict, verdicts: dict[str, str], folder: Path, precision: float) -> None:
+def _post_outcome(run_dir: Path, outcome: dict, verdicts: dict[str, str], folder: Path,
+                  precision: Precision) -> None:
     reason, ns = outcome.get("reason"), outcome.get("ns_per_replica", 0)
     open_ = {k: v for k, v in verdicts.items() if v != "reached"}
     names = ", ".join(f"{k}（{v}）" for k, v in open_.items())
@@ -640,9 +660,9 @@ def _post_outcome(run_dir: Path, outcome: dict, verdicts: dict[str, str], folder
                 f"{folder}/populations.json and in a table at the end of the log.")
     if reason == "target_reached":
         post(run_dir, f"结果已经可以用了：停下的原因是达到目标。每条跑了 {ns:g} ns，所有侧链的比例误差都不超过 "
-                      f"{precision:g}，各条重复一致，并且都在状态之间来回了足够多次。" + where_zh,
+                      f"{precision.epsilon:g}，各条重复一致，并且都在状态之间来回了足够多次。" + where_zh,
              f"Results are ready. Stop reason: goal reached. After {ns:g} ns per replica every population has an "
-             f"error of at most {precision:g}, the replicas agree, and each crossed between states often enough. "
+             f"error of at most {precision.epsilon:g}, the replicas agree, and each crossed between states often enough. "
              + where_en, "done")
     elif reason == "stalled":
         post(run_dir, f"增强采样停下了，原因是采样停滞（每条 {ns:g} ns）：{names}。stalled 表示偏置势推不动这个侧链，"
@@ -655,9 +675,9 @@ def _post_outcome(run_dir: Path, outcome: dict, verdicts: dict[str, str], folder
              "suggestion")
     elif reason == "budget_exhausted":
         post(run_dir, f"增强采样停下了，原因是预算用完（每条 {ns:g} ns），还没达到目标：{names}。" + where_zh +
-                      f"要达到误差 {precision:g}，可以加长，例如说“把 {run_dir.name} 的增强采样加长到 {2 * ns:g} ns”。",
+                      f"要达到误差 {precision.epsilon:g}，可以加长，例如说“把 {run_dir.name} 的增强采样加长到 {2 * ns:g} ns”。",
              f"Enhanced sampling stopped. Stop reason: budget used up ({ns:g} ns per replica) before the goal: "
-             f"{names_en}. " + where_en + f" To reach an error of {precision:g}, run longer, for example \"run the "
+             f"{names_en}. " + where_en + f" To reach an error of {precision.epsilon:g}, run longer, for example \"run the "
              f"enhanced sampling of {run_dir.name} to {2 * ns:g} ns\".", "suggestion")
 
 

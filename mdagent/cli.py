@@ -25,6 +25,7 @@ import sys
 from pathlib import Path
 
 from .target import Target, parse_residue_spec, resolve_target
+from .uncertainty import CRITERIA
 
 
 def _target_from_args(args) -> Target:
@@ -118,6 +119,8 @@ def _goal_from_args(args):
     from .observables import QUANTITIES
 
     goal = Goal.for_mode(args.mode, description=args.goal, precision=args.precision,
+                         criterion=getattr(args, "criterion", "standard_error"),
+                         alpha=getattr(args, "alpha", 0.05),
                          quantity=QUANTITIES[getattr(args, "quantity", "chi1")],
                          max_replicas=getattr(args, "max_replicas", 10), extend_factor=getattr(args, "extend_factor", 2.0))
     if args.allow is not None:
@@ -128,6 +131,8 @@ def _goal_from_args(args):
         goal.permissions = allowed
     if not 0 < goal.precision < 1:
         raise ValueError("--precision must be between 0 and 1.")
+    if not 0 < goal.alpha < 0.5:
+        raise ValueError("--alpha must be between 0 and 0.5.")
     return goal
 
 
@@ -339,7 +344,7 @@ def cmd_run(args) -> int:
     goal = state.the_goal()
     what = (f"near/far populations of {', '.join(state.distances)}" if state.distances
             else "chi1 populations of the target side chains")
-    print(f"Goal: {what}, standard error at most {goal.precision:g}"
+    print(f"Goal: {what}, {state.precision().describe()}"
           + (f" ({goal.description})" if goal.description else "") + ".")
     print("The agent may by itself: " + (", ".join(goal.permissions) or "nothing (it only suggests)") + ".")
     print(f"Plan: {args.replicas} replicas. Round 1 is {loop.first_ns:g} ns per replica. "
@@ -495,7 +500,15 @@ def build_parser() -> argparse.ArgumentParser:
                         "only the method you chose; MDAgent suggests changes in the chat but does not switch.")
     r.add_argument("--goal", default="", help="What you want to know, in your own words (kept in run.json).")
     r.add_argument("--precision", type=float, default=0.05,
-                   help="Largest allowed standard error of any chi1 state population (0 to 1). Default 0.05.")
+                   help="Tolerance on any state population (0 to 1). Default 0.05.")
+    r.add_argument("--criterion", default="standard_error", choices=list(CRITERIA),
+                   help="What has to be at most --precision. standard_error (default): the plain standard error. "
+                        "confidence: the half-width of a 1-alpha interval, with alpha shared over the planned "
+                        "decision points, so that stopping early is not helped by looking many times. sequence: a "
+                        "confidence sequence, valid however often the agent looks (the widest, so the slowest).")
+    r.add_argument("--alpha", type=float, default=0.05,
+                   help="Allowed chance that the true value is outside the interval (default 0.05). Used by "
+                        "--criterion confidence and sequence, and by 'compare'.")
     r.add_argument("--allow", default=None,
                    help="What the agent may do by itself, comma separated: extend, add_replicas, switch_method, "
                         "stop_early; or 'none'. Default: all in auto mode, none in guided mode.")
@@ -561,7 +574,52 @@ def build_parser() -> argparse.ArgumentParser:
                                         "and a longer reference run.")
     cp.add_argument("--run", required=True)
     cp.add_argument("--reference", required=True)
+    cp.add_argument("--tolerance", type=float, default=None,
+                    help="Populations that differ by less than this count as the same answer. Default: the "
+                         "precision the compared run asked for.")
+    cp.add_argument("--alpha", type=float, default=0.05, help="Confidence of the equivalence test (default 0.05).")
     cp.set_defaults(func=cmd_compare)
+
+    b = sub.add_parser("budget", help="Which way of spending simulation time reaches the asked precision for the "
+                                      "lowest cost? Replays strategies on a finished long run, or on a model.")
+    b.add_argument("--run", default=None, help="A finished plain MD run with several replicas, used as the pool.")
+    b.add_argument("--synthetic", default=None,
+                   help="Instead of a run: a model with known populations, for example '0.3,0.7' or '0.2,0.5,0.3'. "
+                        "Needs no GPU.")
+    b.add_argument("--rate-per-ns", type=float, default=1.0,
+                   help="Model only: how often the item changes state, per ns (default 1).")
+    b.add_argument("--pool-replicas", type=int, default=12, help="Model only: replicas in the pool (default 12).")
+    b.add_argument("--pool-ns", type=float, default=60.0, help="Model only: ns per pool replica (default 60).")
+    b.add_argument("--replicas", type=int, default=3, help="Replicas every strategy starts with (default 3).")
+    b.add_argument("--first-ns", type=float, default=2.0)
+    b.add_argument("--extend-ns", type=float, default=2.0)
+    b.add_argument("--max-ns", type=float, default=20.0, help="Budget per replica (default 20).")
+    b.add_argument("--max-replicas", type=int, default=10)
+    b.add_argument("--fixed-replicas", type=int, default=None,
+                   help="The baseline: the plan a person would fix in advance, without looking at data. "
+                        "Default: the same as --replicas, which is usually generous to the agent, because a "
+                        "real fixed plan has to be safe without looking.")
+    b.add_argument("--fixed-ns", type=float, default=None, help="ns per replica of the baseline plan. Default: "
+                                                                "--max-ns.")
+    b.add_argument("--extend-factor", type=float, default=2.0,
+                   help="How far past the budget the mdagent strategy may run (default 2).")
+    b.add_argument("--precision", type=float, default=0.05, help="Tolerance on any population (default 0.05).")
+    b.add_argument("--criterion", default="standard_error", choices=list(CRITERIA))
+    b.add_argument("--alpha", type=float, default=0.05)
+    b.add_argument("--min-flips", type=int, default=4, help="Flips per replica before a result counts (default 4).")
+    b.add_argument("--no-flip-patience-ns", type=float, default=10.0)
+    b.add_argument("--repeats", type=int, default=1,
+                   help="Repeat the whole comparison with different replicas (default 1). Use 10 or more before "
+                        "believing a saving.")
+    b.add_argument("--seed", type=int, default=0)
+    b.add_argument("--equilibration-ns", type=float, default=None,
+                   help="Cost of starting one replica. Default: the equilibration of the run, or 0.6 ns.")
+    b.add_argument("--parallel", type=int, default=1, help="How many replicas run at the same time (default 1).")
+    b.add_argument("--ns-per-day", type=float, default=0.0, help="Measured throughput, to print GPU-hours.")
+    b.add_argument("--out", default=None, help="Where to write budget.json and budget.md. Default: the run folder, "
+                                               "or runs/budget for a model.")
+    b.add_argument("--name", default="budget")
+    b.set_defaults(func=cmd_budget)
 
     st = sub.add_parser("start", help="Start here: choose the language, the language model (Claude or ChatGPT) "
                                       "and where to talk (web page or terminal).")
@@ -632,9 +690,56 @@ def cmd_report(args) -> int:
 def cmd_compare(args) -> int:
     from .report import compare
 
-    table, agree = compare(Path(args.run), Path(args.reference))
+    table, agree = compare(Path(args.run), Path(args.reference), args.tolerance, args.alpha)
     print(table)
     return 0 if agree else 1
+
+
+def cmd_budget(args) -> int:
+    from .budget import Plan, compare_strategies, format_table, markov_pool, pool_from_run, write
+    from .cost import CostModel
+    from .uncertainty import Precision
+
+    if not args.run and not args.synthetic:
+        print("Give either --run (a finished long run to replay) or --synthetic (a model with known populations).")
+        return 2
+    equil = args.equilibration_ns
+    if args.synthetic:
+        pops = [float(x) for x in args.synthetic.replace(";", ",").split(",") if x.strip()]
+        if len(pops) < 2:
+            raise ValueError("--synthetic needs at least two populations, for example '0.3,0.7'.")
+        pool = markov_pool(pops, args.rate_per_ns, args.pool_replicas, args.pool_ns, seed=args.seed)
+        out_dir = Path(args.out or "runs/budget")
+    else:
+        pool = pool_from_run(args.run)
+        out_dir = Path(args.out or args.run)
+        if equil is None:
+            import json as _json
+
+            md = _json.loads((Path(args.run) / "run.json").read_text()).get("md", {})
+            equil = md.get("equilibration_ps", 600.0) / 1000.0
+    plan = Plan(replicas=args.replicas, first_ns=args.first_ns, extend_ns=args.extend_ns, max_ns=args.max_ns,
+                max_replicas=args.max_replicas, extend_factor=args.extend_factor,
+                min_flips_per_replica=args.min_flips, no_flip_patience_ns=args.no_flip_patience_ns,
+                fixed_replicas=args.fixed_replicas, fixed_ns=args.fixed_ns)
+    precision = Precision(epsilon=args.precision, criterion=args.criterion, alpha=args.alpha, looks=plan.looks())
+    model = CostModel(equilibration_ns=0.6 if equil is None else equil, n_parallel=args.parallel,
+                      ns_per_day=args.ns_per_day)
+    print(f"Pool: {pool.source}")
+    print(f"{pool.n_replicas} replicas of {pool.ns_per_replica:g} ns, items: {', '.join(pool.labels)}.")
+    if pool.n_replicas <= max(args.replicas, args.fixed_replicas or 0):
+        print(f"Warning: the pool has {pool.n_replicas} replicas, so no replica is left over as an independent "
+              "reference. Run the pool with more replicas, or start the strategies with fewer.")
+    out = compare_strategies(pool, plan, precision, model, repeats=args.repeats, seed=args.seed)
+    print()
+    print(format_table(out))
+    if args.ns_per_day > 0:
+        print()
+        for name, v in out.summary.items():
+            print(f"{name:<14}{v['compute_ns_median'] / args.ns_per_day * 24:.1f} GPU-hours (median)")
+    for path in write(out, out_dir, args.name):
+        print(f"\nWritten: {path.resolve()}")
+    return 0
 
 
 def cmd_start(args) -> int:

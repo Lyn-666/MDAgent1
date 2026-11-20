@@ -28,6 +28,19 @@ from dataclasses import asdict, dataclass
 from .messages import post
 
 
+def spread_labels(reports) -> list[str]:
+    """Items whose replicas clearly disagree, so more independent replicas help more than longer ones.
+
+    Shared with the budget comparison (budget.py), so that the replayed policy is the real one.
+    """
+    return [r.label for r in reports if r.replicas_differ or r.verdict == "replicas_disagree"]
+
+
+def stalled_labels(reports, ns_done: float, patience_ns: float) -> list[str]:
+    """Items that have not changed state once, after long enough that plain MD is unlikely to show it."""
+    return [r.label for r in reports if sum(r.transitions) == 0 and ns_done >= patience_ns]
+
+
 @dataclass
 class Action:
     phase: str          # "plain_md" or "enhanced_sampling"
@@ -96,8 +109,7 @@ def plain_md_next(run_dir, state, reports, decisions, next_ns: float) -> float:
 
     # Rule 3: the error comes mainly from the spread between replicas.
     if next_ns > 0 and state.sampling != "adaptive" and ns < 0.5 * state.loop.max_ns:
-        spread = [d.residue for d in flipping if by_label[d.residue].replicas_differ
-                  or by_label[d.residue].verdict == "replicas_disagree"]
+        spread = spread_labels([by_label[d.residue] for d in flipping])
         if spread and state.n_replicas < goal.max_replicas:
             add = min(2, goal.max_replicas - state.n_replicas)
             why = (f"The replicas clearly disagree about {', '.join(spread)}, so more independent replicas help "

@@ -42,7 +42,7 @@ import mdtraj as md
 import numpy as np
 
 from .target import ResidueKey
-from .uncertainty import block_standard_error, combine_replicas, error_parts
+from .uncertainty import Precision, block_standard_error, combine_replicas, error_parts
 
 STATE_CENTERS_DEG = {"g+": 60.0, "t": 180.0, "g-": -60.0}
 STATE_NAMES = list(STATE_CENTERS_DEG)
@@ -145,6 +145,7 @@ class ResidueReport:
     reason: str = ""
     populations: dict | None = None   # Mean over replicas.
     standard_error: dict | None = None  # Of each population, allowing for time correlation.
+    halfwidth: dict | None = None  # Half-width of the interval the goal asks for (uncertainty.Precision).
     name: str = ""            # Label of an item that is not a residue (for example a distance).
     quantity: str = "chi1"    # What has the states: "chi1" or "distance" (observables.py).
     extra: dict | None = None  # Other numbers worth showing, for example the mean distance.
@@ -185,7 +186,9 @@ class ResidueReport:
         return f"{prefix}{t:.1f} ns" if t >= 0.1 else f"{prefix}{t * 1000:.0f} ps"
 
 
-def judge(report: ResidueReport, min_flips_per_replica: int = 4, precision: float | None = None) -> None:
+def judge(report: ResidueReport, min_flips_per_replica: int = 4, precision=None) -> None:
+    """Give the item a verdict. `precision` is a Precision, a plain standard error, or None."""
+    p = Precision.of(precision)
     total = sum(report.transitions)
     n = len(report.transitions)
     q = "chi1" if report.quantity == "chi1" else "The distance"
@@ -205,11 +208,18 @@ def judge(report: ResidueReport, min_flips_per_replica: int = 4, precision: floa
         report.verdict = "rare_flips"
         report.reason = (f"{q} state changes per replica: {report.transitions}. "
                          f"Fewer than {min_flips_per_replica} in at least one replica.")
-    elif precision is not None and report.standard_error and max(report.standard_error.values()) > precision:
+    elif p is not None and report.standard_error and not p.met(report.standard_error, report.populations):
+        report.halfwidth = {k: round(v, 3) for k, v in
+                            p.halfwidths(report.standard_error, report.populations).items()}
         report.verdict = "imprecise"
         report.reason = (f"{q} state changes per replica: {report.transitions}, but the largest population error is "
-                         f"{max(report.standard_error.values()):.3f}, more than the requested {precision:g}.")
+                         f"{p.worst(report.standard_error, report.populations):.3f}"
+                         + (f" ({p.criterion})" if p.criterion != "standard_error" else "")
+                         + f", more than the requested {p.epsilon:g}.")
     else:
+        if p is not None and report.standard_error:
+            report.halfwidth = {k: round(v, 3) for k, v in
+                                p.halfwidths(report.standard_error, report.populations).items()}
         report.verdict = "ok"
         report.reason = f"{q} state changes per replica: {report.transitions}."
 
