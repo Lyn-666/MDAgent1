@@ -146,3 +146,98 @@ def angles(traj, quads: list[list[int]]) -> np.ndarray:
     import mdtraj as md
 
     return np.degrees(md.compute_dihedrals(traj, np.asarray(quads)))
+
+
+# ---------------------------------------------------------------------------------------------
+# Everything one item tells about itself, from frame-by-frame states (and angles, for the landscape).
+# Used by the live agent and by the offline benchmark, so both judge the same numbers.
+
+def histogram(values: list, bins: int = 36) -> np.ndarray:
+    """Normalised histogram of the angles of all replicas (1D or 2D, 10 degree bins by default)."""
+    v = [np.asarray(x, float).reshape(len(x), -1) for x in values if len(x)]
+    if not v:
+        return np.zeros(bins)
+    v = np.concatenate(v)
+    if v.shape[1] == 1:
+        h, _ = np.histogram(v[:, 0], bins=bins, range=(-180, 180))
+    else:
+        h, _, _ = np.histogram2d(v[:, 0], v[:, 1], bins=bins, range=[[-180, 180], [-180, 180]])
+    h = h.astype(float).ravel()
+    return h / h.sum() if h.sum() else h
+
+
+def js_bits(p: np.ndarray, q: np.ndarray, support: np.ndarray | None = None) -> float:
+    """Jensen-Shannon divergence in bits (0 to 1), optionally only on the given bins."""
+    if support is not None:
+        p, q = p[support], q[support]
+    if p.sum() <= 0 or q.sum() <= 0:
+        return 1.0
+    p, q = p / p.sum(), q / q.sum()
+    m = 0.5 * (p + q)
+
+    def kl(a):
+        nz = a > 0
+        return float(np.sum(a[nz] * np.log2(a[nz] / m[nz])))
+    return 0.5 * kl(p) + 0.5 * kl(q)
+
+
+def summarize(states: list, values: list | None, names: list, ns_per_frame: float) -> dict:
+    """Populations with errors (time correlation and replica spread), the free-energy difference of the
+    first two basins (kT), the rates between them, and the landscape histogram with its split-half check.
+
+    states: one array of state indices per replica (-1 before the first core). values: the angles,
+    one (frames, dims) array per replica, or None (then no landscape).
+    """
+    import math
+
+    from .uncertainty import block_standard_error, error_parts
+
+    pops, se, within, between = {}, {}, {}, {}
+    for k, name in enumerate(names):
+        hits = [(s[s >= 0] == k).astype(float) for s in states]
+        vals = [float(h.mean()) if h.size else 0.0 for h in hits]
+        errs = [block_standard_error(h) for h in hits]
+        w, bt = error_parts(vals, errs)
+        pops[name] = float(np.mean(vals))
+        se[name] = max(w, bt) if len(vals) > 1 else (errs[0] if np.isfinite(errs[0]) else float("nan"))
+        within[name], between[name] = w, bt
+    trans, counts, dwell = [], np.zeros((len(names), len(names))), np.zeros(len(names))
+    for s in states:
+        s = s[s >= 0]
+        change = np.nonzero(s[1:] != s[:-1])[0]
+        trans.append(int(len(change)))
+        for i in change:
+            counts[s[i], s[i + 1]] += 1
+        for k in range(len(names)):
+            dwell[k] += np.sum(s == k) * ns_per_frame
+    a, c = 0, 1
+    pa, pc = pops[names[a]], pops[names[c]]
+    dg = -math.log(pc / pa) if pa > 0 and pc > 0 else float("inf")
+    # Conservative: the two errors add, as if fully correlated (two-state populations are).
+    dg_se = (se[names[a]] / pa + se[names[c]] / pc) if pa > 0 and pc > 0 else float("inf")
+    rates = {}
+    for i, j in ((a, c), (c, a)):
+        nij = counts[i, j]
+        rates[f"{names[i]}->{names[j]}"] = {"k_per_ns": float(nij / dwell[i]) if dwell[i] > 0 else 0.0,
+                                            "n": int(nij), "rel_se": 1 / math.sqrt(nij) if nij else float("inf")}
+    out = {"populations": pops, "se": se, "transitions": trans, "dg_kt": dg, "dg_se": dg_se, "rates": rates}
+    worst = max(names, key=lambda k: se[k] if np.isfinite(se[k]) else 1.0)
+    out["within"], out["between"] = within[worst], between[worst]
+    if values is not None:
+        out["hist"] = histogram(values)
+        halves = ([values[i] for i in range(0, len(values), 2)], [values[i] for i in range(1, len(values), 2)]) \
+            if len(values) > 1 else ([values[0][: len(values[0]) // 2]], [values[0][len(values[0]) // 2:]])
+        out["split_js"] = js_bits(histogram(halves[0]), histogram(halves[1]))
+    return out
+
+
+def judge(est: dict, z: float, tolerance: float, min_transitions: int = 4, dg_kt: float = 0.5,
+          rate_rel: float = 0.2, landscape_js: float = 0.05) -> dict:
+    """The method's own verdict on each observable, from its own data only (never a reference)."""
+    adequate = bool(est["transitions"]) and min(est["transitions"]) >= min_transitions
+    pops_ok = all(np.isfinite(v) and z * v <= tolerance for v in est["se"].values())
+    rates_ok = all(r["n"] > 0 and z * r["rel_se"] <= rate_rel for r in est["rates"].values())
+    return {"populations": pops_ok and adequate, "adequate": adequate,
+            "dg": adequate and np.isfinite(est["dg_se"]) and z * est["dg_se"] <= dg_kt,
+            "rates": adequate and rates_ok,
+            "landscape": adequate and est.get("split_js", 1.0) <= landscape_js}

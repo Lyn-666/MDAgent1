@@ -28,11 +28,25 @@ MODEL = "claude-opus-5-5"
 class RunPlan(BaseModel):
     """Settings for one `mdagent run`. Leave a field null to keep its default."""
 
-    target_kind: Literal["ligand", "residues", "distance"] = Field(
+    target_kind: Literal["ligand", "residues", "distance", "backbone"] = Field(
         description="'ligand': the target is all protein residues near a ligand in the PDB file. "
                     "'residues': the target is a list of residues. Both study side-chain conformations (chi1). "
                     "'distance': the user wants to know about distances between atoms (a pocket opening, a "
-                    "contact, a gate); give them in `distances`.")
+                    "contact, a gate); give them in `distances`. "
+                    "'backbone': the user wants backbone conformations: Ramachandran (phi/psi) basin populations, "
+                    "transitions between them, a phi/psi free-energy landscape, or the type of a beta turn; give "
+                    "them in `backbone`.")
+    backbone: Optional[str] = Field(
+        None, description="Only for target_kind 'backbone', separated by ';': 'rama:A:73' for the phi/psi basins of "
+                          "residue 73 ('rama:A:70-74' for a range), 'turn:A:52' for the beta turn whose residue i+1 "
+                          "is 52 (type I or II). Use residue numbers from the file summary; ask if they are unclear.")
+    allocation: Optional[Literal["rounds", "projection"]] = Field(
+        None, description="'projection' when the user lets MDAgent decide how many replicas, how long and when to "
+                          "stop, or asks to minimise the simulation cost for a required accuracy. Default rounds.")
+    budget_ns: Optional[float] = Field(
+        None, description="Only if the user gives a total budget: production ns of all replicas together.")
+    max_replicas: Optional[int] = Field(
+        None, description="Only if the user limits the number of replicas. Default 10.")
     distances: Optional[str] = Field(
         None, description="Only for target_kind 'distance': atom pairs with a cutoff in nm, separated by ';', "
                           "for example 'A:88:OH-A:111:CG1@0.6'. Use standard PDB atom names (CA, CB, OH, NZ, "
@@ -74,7 +88,7 @@ class RunPlan(BaseModel):
                           "runs only that and suggests changes in the chat.")
     goal: Optional[str] = Field(None, description="What the user wants to know, in the user's own words.")
     precision: Optional[float] = Field(
-        None, description="Largest allowed error of a chi1 state population (0 to 1), only if the user "
+        None, description="Largest allowed error of a state population (0 to 1), only if the user "
                           "states a precision (for example 'within 5%' -> 0.05). Default 0.05.")
     criterion: Optional[Literal["standard_error", "confidence", "sequence"]] = Field(
         None, description="Only if the user asks for a careful or a quick judgement of when to stop. "
@@ -110,8 +124,14 @@ class RunPlan(BaseModel):
 
 
 SYSTEM = """You turn a researcher's request into settings for MDAgent, a molecular dynamics tool.
-MDAgent builds a solvated system from a protein PDB file, runs plain MD in rounds, finds side chains
-in a target region that did not sample their chi1 states, and runs enhanced sampling on them.
+MDAgent builds a solvated system from a protein PDB file and runs MD until the quantity the user asks for is
+precise enough: side-chain conformations (chi1), distances between atoms, or backbone conformations (phi/psi
+basins, transitions between them, the phi/psi free-energy landscape, beta-turn types). For side chains that
+plain MD cannot sample it runs enhanced sampling.
+
+If the user lets MDAgent decide how many replicas, how long and when to stop, or asks to minimise the cost for a
+required accuracy, set allocation "projection". If the user also restricts the method to standard (unbiased,
+plain) MD, keep mode null and set allow "extend,add_replicas,stop_early" (no switch to enhanced sampling).
 
 Rules:
 - Fill in only what the user asked for. Leave every other field null, so it keeps its default.
@@ -159,6 +179,7 @@ FLAGS = [  # RunPlan field -> command line option
     ("enhanced_ns", "--enhanced-ns"), ("enhanced_replicas", "--enhanced-replicas"),
     ("enhanced_max_residues", "--enhanced-max-residues"), ("equil_ps", "--equil-ps"), ("mode", "--mode"),
     ("goal", "--goal"), ("precision", "--precision"), ("criterion", "--criterion"), ("allow", "--allow"),
+    ("allocation", "--allocation"), ("budget_ns", "--budget-ns"), ("max_replicas", "--max-replicas"),
     ("chains", "--chains"), ("uniprot", "--uniprot"), ("termini", "--termini"),
 ]
 SWITCHES = [("check_protonation", "--check-protonation"), ("no_enhanced_sampling", "--no-enhanced-sampling"),
@@ -183,6 +204,12 @@ def to_argv(plan: RunPlan, pdb: str | None, out: str, prmtop: str | None = None,
         if not plan.distances:
             raise ValueError("The plan studies distances but gives none.")
         argv += ["--quantity", "distance", "--distances", plan.distances]
+        if plan.residues:
+            argv += ["--residues", plan.residues]
+    elif plan.target_kind == "backbone":
+        if not plan.backbone:
+            raise ValueError("The plan studies backbone basins but names none.")
+        argv += ["--quantity", "backbone", "--backbone", plan.backbone]
         if plan.residues:
             argv += ["--residues", plan.residues]
     elif plan.target_kind == "ligand":
@@ -237,6 +264,8 @@ def ask(request: str, pdb: str, out: str, assume_yes: bool = False, planner=None
     changed = [f"{name} = {getattr(plan, name)}" for name, _ in FLAGS + SWITCHES
                if getattr(plan, name) not in (None, False)]
     target = (f"residues within {plan.cutoff_angstrom or 5:g} Å of {plan.ligand}" if plan.target_kind == "ligand"
+              else f"backbone basins {plan.backbone}" if plan.target_kind == "backbone"
+              else f"distances {plan.distances}" if plan.target_kind == "distance"
               else f"residues {plan.residues}")
     print(f"\nTarget: {target}")
     print("Changed from the defaults: " + (", ".join(changed) if changed else "nothing"))

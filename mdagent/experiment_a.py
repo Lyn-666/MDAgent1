@@ -55,7 +55,8 @@ from statistics import NormalDist
 import numpy as np
 
 from . import cost as cost_mod
-from .uncertainty import block_standard_error, error_parts
+from .allocation import ItemState, Limits, allocate, chi2_quantile, next_step, z_bonferroni  # noqa: F401
+from .basins import js_bits
 
 STOP, INSUFFICIENT = "STOP", "INSUFFICIENT_EVIDENCE"
 
@@ -95,11 +96,6 @@ class Design:
 
     def sequential_looks(self, n: int) -> int:
         return max(1, int(math.ceil(min(self.max_ns, self.budget_ns / n) / self.chunk_ns)))
-
-
-def z_bonferroni(alpha: float, looks: int) -> float:
-    """Two-sided interval factor with alpha shared over a known largest number of looks."""
-    return NormalDist().inv_cdf(1 - alpha / (2 * max(1, looks)))
 
 
 # ---------------------------------------------------------------------------------------------
@@ -219,88 +215,20 @@ def select_items(pool: BenchPool, min_transitions: int = 4, at_most: int = 5) ->
 # ---------------------------------------------------------------------------------------------
 # Estimates from the frames a method has paid for.
 
-def _hist(vals: list, bins: int = 36) -> np.ndarray:
-    v = np.concatenate([np.asarray(x).reshape(len(x), -1) for x in vals]) if vals else np.zeros((0, 1))
-    if v.shape[1] == 1:
-        h, _ = np.histogram(v[:, 0], bins=bins, range=(-180, 180))
-    else:
-        h, _, _ = np.histogram2d(v[:, 0], v[:, 1], bins=bins, range=[[-180, 180], [-180, 180]])
-    h = h.astype(float).ravel()
-    return h / h.sum() if h.sum() else h
-
-
-def js_bits(p: np.ndarray, q: np.ndarray, support: np.ndarray | None = None) -> float:
-    """Jensen-Shannon divergence in bits (0 to 1), optionally only on the given bins."""
-    if support is not None:
-        p, q = p[support], q[support]
-    if p.sum() <= 0 or q.sum() <= 0:
-        return 1.0
-    p, q = p / p.sum(), q / q.sum()
-    m = 0.5 * (p + q)
-
-    def kl(a):
-        nz = a > 0
-        return float(np.sum(a[nz] * np.log2(a[nz] / m[nz])))
-    return 0.5 * kl(p) + 0.5 * kl(q)
-
-
 def estimate(pool: BenchPool, label: str, replicas: list, ns: float, design: Design) -> dict:
-    """Every observable of one item, from `replicas` up to `ns`, with errors that allow for time
-    correlation. Nothing here looks at a reference."""
+    """Every observable of one item, from `replicas` up to `ns` (basins.summarize). No reference here."""
+    from .basins import summarize
+
     n, b = pool.frames(ns), pool.frames(design.burn_in_ns) if design.burn_in_ns > 0 else 0
-    names = pool.names[label]
-    sts = [pool.states[label][i][:n] for i in replicas]
-    use = [s[b:] for s in sts]
-    pops, se, within, between = {}, {}, {}, {}
-    for k, name in enumerate(names):
-        hits = [(s[s >= 0] == k).astype(float) for s in use]
-        vals = [float(h.mean()) if h.size else 0.0 for h in hits]
-        errs = [block_standard_error(h) for h in hits]
-        w, bt = error_parts(vals, errs)
-        pops[name] = float(np.mean(vals))
-        se[name] = max(w, bt) if len(vals) > 1 else (errs[0] if np.isfinite(errs[0]) else float("nan"))
-        within[name], between[name] = w, bt
-    # Transitions between consecutive distinct states, and the time spent in each state.
-    trans = []
-    counts = np.zeros((len(names), len(names)))
-    dwell = np.zeros(len(names))
-    for s in use:
-        s = s[s >= 0]
-        change = np.nonzero(s[1:] != s[:-1])[0]
-        trans.append(int(len(change)))
-        for i in change:
-            counts[s[i], s[i + 1]] += 1
-        for k in range(len(names)):
-            dwell[k] += np.sum(s == k) * pool.ns_per_frame
-    a, c = 0, 1   # the two main basins: the first two of the definition
-    pa, pc = pops[names[a]], pops[names[c]]
-    dg = -math.log(pc / pa) if pa > 0 and pc > 0 else float("inf")
-    dg_se = (se[names[a]] / pa + se[names[c]] / pc) if pa > 0 and pc > 0 else float("inf")
-    rates = {}
-    for i, j in ((a, c), (c, a)):
-        nij = counts[i, j]
-        rates[f"{names[i]}->{names[j]}"] = {"k_per_ns": float(nij / dwell[i]) if dwell[i] > 0 else 0.0,
-                                            "n": int(nij), "rel_se": 1 / math.sqrt(nij) if nij else float("inf")}
-    vals = [pool.values[label][i][b:n] for i in replicas]
-    hist = _hist(vals)
-    halves = ([vals[i] for i in range(0, len(vals), 2)], [vals[i] for i in range(1, len(vals), 2)]) \
-        if len(vals) > 1 else ([vals[0][: len(vals[0]) // 2]], [vals[0][len(vals[0]) // 2:]])
-    split_js = js_bits(_hist(halves[0]), _hist(halves[1]))
-    worst = max(names, key=lambda k: se[k] if np.isfinite(se[k]) else 1.0)
-    return {"populations": pops, "se": se, "transitions": trans, "dg_kt": dg, "dg_se": dg_se,
-            "rates": rates, "hist": hist, "split_js": split_js,
-            "within": within[worst], "between": between[worst]}
+    return summarize([pool.states[label][i][b:n] for i in replicas],
+                     [pool.values[label][i][b:n] for i in replicas], pool.names[label], pool.ns_per_frame)
 
 
 def judge_online(est: dict, z: float, targets: Targets) -> dict:
-    """The method's own verdict on each observable, from its own data only."""
-    pops_ok = all(np.isfinite(v) and z * v <= targets.population for v in est["se"].values())
-    adequate = bool(est["transitions"]) and min(est["transitions"]) >= targets.min_transitions
-    rates_ok = all(r["n"] > 0 and z * r["rel_se"] <= targets.rate_rel for r in est["rates"].values())
-    return {"populations": pops_ok and adequate, "adequate": adequate,
-            "dg": adequate and np.isfinite(est["dg_se"]) and z * est["dg_se"] <= targets.dg_kt,
-            "rates": adequate and rates_ok,
-            "landscape": adequate and est["split_js"] <= targets.landscape_js}
+    from .basins import judge
+
+    return judge(est, z, targets.population, targets.min_transitions, targets.dg_kt, targets.rate_rel,
+                 targets.landscape_js)
 
 
 def compare_to_reference(est: dict, ref: dict, z: float, targets: Targets) -> dict:
@@ -410,118 +338,31 @@ def run_sequential_ci(pool, order, design, targets, ref, model, n: int) -> Trial
     return t
 
 
-def chi2_quantile(p: float, k: int) -> float:
-    """Wilson-Hilferty approximation of the chi-square quantile (good to a few percent for k >= 2)."""
-    zp = NormalDist().inv_cdf(p)
-    return k * (1 - 2 / (9 * k) + zp * math.sqrt(2 / (9 * k))) ** 3
-
-
-def allocate(ests: dict, labels: list, n: int, ns: float, z: float, targets: Targets, design: Design,
-             max_n: int, max_ns: float, equil_ns: float):
-    """The cheapest (replicas, ns per replica) that is projected to reach the precision, or None.
-
-    The error of a population is split into the part inside the replicas, which falls with all the
-    data together (replicas x length), and the extra spread between replicas beyond that, which only
-    more replicas reduce (for example memory of the starting structure, or a slow process that some
-    replicas cross and others do not). Every extra replica also pays its equilibration, so a longer
-    run is preferred unless the spread between replicas makes it useless. Lengths cannot shrink.
-    Returns (replicas, ns per replica, projected compute ns).
-    """
-    best = None
-    # Spread between replicas only counts when it is larger than chance: with n replicas and no real
-    # difference between them, (between/within)^2 follows chi2(n-1)/(n-1); its 95% point is the limit.
-    limit = chi2_quantile(0.95, n - 1) / (n - 1) if n > 1 else float("inf")
-    for m in range(n, max_n + 1):
-        need = 0.0
-        for k in labels:
-            w, b = ests[k]["within"], ests[k]["between"]
-            real = w > 0 and (b * b) / (w * w) > limit
-            extra = (b * b - w * w) * n / m if real else 0.0   # replica-to-replica part, shrinks with replicas only
-            room = (targets.population / z) ** 2 - extra       # what is left for the inside part
-            if room <= 0:
-                need = float("inf")
-                break
-            need = max(need, ns * (w * w * n / m) / room)     # length at which the inside part fits
-        length = max(ns, need)
-        if length > max_ns + 1e-9:
-            continue
-        cost = m * (length + equil_ns)
-        if best is None or cost < best[2]:
-            best = (m, length, cost)
-    return best
-
-
 def run_agent(pool, order, design, targets, ref, model) -> Trial:
-    """The agent's allocation rule. Frozen before the pool is analysed; see the module docstring.
-
-    The first look only plans: it may not stop, so it spends none of alpha. After it, the agent may stop
-    at no more than `agent_looks` looks, and its intervals are calibrated for exactly that many. Between
-    looks it jumps to the cheapest allocation projected to reach the precision (allocate), so it needs
-    few looks; before the last one it asks for a larger margin, because there is no second chance.
-    """
+    """The agent: allocation.next_step, the same rule the live run loop uses."""
     z = z_bonferroni(targets.alpha, design.agent_looks)
+    limits = Limits(max_replicas=min(design.max_replicas, len(order)),
+                    max_ns=min(design.max_ns, pool.ns_per_replica), budget_ns=design.budget_ns,
+                    chunk_ns=design.chunk_ns, patience_ns=design.patience_ns, give_up_factor=design.give_up_factor,
+                    margin=design.margin, final_margin=design.final_margin, stop_looks=design.agent_looks,
+                    min_transitions=targets.min_transitions)
     n, ns, looks, tests, t = design.replicas, design.chunk_ns, 0, 0, Trial("agent")
-    max_n = min(design.max_replicas, len(order))
-    max_ns = min(design.max_ns, pool.ns_per_replica)
     while True:
         looks += 1
-        planning = looks == 1
         ests, online, offline = _snapshot(pool, order, n, ns, design, targets, ref, z)
         t.path.append((cost_mod.of([ns] * n, model, looks=looks).compute_ns,
                        max(offline[k]["population_error"] for k in pool.labels),
                        all(offline[k]["populations"] for k in pool.labels)))
-        if not planning:
-            tests += 1
-            if all(online[k]["populations"] for k in pool.labels):
-                t.decision, t.reason = STOP, "every population interval is narrow enough and sampling is adequate"
-                break
-        spent = n * ns
-        full = spent >= design.budget_ns - 1e-9 or (ns >= max_ns - 1e-9 and n >= max_n)
-        if tests >= design.agent_looks or full:
-            t.decision = INSUFFICIENT
-            t.reason = ("the largest number of looks is reached" if tests >= design.agent_looks
-                        else "the budget is used up")
+        items = [ItemState(k, ests[k]["se"], ests[k]["within"], ests[k]["between"], ests[k]["transitions"],
+                           online[k]["populations"]) for k in pool.labels]
+        step = next_step(items, n, ns, looks, tests, z, targets.population, limits, pool.equilibration_ns)
+        tests += 0 if step.planning else 1
+        if step.action != "continue":
+            t.decision, t.reason = step.action, step.reason
             break
-        stuck = [k for k in pool.labels if sum(ests[k]["transitions"]) == 0]
-        if stuck and ns >= design.patience_ns:
-            t.decision = INSUFFICIENT
-            t.reason = f"{', '.join(stuck)} never changed basin in {ns:g} ns per replica; plain MD cannot answer"
-            break
-        last = tests == design.agent_looks - 1          # the next look is the last one that may stop
-        margin = design.final_margin if last else design.margin
-        adequate = all(online[k]["adequate"] for k in pool.labels)
-        new_n, new_ns = n, ns
-        if not adequate:
-            # Too few transitions to trust any error estimate: run longer, doubling (more before the last look).
-            new_ns = min(max_ns, (4 if last else 2) * ns)
-            why = "too few transitions to trust the errors; running longer"
-        else:
-            plan = allocate(ests, pool.labels, n, ns, z, targets, design, max_n, max_ns, pool.equilibration_ns)
-            # A projection from very little data is too noisy to give up on: wait for a quarter of the budget.
-            hopeless = plan is None or plan[2] > design.give_up_factor * design.budget_ns
-            if hopeless and spent < design.budget_ns / 4:
-                plan = (n, min(max_ns, max(2 * ns, design.budget_ns / 4 / n)), 0.0)
-                hopeless = False
-            if hopeless:
-                t.decision = INSUFFICIENT
-                need = "no allocation within the limits reaches it" if plan is None else \
-                    f"the projected cost is {plan[2]:.0f} ns"
-                t.reason = (f"{need}; that is more than {design.give_up_factor:g} times the budget "
-                            f"({design.budget_ns:g} ns), so more plain MD will not reach the precision")
-                break
-            new_n, new_ns = plan[0], min(max_ns, plan[1] * margin)
-            why = (f"projected: {new_n} replicas of {plan[1]:.1f} ns reach the precision for the least compute "
-                   f"(plus a {margin - 1:.0%} margin)")
-        if new_n * new_ns > design.budget_ns:   # stay inside the budget
-            new_ns = max(ns, design.budget_ns / new_n)
-            if new_n * new_ns > design.budget_ns + 1e-9:
-                new_n = n
-                new_ns = min(max_ns, design.budget_ns / n)
-        if new_n == n and new_ns <= ns + 1e-9:
-            new_ns = min(max_ns, ns + design.chunk_ns)
-        t.steps.append({"look": looks, "planning": planning, "replicas": n, "ns": round(ns, 3),
-                        "next_replicas": new_n, "next_ns": round(new_ns, 3), "why": why})
-        n, ns = new_n, round(new_ns, 6)
+        t.steps.append({"look": looks, "planning": step.planning, "replicas": n, "ns": round(ns, 3),
+                        "next_replicas": step.replicas, "next_ns": round(step.ns, 3), "why": step.reason})
+        n, ns = step.replicas, step.ns
     _close(t, pool, design, targets, ests, online, offline, n, ns, looks, model)
     return t
 

@@ -31,6 +31,12 @@ from .uncertainty import CRITERIA
 def _target_from_args(args) -> Target:
     if args.around_ligand:
         return Target(ligand=args.around_ligand, cutoff_nm=args.cutoff_angstrom / 10.0)
+    if not args.residues and getattr(args, "backbone", None):
+        # A backbone run without a target region: the target is the residues of the basin observables.
+        from .basins import parse_sets
+
+        res = {(s.chain, s.resseq + off) for s in parse_sets(args.backbone) for off, _ in s.dihedrals}
+        return Target(residues=tuple(sorted(res, key=lambda k: (k[0] or "", k[1]))))
     if not args.residues and getattr(args, "distances", None):
         # A distance run without a target region: the target is the residues of the distance atoms.
         from .observables import parse_distances
@@ -38,6 +44,19 @@ def _target_from_args(args) -> Target:
         res = {(c, n) for s in parse_distances(args.distances) for c, n in s.residues()}
         return Target(residues=tuple(sorted(res, key=lambda k: (k[0] or "", k[1]))))
     return Target(residues=parse_residue_spec(args.residues))
+
+
+def _check_backbone(args, structure: str | Path) -> list:
+    """Parse --backbone and find every backbone atom it needs. Raises ValueError with a clear message."""
+    import mdtraj as md
+
+    from .basins import dihedral_atoms, parse_sets
+
+    sets = parse_sets(args.backbone)
+    top = md.load_topology(str(structure))
+    for s in sets:
+        dihedral_atoms(top, s)
+    return sets
 
 
 def _check_distances(args, structure: str | Path) -> list:
@@ -120,6 +139,9 @@ def _goal_from_args(args):
 
     goal = Goal.for_mode(args.mode, description=args.goal, precision=args.precision,
                          criterion=getattr(args, "criterion", "standard_error"),
+                         allocation=getattr(args, "allocation", "rounds"),
+                         budget_ns=getattr(args, "budget_ns", 0.0) or 0.0,
+                         stop_looks=getattr(args, "stop_looks", 3),
                          alpha=getattr(args, "alpha", 0.05),
                          quantity=QUANTITIES[getattr(args, "quantity", "chi1")],
                          max_replicas=getattr(args, "max_replicas", 10), extend_factor=getattr(args, "extend_factor", 2.0))
@@ -228,6 +250,18 @@ def cmd_run(args) -> int:
     if args.distances and args.quantity == "chi1":
         args.quantity = "distance"
         print("Note: --distances given, so the quantity is distance.")
+    if args.backbone and args.quantity == "chi1":
+        args.quantity = "backbone"
+        print("Note: --backbone given, so the quantity is backbone basins.")
+    if args.quantity == "backbone":
+        if not args.backbone:
+            print("error: --quantity backbone needs --backbone, for example \"rama:A:73;turn:A:52\".", file=sys.stderr)
+            return 2
+        if args.sampling == "adaptive":
+            print("error: adaptive sampling does not support --quantity backbone yet.", file=sys.stderr)
+            return 2
+        if args.pdb:
+            _check_backbone(args, args.pdb)  # Fail before building if an atom is not there.
     if args.quantity == "chi1" and not (args.residues or args.around_ligand):
         print("error: give the target with --residues or --around-ligand.", file=sys.stderr)
         return 2
@@ -310,6 +344,7 @@ def cmd_run(args) -> int:
     if check is not None:
         built, setup = _build_from_pdb(args, keys, out, check.remove_residues, check.cap_ends)
     specs = _check_distances(args, out / "protein.pdb") if args.quantity == "distance" else []
+    basin_sets = _check_backbone(args, out / "protein.pdb") if args.quantity == "backbone" else []
 
     loop = LoopSettings(
         first_ns=min(args.first_ns, args.max_ns),
@@ -330,6 +365,8 @@ def cmd_run(args) -> int:
         mode=args.mode,
         goal=asdict(_goal_from_args(args)),
         distances=[s.label for s in specs],
+        backbone=[s.label for s in basin_sets],
+        notes={"replicas_at_start": args.replicas},
         adaptive={"policy": args.adaptive_policy, "n_clusters": args.adaptive_clusters,
                   "full_interval_ps": args.full_save_ps} if args.sampling == "adaptive" else {},
         enhanced={"enabled": not args.no_enhanced_sampling,
@@ -343,12 +380,19 @@ def cmd_run(args) -> int:
         return 0
     goal = state.the_goal()
     what = (f"near/far populations of {', '.join(state.distances)}" if state.distances
-            else "chi1 populations of the target side chains")
+            else f"backbone basins of {', '.join(state.backbone)} (populations, dG, rates, phi/psi landscape)"
+            if state.backbone else "chi1 populations of the target side chains")
     print(f"Goal: {what}, {state.precision().describe()}"
           + (f" ({goal.description})" if goal.description else "") + ".")
     print("The agent may by itself: " + (", ".join(goal.permissions) or "nothing (it only suggests)") + ".")
-    print(f"Plan: {args.replicas} replicas. Round 1 is {loop.first_ns:g} ns per replica. "
-          f"Later rounds add {loop.extend_ns:g} ns. Budget: {loop.max_ns:g} ns per replica.")
+    if goal.allocation == "projection":
+        print(f"Plan: the agent decides how many replicas, how long and when to stop, for the least compute. It "
+              f"starts with {args.replicas} replicas of {loop.first_ns:g} ns (a look that only plans), then looks at "
+              f"most {goal.stop_looks} more times. Limits: {state.budget_ns():g} ns of production in total, "
+              f"{loop.max_ns:g} ns per replica, {goal.max_replicas} replicas.")
+    else:
+        print(f"Plan: {args.replicas} replicas. Round 1 is {loop.first_ns:g} ns per replica. "
+              f"Later rounds add {loop.extend_ns:g} ns. Budget: {loop.max_ns:g} ns per replica.")
     if args.sampling == "adaptive":
         print(f"Adaptive sampling: from round 2, AdaptivePy ({args.adaptive_policy}) chooses where each "
               f"replica starts. Full-system frames are saved every {args.full_save_ps:g} ps.")
@@ -459,7 +503,22 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Build and run even if the structure check finds problems.")
     r.add_argument("--equil-ps", type=float, default=600.0,
                    help="Equilibration length: restrained heating, restrained NPT, restraint release, free NPT.")
-    r.add_argument("--quantity", default="chi1", choices=["chi1", "distance"],
+    r.add_argument("--backbone", default=None,
+                   help="For --quantity backbone: backbone basins, separated by ';'. rama:A:73 is the phi/psi "
+                        "region of residue 73 (alphaR, beta, alphaL); turn:A:52 is the type of the beta turn whose "
+                        "residue i+1 is 52 (type I or II); rama:A:70-74 expands to every residue. Populations, the "
+                        "free-energy difference, rates and the phi/psi landscape are reported, each judged on its own.")
+    r.add_argument("--allocation", default="rounds", choices=["rounds", "projection"],
+                   help="rounds (default): fixed rounds of --extend-ns for every replica. projection: the agent "
+                        "decides how many replicas, how long and when to stop, for the least compute, within "
+                        "--budget-ns, --max-ns per replica and --max-replicas.")
+    r.add_argument("--budget-ns", type=float, default=0.0,
+                   help="With --allocation projection: production ns of all replicas together. Default: "
+                        "--replicas x --max-ns.")
+    r.add_argument("--stop-looks", type=int, default=3,
+                   help="With --allocation projection: the agent may stop at no more than this many looks, and its "
+                        "intervals are calibrated for that many (default 3).")
+    r.add_argument("--quantity", default="chi1", choices=["chi1", "distance", "backbone"],
                    help="What you want to know. chi1 (default): the rotamer states of the target side chains. "
                         "distance: how often atom distances are near or far (give them with --distances).")
     r.add_argument("--distances", default=None,

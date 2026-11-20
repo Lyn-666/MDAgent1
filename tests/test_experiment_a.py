@@ -81,11 +81,11 @@ def test_more_replicas_only_when_the_spread_between_them_is_real():
     calm = {"x": {"within": 0.03, "between": 0.03}}
     split = {"x": {"within": 0.01, "between": 0.025}}
     hopeless = {"x": {"within": 0.01, "between": 0.06}}
-    m, length, _ = allocate(calm, ["x"], 4, 10.0, 2.4, t, Design(), 8, 100.0, 0.6)
+    m, length, _ = allocate(list(calm.values()), 4, 10.0, 2.4, t.population, 8, 100.0, 0.6)
     assert m == 4 and length > 10.0                       # run longer: cheaper than new equilibrations
-    m2, _, _ = allocate(split, ["x"], 4, 10.0, 2.4, t, Design(), 8, 100.0, 0.6)
+    m2, _, _ = allocate(list(split.values()), 4, 10.0, 2.4, t.population, 8, 100.0, 0.6)
     assert m2 > 4                                          # the replicas disagree: only more replicas help
-    assert allocate(hopeless, ["x"], 4, 10.0, 2.4, t, Design(), 8, 100.0, 0.6) is None   # not even 8 would do
+    assert allocate(list(hopeless.values()), 4, 10.0, 2.4, t.population, 8, 100.0, 0.6) is None   # not even 8 would do
 
 
 def test_fewer_looks_allow_a_narrower_calibrated_interval():

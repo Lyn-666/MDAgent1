@@ -32,6 +32,7 @@ REASONS = {
     "target_reached": ("达到目标", "goal reached"),
     "stalled": ("采样停滞", "sampling stalled"),
     "budget_exhausted": ("预算用完", "budget used up"),
+    "insufficient_evidence": ("证据不足", "insufficient evidence"),
     "failed": ("运行失败", "run failed"),
 }
 
@@ -74,11 +75,107 @@ def _precision(state: dict):
     from .uncertainty import Precision, planned_looks
 
     goal, loop = state.get("goal") or {}, state.get("loop") or {}
+    if goal.get("allocation") == "projection":   # as RunState.precision(): calibrated for the stop looks
+        return Precision(epsilon=goal.get("precision", 0.05), criterion="confidence", alpha=goal.get("alpha", 0.05),
+                         looks=goal.get("stop_looks", 3))
     factor = goal.get("extend_factor", 2.0) if "extend" in (goal.get("permissions") or []) else 1.0
     return Precision(epsilon=goal.get("precision", 0.05), criterion=goal.get("criterion", "standard_error"),
                      alpha=goal.get("alpha", 0.05),
                      looks=planned_looks(loop.get("first_ns", 1.0), loop.get("extend_ns", 5.0),
                                          loop.get("max_ns", 20.0), factor))
+
+
+def _status(run_dir: Path) -> dict:
+    return {(r.get("name") or f"{r['resname']}{r['resseq']}"): r
+            for r in _load(Path(run_dir) / "status.json").get("residues", [])}
+
+
+def _backbone_section(run_dir: Path, state: dict, T) -> list:
+    """Backbone basins: each observable with its interval and whether it converged, and the landscapes."""
+    if not state.get("backbone"):
+        return []
+    from .basins import judge
+
+    p = _precision(state)
+    z, tol = p.z, p.epsilon
+    status = _status(run_dir)
+    L = [T("## 主链构象区：每个量单独判断", "## Backbone basins: every observable judged on its own"), "",
+         T(f"区间是 {1 - p.alpha:.0%} 置信区间的半宽（区间系数 {z:.2f}）。“已收敛”是 agent 只凭自己的轨迹作出的判断；"
+           "一个量没收敛，就单独写明，不和其他量一起宣布收敛。",
+           f"Intervals are half-widths of the {1 - p.alpha:.0%} interval (factor {z:.2f}). \"Converged\" is the "
+           "agent's judgement from its own trajectories only; an observable that did not converge is said so on "
+           "its own, never claimed together with the others."), ""]
+    for label in state["backbone"]:
+        r = status.get(label)
+        if not r or not r.get("populations"):
+            continue
+        x = r.get("extra") or {}
+        est = {"transitions": r["transitions"], "se": r["standard_error"], "rates": x.get("rates", {}),
+               "dg_se": x.get("dg_se") if x.get("dg_se") is not None else float("inf"),
+               "split_js": x.get("split_js", 1.0)}
+        ok = judge(est, z, tol, min_transitions=(state.get("loop") or {}).get("min_flips_per_replica", 4))
+        yes, no = T("已收敛", "converged"), T("未收敛", "not converged")
+        pops = ", ".join(f"{k} {v:.3f} ± {z * r['standard_error'][k]:.3f}" for k, v in r["populations"].items())
+        names = list(r["populations"])
+        dg = x.get("dg_kt")
+        finite = dg is not None and x.get("dg_se") is not None and math.isfinite(dg) and math.isfinite(x["dg_se"])
+        dg_txt = (f"{dg:.2f} ± {z * x['dg_se']:.2f} kT" if finite
+                  else T("无法估计（有构象区没被访问）", "cannot be estimated (a basin was never visited)"))
+        L += [T(f"### {label}（{'，'.join(x.get('angles', []))}）", f"### {label} ({', '.join(x.get('angles', []))})"), "",
+              T("| 量 | 结果 | 判断 |", "| Observable | Result | Judgement |"), "|---|---|---|",
+              f"| {T('各构象区比例', 'Basin populations')} | {pops} | {yes if ok['populations'] else no} |",
+              f"| {T('自由能差', 'Free-energy difference')} G({names[1]}) − G({names[0]}) | {dg_txt} | "
+              f"{yes if ok['dg'] else no} |"]
+        for k, rate in (x.get("rates") or {}).items():
+            rel = rate.get("rel_se")
+            err = f" ± {z * rel * rate['k_per_ns']:.3g}" if rel is not None and rel != float("inf") else ""
+            L.append(f"| {T('速率', 'Rate')} {k} | {rate['k_per_ns']:.3g}{err} /ns "
+                     f"({T('观察到', 'seen')} {rate['n']} {T('次', 'times')}) | {yes if ok['rates'] else no} |")
+        L.append(f"| {T('φ/ψ 自由能图', 'phi/psi free-energy landscape')} | "
+                 f"![{label}](landscape_{label.replace(':', '_')}.svg) | {yes if ok['landscape'] else no} "
+                 f"({T('两半数据的 JS 散度', 'split-half JS divergence')} {x.get('split_js', float('nan')):.3f} bit) |")
+        L += ["", T(f"每条重复的状态变化次数：{r['transitions']}。少于 4 次的重复不足以支撑比例的估计。",
+                    f"State changes per replica: {r['transitions']}. A replica with fewer than 4 cannot support "
+                    "a population estimate."), ""]
+    return L
+
+
+def _decision_section(state: dict, T) -> list:
+    """Projection allocation: why it started as it did, what it saw, how it allocated, why it stopped, the cost."""
+    goal, notes = state.get("goal") or {}, state.get("notes") or {}
+    if goal.get("allocation") != "projection":
+        return []
+    loop = state.get("loop") or {}
+    start = notes.get("replicas_at_start", state.get("n_replicas"))
+    budget = goal.get("budget_ns") or start * loop.get("max_ns", 0)
+    L = [T("## agent 的决策", "## The agent's decisions"), "",
+         T(f"- **开始：** {start} 条重复，每条 {loop.get('first_ns', 0):g} ns。这一次查看只用来规划，不允许停，"
+           f"所以不消耗显著性水平。之后最多再看 {goal.get('stop_looks', 3)} 次，区间按这个次数校准。"
+           f"限制：总预算 {budget:g} ns，每条最多 {loop.get('max_ns', 0):g} ns，最多 {goal.get('max_replicas', 10)} 条。",
+           f"- **Start:** {start} replicas of {loop.get('first_ns', 0):g} ns. This look only plans and may not "
+           f"stop, so it spends none of alpha. After it, at most {goal.get('stop_looks', 3)} looks, with intervals "
+           f"calibrated for that many. Limits: {budget:g} ns in total, {loop.get('max_ns', 0):g} ns per replica, "
+           f"{goal.get('max_replicas', 10)} replicas.")]
+    for a in notes.get("actions", []):
+        if a.get("phase") == "plain_md":
+            L.append(f"- **{T('查看', 'Look')}** ({a.get('time', '')}): {a['reason']}")
+    d = notes.get("allocation_decision")
+    if d:
+        L.append(T(f"- **停止：** {d['decision']}。{d['reason']}。",
+                   f"- **Stop:** {d['decision']}. {d['reason'][0].upper() + d['reason'][1:]}."))
+    c = _cost(state)
+    used = c.aggregate_ns
+    L += ["", T(f"**成本：** 生产 {used:g} ns（所有重复相加），加上平衡共 {c.compute_ns:g} ns"
+                + (f"，实际用了 {c.measured_seconds / 3600:.1f} 小时" if c.measured_seconds else "")
+                + f"。用了预算的 {used / budget:.0%}" + (f"，比把预算跑满省了 {1 - used / budget:.0%}" if budget else "")
+                + "。这个节省是相对预算的，不是相对“达到同样准确度的固定方案”；后者要用实验 A 那样的基准测试才量得出。",
+                f"**Cost:** {used:g} ns of production (all replicas together), {c.compute_ns:g} ns with equilibration"
+                + (f", {c.measured_seconds / 3600:.1f} hours of wall-clock" if c.measured_seconds else "")
+                + f". That is {used / budget:.0%} of the budget" + (f", {1 - used / budget:.0%} less than running it out"
+                                                                    if budget else "")
+                + ". The saving is against the budget, not against a fixed plan that reaches the same accuracy; "
+                  "that needs a benchmark like experiment A.") if budget else "", ""]
+    return L
 
 
 def _fmt(pops: dict, errs: dict) -> str:
@@ -98,6 +195,13 @@ def write(run_dir: Path) -> list[Path]:
     outcomes = [("plain_md", notes.get("plain_md_outcome")), ("enhanced_sampling", (state.get("enhanced") or {}).get("outcome")),
                 ("any", notes.get("outcome"))]
     setup = state.get("setup") or {}
+    if state.get("backbone"):
+        try:
+            from .landscape import write as write_landscapes
+
+            write_landscapes(run_dir)
+        except Exception as e:   # noqa: BLE001 - a missing figure must never stop the report itself.
+            print(f"Note: the landscapes could not be drawn ({type(e).__name__}: {e}).")
     files = describe(run_dir)
     paths = []
     for lang in ("zh", "en"):
@@ -113,6 +217,10 @@ def write(run_dir: Path) -> list[Path]:
         quantity = goal.get("quantity", "chi1_populations")
         what = (T("原子间距离处在“近”和“远”两种状态的比例", "populations of the near and far states of atom distances")
                 if quantity == "distance_states" else
+                T(f"主链构象区（{', '.join(state.get('backbone', []))}）：各构象区比例、自由能差、翻转速率和 φ/ψ 自由能图",
+                  f"backbone basins ({', '.join(state.get('backbone', []))}): basin populations, free-energy "
+                  "difference, transition rates and the phi/psi free-energy landscape")
+                if quantity == "backbone_basins" else
                 T("目标区域侧链的 chi1 构象（g+、t、g-）的比例", "populations of the chi1 states (g+, t, g-) of the target side chains"))
         L.append(T(f"- 目标量：{what}。", f"- Quantity: {what}."))
         if goal.get("description"):
@@ -179,6 +287,8 @@ def write(run_dir: Path) -> list[Path]:
             L.append(f"| {r['label']} | {_fmt(r['populations'], r['standard_error'])} | {src} | "
                      f"{T('是', 'yes') if r['met'] else T('否', 'no')} | {r['verdict']} |")
         L.append("")
+        L += _backbone_section(run_dir, state, T)
+        L += _decision_section(state, T)
 
         L += [T("## 为什么停下", "## Why it stopped"), ""]
         for phase, o in outcomes:
