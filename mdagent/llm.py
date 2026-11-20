@@ -78,8 +78,9 @@ class RunPlan(BaseModel):
                           "states a precision (for example 'within 5%' -> 0.05). Default 0.05.")
     allow: Optional[str] = Field(
         None, description="Only if the user says what MDAgent may do by itself: comma separated from extend, "
-                          "add_replicas, switch_method, stop_early, or 'none'. Default: all in auto mode, none in "
-                          "guided mode.")
+                          "add_replicas, switch_method, stop_early, or 'none'. Default: only stop_early in auto mode (the "
+                          "time and replica numbers are limits; other changes are suggested and the user confirms), "
+                          "none in guided mode.")
     equil_ps: Optional[float] = Field(None, description="Total equilibration before production, in ps. "
                                                         "Default 600.")
     enhanced_max_residues: Optional[int] = Field(

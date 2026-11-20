@@ -42,7 +42,7 @@ def test_old_run_json_enables_enhanced_sampling(tmp_path):
 
 @pytest.mark.slow
 def test_plain_md_then_enhanced_sampling_and_resume(tmp_path):
-    """Tiny peptide on CPU: plain MD stops, enhanced sampling starts by itself, then resumes longer."""
+    """Tiny peptide on CPU: plain MD stops, enhanced sampling starts (the user said yes), then resumes longer."""
     from dataclasses import asdict
 
     import mdtraj as md
@@ -63,7 +63,7 @@ def test_plain_md_then_enhanced_sampling_and_resume(tmp_path):
         md=MDSettings(equilibration_ps=1.0, save_interval_ps=0.5, platform="CPU"),
         loop=LoopSettings(first_ns=0.002, max_ns=0.002),
         setup=asdict(opts),
-        enhanced={"enabled": True, "settings": metad},
+        enhanced={"enabled": True, "requested": True, "settings": metad},  # The user confirmed the switch.
     )
     state.save(tmp_path)
     logs = []

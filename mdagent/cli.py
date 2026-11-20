@@ -361,8 +361,20 @@ def cmd_resume(args) -> int:
 
     run = Path(args.run)
     state = RunState.load(run)
+    changed = False
     if args.max_ns is not None:
         state.loop.max_ns = args.max_ns
+        changed = True
+    if args.replicas is not None:
+        if args.replicas < state.n_replicas:
+            print(f"error: the run has {state.n_replicas} replicas; --replicas can only add more.", file=sys.stderr)
+            return 2
+        changed = changed or args.replicas > state.n_replicas
+        state.n_replicas = args.replicas
+    if changed:
+        # The user gave a new limit: decide again, and say again how plain MD ends.
+        for key in ("plain_done", "said_extend", "said_no_gain", "said_add_replicas", "stalled"):
+            state.notes.pop(key, None)
     if args.platform is not None:
         state.md.platform = args.platform
     if args.enhanced_sampling is not None:
@@ -496,7 +508,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Largest allowed standard error of any chi1 state population (0 to 1). Default 0.05.")
     r.add_argument("--allow", default=None,
                    help="What the agent may do by itself, comma separated: extend, add_replicas, switch_method, "
-                        "stop_early; or 'none'. Default: all in auto mode, none in guided mode.")
+                        "stop_early; or 'none'. Default: only stop_early in auto mode (time and replicas are "
+                        "limits; the agent suggests the rest), none in guided mode.")
     r.add_argument("--max-replicas", type=int, default=10,
                    help="With permission add_replicas, the agent adds replicas up to this number (default 10).")
     r.add_argument("--extend-factor", type=float, default=2.0,
@@ -521,6 +534,8 @@ def build_parser() -> argparse.ArgumentParser:
     u = sub.add_parser("resume", help="Continue a run. Finishes a stopped round, then decides again.")
     u.add_argument("--run", required=True)
     u.add_argument("--max-ns", type=float, default=None, help="New budget per replica (ns).")
+    u.add_argument("--replicas", type=int, default=None,
+                   help="New number of plain MD replicas (more than now). New replicas first catch up.")
     u.add_argument("--platform", default=None)
     u.add_argument("--enhanced-ns", type=float, default=None,
                    help="New length of each enhanced sampling replica (ns). A larger value continues it.")
