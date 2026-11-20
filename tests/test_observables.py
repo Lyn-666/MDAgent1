@@ -74,7 +74,7 @@ def test_command_line_checks_the_distance_atoms_before_building(tmp_path, capsys
 
 
 @pytest.mark.slow
-def test_plain_md_on_a_distance(tmp_path):
+def test_plain_md_on_a_distance(tmp_path, capsys):
     """Tiny peptide on CPU, quantity distance: plain MD runs, no enhanced sampling, a stop reason is kept."""
     from dataclasses import asdict
 
@@ -100,3 +100,10 @@ def test_plain_md_on_a_distance(tmp_path):
     status = json.loads((tmp_path / "status.json").read_text())
     assert status["residues"][0]["name"] == "A:108:CA-A:114:CA@1" and status["residues"][0]["populations"]
     assert read(tmp_path)  # The chat was told how plain MD ended.
+    # `mdagent diagnose` judges the distance, like the run did, not the chi1 of the two residues.
+    from mdagent.cli import main
+
+    capsys.readouterr()
+    assert main(["diagnose", "--run", str(tmp_path)]) == 0
+    shown = capsys.readouterr().out
+    assert "A:108:CA-A:114:CA@1" in shown and "108" not in shown.replace("A:108:CA-A:114:CA@1", "")
