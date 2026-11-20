@@ -139,6 +139,7 @@ def plain_md_next(run_dir, state, reports, decisions, next_ns: float) -> float:
             why = (f"The replicas clearly disagree about {', '.join(spread)}, so more independent replicas help "
                    "more than longer ones.")
             if state.allowed("add_replicas"):
+                state.notes.setdefault("first_n_replicas", state.n_replicas)
                 state.n_replicas += add
                 record(run_dir, state, Action("plain_md", "add_replicas", True,
                                               why + f" Now {state.n_replicas} replicas.", ns),

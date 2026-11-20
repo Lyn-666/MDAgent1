@@ -54,8 +54,8 @@ class SyntheticTool:
         self._traj: list[dict] = []   # Per replica: {estimand: list of states}
         self._rng: list[dict] = []
 
-    def supports(self, kind: str) -> bool:
-        return any(e.kind == kind for e in self.estimands.values())
+    def supports(self, kind: str, estimand: str) -> bool:
+        return estimand in self.estimands and self.estimands[estimand].kind == kind
 
     def length(self) -> float:
         return self._len

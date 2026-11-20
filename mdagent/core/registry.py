@@ -27,7 +27,7 @@ class Tool(Protocol):
     regime: str
     cost_factor: float
 
-    def supports(self, kind: str) -> bool: ...
+    def supports(self, kind: str, estimand: str) -> bool: ...   # Can this tool give data for this estimand?
     def length(self) -> float: ...              # Length per replica run so far with this tool.
     def replicas(self) -> int: ...
     def advance(self, n_replicas: int, until: float) -> None: ...  # New replicas first catch up.

@@ -1,7 +1,8 @@
 # MDAgent as a general scientific MD agent: assessment, architecture, plan
 
-Status: 2026-11-20. Phase 1 (the general decision core) is implemented and tested on synthetic systems.
-The production run path (`agent.run_all`, `policy.py`) is unchanged. No simulation was run for this work.
+Status: 2026-11-20. Phase 1 (the general decision core) and phase 2 (OpenMM adapters and shadow mode) are
+implemented. The core now decides next to every run without acting (shadow mode); the run itself still
+follows `policy.py` and `agent.run_all`. Phase 2 ran no new simulation.
 
 Ubiquitin (1UBQ) and T4 lysozyme L99A (181L) are development and evaluation cases. The agent must not
 contain assumptions about them, and nothing in the new core does (a test checks this).
@@ -170,13 +171,49 @@ New tests (35, all deterministic, about 7 s):
 - **Against a fixed budget:** on a fast synthetic system the agent never spends more than a fixed-budget
   run, spends less in at least 8 of 10 seeds, and its 2-SE interval covers the truth in at least 8.
 
+### 3.1 Phase 2 (OpenMM adapters and shadow mode)
+
+- `mdagent/tools_openmm.py`:
+  - **Featurizers:** chi1 states, distance states, and event items. `event_series` is now shared with
+    `agent._diagnose_events`, so the old and new decisions read the same states.
+  - **`PlainMDTool`** wraps `run_segment`. New replicas catch up first, then a round runs. A slow CPU
+    test runs this with real MD.
+  - **`MetadTool`** wraps `run_replica`. Its `observe` rebuilds the bias with `reweight.replay` and
+    returns per-frame weights.
+  - **Views of earlier moments:** `PlainMDTool(parts=k, n_replicas=n)` and `MetadTool(until_ns=d)`. The
+    bias rebuild only uses earlier samples, so a cut-off view gives the same weights as the run had at
+    that time. A test checks this.
+  - **Limit:** the adaptive-sampling tool only observes for now. Its rounds are still run by
+    `agent.run_loop`.
+- `mdagent/shadow.py`:
+  - **Task mapping:** `task_from_state` turns a run into a task. The precision becomes each estimand's
+    requirement. The budget is the first plain MD limit times the first number of replicas, plus the
+    enhanced sampling length times its replicas when switching is allowed. This is one shared budget.
+  - **Live record:** `record` writes `decisions.core.jsonl` after every plain MD round and every
+    enhanced-sampling check. It never raises. The environment variable `MDAGENT_SHADOW=0` switches it off.
+  - **Replay:** `replay` rebuilds every past decision point of a finished run from its files.
+  - **Comparison:** `compare` sets each old action next to the core's choice, with the strongest
+    hypothesis of every open estimand. The categories are same, other_stop_reason,
+    core_stops_earlier, core_goes_on and different.
+- `mdagent shadow --run <runs...> [--live]` prints the comparison.
+- The core interface changed in one place: `Tool.supports(kind, estimand)`. Metadynamics serves only
+  chi1, and only the biased side chains. More of a tool now gives value only to the estimands that tool
+  serves. Before this fix, a side chain that was not biased still counted as a reason to continue
+  metadynamics.
+- 11 new tests (`tests/test_shadow.py`; one is slow and runs real MD on the CPU).
+
+**Open design question for phase 3,** shown by the shadow: after a switch, estimands that only the old
+tool serves stay open. Example: a side chain that was not biased. The agent must either run both tools,
+switch back, or report these estimands as resolved by the first method. The current policy reports
+them from plain MD.
+
 ## 4. Minimal prioritized implementation plan
 
 Each phase is small and can be checked on its own. Phases 2 and 3 change no scientific result until the
 new loop has shown the same or better behavior.
 
 1. **Done: phase 1, the general core** with synthetic tools and estimators.
-2. **Phase 2: adapters and shadow mode** (no change in behavior).
+2. **Done: phase 2, adapters and shadow mode** (no change in behavior; see 3.1).
    - `tools_openmm.py`: plain MD tool (wraps `run_segment`; `advance(n, until)` = rounds; new replicas
      catch up as now), metadynamics tool (wraps `run_replica`; `observe` replays the bias with
      `reweight.replay` and returns weights, which `WeightedPopulations` uses), adaptive tool (seeded
@@ -185,8 +222,8 @@ new loop has shown the same or better behavior.
    - `TaskSpec.from_run_state(RunState)`: maps `Goal`, `LoopSettings` and the enhanced settings into one
      shared budget.
    - In `agent._apply_policy`, also run the core on the same evidence and write its decision to
-     `decisions.core.jsonl`, without acting on it. Run the step-5 scenarios again and compare the two
-     decision streams.
+     `decisions.core.jsonl`, without acting on it. Next: replay the step-5 runs that already exist
+     (`mdagent shadow`) and review every disagreement before phase 3.
 3. **Phase 3: switch over behind a flag** (`--controller core`).
    - `agent.run_all` drives `core.loop.run` with the OpenMM tools.
    - A `messages` adapter turns `Decision` and suggestions into the current bilingual chat messages.

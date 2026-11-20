@@ -629,6 +629,13 @@ def build_parser() -> argparse.ArgumentParser:
     cp.add_argument("--reference", required=True)
     cp.set_defaults(func=cmd_compare)
 
+    sh = sub.add_parser("shadow", help="What would the new decision core have done? Replays every decision point "
+                                       "of a run from its files (no new simulation) and compares with what the run did.")
+    sh.add_argument("--run", required=True, nargs="+", help="One or more run folders.")
+    sh.add_argument("--live", action="store_true", help="Compare the live shadow records (decisions.core.jsonl) "
+                                                        "instead of replaying.")
+    sh.set_defaults(func=cmd_shadow)
+
     st = sub.add_parser("start", help="Start here: choose the language, the language model (Claude or ChatGPT) "
                                       "and where to talk (web page or terminal).")
     st.add_argument("--backend", default=None, choices=["claude", "codex", "api"],
@@ -701,6 +708,33 @@ def cmd_compare(args) -> int:
     table, agree = compare(Path(args.run), Path(args.reference))
     print(table)
     return 0 if agree else 1
+
+
+def cmd_shadow(args) -> int:
+    from . import shadow
+
+    status = 0
+    for run in args.run:
+        run_dir = Path(run)
+        print(f"== {run_dir.resolve()}")
+        try:
+            if args.live:
+                records = shadow.load(run_dir / shadow.LIVE_FILE)
+                if not records:
+                    print(f"No live shadow records in {run_dir / shadow.LIVE_FILE} (runs started before this "
+                          "version have none; use the replay without --live).")
+                    continue
+            else:
+                records = shadow.replay(run_dir, log=lambda line: None)
+            table, _ = shadow.compare(run_dir, records)
+            print(table)
+            if not args.live:
+                print(f"Core decisions with their evidence: {(run_dir / shadow.REPLAY_FILE).resolve()}")
+        except Exception as e:
+            print(f"Could not compare {run_dir}: {type(e).__name__}: {e}")
+            status = 1
+        print()
+    return status
 
 
 def cmd_start(args) -> int:

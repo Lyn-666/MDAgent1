@@ -364,6 +364,9 @@ def _apply_policy(run_dir: Path, state: RunState, reports, decisions, next_ns: f
     key.update(max_ns=state.loop.max_ns, n_replicas=state.n_replicas)  # As the policy left them.
     state.notes["policy_round"] = {"key": key, "next_ns": next_ns}
     state.save(run_dir)
+    from .shadow import record as shadow_record
+
+    shadow_record(run_dir, state, "plain_md")   # What the new decision core would do; not acted on.
     return next_ns
 
 
@@ -384,48 +387,14 @@ def _diagnose_distances(run_dir: Path, state: RunState) -> list[ResidueReport]:
 
 def _diagnose_events(run_dir: Path, state: RunState) -> list[ResidueReport]:
     """Changes to see: per-frame states of each item (chi1 or distance), then observables.diagnose_events."""
-    import mdtraj as md
-    import numpy as np
+    from .observables import diagnose_events, parse_events
+    from .tools_openmm import event_series
 
-    from .diagnose import assign_states
-    from .observables import diagnose_events, distance_atoms, parse_events, two_state
-
-    specs = parse_events(state.events)
-    n_parts = len(state.rounds_ns)
     # Adaptive sampling: each segment starts from a chosen frame, so judge every segment on its own. Joined,
     # a segment that starts in the target state would look like an entry into it.
-    join = state.sampling != "adaptive"
-    series: list = [None] * len(specs)
-    chi_specs = [(k, sp) for k, sp in enumerate(specs) if sp.distance is None]
-    if chi_specs:
-        keys = sorted({sp.residue for _, sp in chi_specs}, key=lambda r: (r[0] or "", r[1]))
-        top = md.load_topology(str(run_dir / "protein.pdb"))
-        full = [(r.chain.chain_id, r.resSeq) for r in top.residues
-                if any(r.resSeq == n and (c is None or r.chain.chain_id == c) for c, n in keys)]
-        trajs = load_run(run_dir, full, n_parts, join=join)
-        idx, _ = md.compute_chi1(trajs[0][:1])
-        where = {}
-        for j, quad in enumerate(idx):
-            res = trajs[0].topology.atom(int(quad[1])).residue
-            where[(res.chain.chain_id, res.resSeq)] = j
-        angles = [np.degrees(md.compute_chi1(t)[1]) for t in trajs]
-        for k, sp in chi_specs:
-            c, n = sp.residue
-            match = [key for key in where if key[1] == n and (c is None or key[0] == c)]
-            if not match:
-                raise ValueError(f"residue {sp.label.split('=')[0]} has no chi1 angle (Gly, Ala) or is not in the run.")
-            series[k] = [assign_states(a[:, where[match[0]]]) for a in angles]
-    dist_specs = [(k, sp) for k, sp in enumerate(specs) if sp.distance is not None]
-    if dist_specs:
-        pairs = distance_atoms(md.load_topology(str(run_dir / "protein.pdb")), [sp.distance for _, sp in dist_specs])
-        atoms = sorted({i for pair in pairs for i in pair})
-        pos = {a: j for j, a in enumerate(atoms)}
-        trajs = load_run(run_dir, state.target, n_parts, join=join, atoms=atoms)
-        for (k, sp), (i, j) in zip(dist_specs, pairs):
-            values = [md.compute_distances(t, [(pos[i], pos[j])])[:, 0] for t in trajs]
-            series[k] = [two_state(v, sp.distance.cutoff_nm, sp.distance.buffer_nm) for v in values]
+    series = event_series(run_dir, state, len(state.rounds_ns), join=state.sampling != "adaptive")
     goal = state.the_goal()
-    return diagnose_events(series, specs, state.ns_done, state.md.save_interval_ps / 1000.0,
+    return diagnose_events(series, parse_events(state.events), state.ns_done, state.md.save_interval_ps / 1000.0,
                            hold_ps=goal.hold_ps, seen_in=goal.seen_in)
 
 
@@ -608,6 +577,9 @@ def run_all(
             verdicts = assess(result, before, rule, precision)
             save_populations(run_dir, result)
             log("\n" + format_table(result))
+            from .shadow import record as shadow_record
+
+            shadow_record(run_dir, state, "enhanced_sampling", log, until_ns=done, enhanced_replicas=n_rep)
             reached = all(v == "reached" for v in verdicts.values())
             stalled = [k for k, v in verdicts.items() if v == "stalled"]
             if stalled and done >= rule.min_ns - 1e-9:
@@ -639,6 +611,7 @@ def run_all(
             if spread and n_rep < state.the_goal().max_replicas and done < 0.5 * settings.length_ns:
                 why = (f"The replicas clearly disagree about {', '.join(spread)}.")
                 if state.allowed("add_replicas"):
+                    es.setdefault("first_n_replicas", n_rep)
                     n_rep += 1
                     settings.n_replicas = n_rep
                     es["settings"] = asdict(settings)
