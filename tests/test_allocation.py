@@ -83,7 +83,7 @@ def test_the_live_loop_asks_the_allocation_rule_once_per_look(tmp_path):
     assert {r.label for r in reports} == {"rama:A:52", "turn:A:52"}
     assert all(r.quantity == "backbone" and r.extra and "rates" in r.extra for r in reports)
     assert next_ns > 0                                         # the first look plans: it never stops
-    assert state.notes["allocation"] == {"looks": 1, "tests": 0}
+    assert state.notes["allocation"] == {"looks": 1, "tests": 0, "counting": 2}
     act = state.notes["actions"][-1]
     assert act["phase"] == "plain_md" and "planning only" in act["reason"]
     # Resumed at the same point: the same choice, no second look counted, no second message.
@@ -200,3 +200,30 @@ def test_a_look_that_could_not_stop_does_not_use_up_the_looks():
     ready = _item(se=0.03, w=0.03, b=0.03)
     s = next_step([ready], 4, 10.0, look=7, tests_before=0, z=2.39, tolerance=0.05, limits=LIM)
     assert s.counted
+
+
+def test_an_older_run_gets_its_looks_counted_again(tmp_path):
+    """A run started before the fix counted looks that could not stop; resuming it counts them again."""
+    from mdagent.policy import recount_tests
+
+    actions = [
+        {"phase": "plain_md", "reason": "Look 1 (planning only) at 3 × 1 ns: too few state changes to trust the "
+                                        "errors yet; running longer. Next: 3 × 2 ns."},
+        {"phase": "plain_md", "reason": "Look 2 at 3 × 2 ns: too few state changes to trust the errors yet; "
+                                        "running longer. Next: 3 × 4 ns."},
+        {"phase": "plain_md", "reason": "Look 3 at 3 × 4 ns: too few state changes to trust the errors yet; "
+                                        "running longer. Next: 3 × 16 ns."},
+        {"phase": "plain_md", "reason": "Look 4 at 3 × 16 ns: projected: 3 replicas of 30 ns reach the precision."},
+    ]
+    assert recount_tests(actions[:3]) == 0
+    assert recount_tests(actions) == 1
+
+    from mdagent.agent import _diagnose_and_decide
+
+    state = _backbone_run(tmp_path)
+    state.notes["allocation"] = {"looks": 3, "tests": 2}          # as the old code left it
+    state.notes["actions"] = actions[:3]
+    state.save(tmp_path)
+    _diagnose_and_decide(tmp_path, state)
+    assert state.notes["allocation"]["counting"] == 2
+    assert state.notes["allocation"]["tests"] == 0               # the jittered frames cannot stop either
