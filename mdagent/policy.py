@@ -295,6 +295,28 @@ def allocation_next(run_dir, state, reports, decisions) -> float:
     alloc["tests"] += 0 if step.planning else 1
     what = f"{n} × {ns:g} ns"
     why_zh = STEP_ZH.get(step.kind, step.reason)
+    # Items plain MD cannot answer are set aside on their own: told once, marked for the report, while the
+    # other items go on to their precision.
+    for d in live:
+        if d.residue in step.set_aside:
+            d.action, d.cause = "stalled", ("stalled" if step.set_aside[d.residue] == "stuck" else "insufficient_evidence")
+    for label, why in step.set_aside.items():
+        if state.notes.get(f"said_set_aside_{label}"):
+            continue   # Told once is enough; it stays marked above at every look.
+        stuck = why == "stuck"
+        record(run_dir, state, Action("plain_md", "set_aside", True,
+                                      f"{label}: INSUFFICIENT_EVIDENCE on its own ("
+                                      + (f"never changed state in {ns:g} ns per replica" if stuck else
+                                         "its projected cost is far beyond the budget")
+                                      + "); the other items go on.", ns),
+               f"{name}：{label} "
+               + (f"每条跑了 {ns:g} ns 一次都没有变化" if stuck else "按投影要远超预算才能达到精度")
+               + "，单独标为证据不足（INSUFFICIENT_EVIDENCE）。其余项目照常继续，不受它影响。",
+               f"{name}: {label} "
+               + (f"never changed state in {ns:g} ns per replica" if stuck else
+                  "would need far more than the budget to reach the precision")
+               + ", so it gets INSUFFICIENT_EVIDENCE on its own. The other items go on as planned.",
+               "suggestion", once_key=f"said_set_aside_{label}")
     if step.action == STOP:
         room = round(state.loop.max_ns - ns, 6)
         if not state.allowed("stop_early") and room > 0:
@@ -309,7 +331,7 @@ def allocation_next(run_dir, state, reports, decisions) -> float:
         return 0.0
     if step.action == INSUFFICIENT:
         for d in live:
-            if by[d.residue].verdict == "ok":
+            if by[d.residue].verdict == "ok" or d.residue in step.set_aside:
                 continue
             stuck = sum(by[d.residue].transitions) == 0
             to_es = state.can_switch() and state.enhanced.get("enabled", True)
