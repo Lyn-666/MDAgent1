@@ -576,8 +576,8 @@ def build_parser() -> argparse.ArgumentParser:
                         "decides how many replicas, how long and when to stop, for the least compute, within "
                         "--budget-ns, --max-ns per replica and --max-replicas.")
     r.add_argument("--budget-ns", type=float, default=0.0,
-                   help="With --allocation projection: production ns of all replicas together. Default: "
-                        "--replicas x --max-ns.")
+                   help="With --allocation projection: production ns of all replicas together, never exceeded. "
+                        "Default: --max-replicas x --max-ns if the agent may add replicas, else --replicas x --max-ns.")
     r.add_argument("--stop-looks", type=int, default=3,
                    help="With --allocation projection: the agent may stop at no more than this many looks, and its "
                         "intervals are calibrated for that many (default 3).")

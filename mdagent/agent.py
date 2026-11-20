@@ -110,10 +110,14 @@ class RunState:
         return self.loop.max_ns
 
     def budget_ns(self) -> float:
-        """Production ns of all replicas together that the agent may spend in plain MD. Default: the plan the
-        user wrote down (replicas x max_ns); the agent may spread it differently but never spend more."""
+        """Production ns of all replicas together that the agent may spend in plain MD, never more. Default: the
+        limits the user set, max_ns per replica times the most replicas the agent may run (max_replicas when it
+        may add replicas, otherwise the replicas it starts with)."""
         g = self.the_goal()
-        return g.budget_ns if g.budget_ns > 0 else self.n_replicas_at_start() * self.loop.max_ns
+        if g.budget_ns > 0:
+            return g.budget_ns
+        most = g.max_replicas if self.allowed("add_replicas") else self.n_replicas_at_start()
+        return most * self.loop.max_ns
 
     def n_replicas_at_start(self) -> int:
         return int(self.notes.get("replicas_at_start", self.n_replicas))
