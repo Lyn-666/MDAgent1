@@ -26,13 +26,14 @@ TEXT = {
         "hello": "MDAgent 终端对话（语言模型：{backend}）。用一句话说要跑什么，按 Enter 发送。输入 /help 查看命令。",
         "help": "命令（不用语言模型，不花 token）：\n"
                 "  /runs  列出这个项目的运行：状态、最近的进度和结果文件夹\n"
+                "  /last  在可以翻页的窗口里看上一条回复（长回复用它看全；按 q 回来）\n"
                 "  /new   开始一个新对话（不同的案例用不同的对话）\n"
                 "  /quit  退出（正在跑的模拟不会停）\n"
                 "其他输入都发给语言模型，例如：“用 181L，看苯周围的口袋，开发测试，有问题也继续”。",
         "you": "你> ", "agent": "MDAgent> ", "thinking": "（思考中…）",
         "changed": "改动的设置：", "none": "无", "command": "命令：", "check": "结构检查报告：",
         "ask_start": "开始运行？", "ask_stop": "停止运行？", "ask_resume": "继续运行？", "yes_no": " [y/N] ",
-        "not_done": "没有执行。", "new_chat": "已开始新对话。", "bye": "再见。正在跑的模拟会继续在后台运行。",
+        "not_done": "没有执行。", "new_chat": "已开始新对话。", "no_last": "还没有回复可看。", "bye": "再见。正在跑的模拟会继续在后台运行。",
         "plain_md": "普通 MD 每条 {ns:g} ns", "no_runs": "还没有运行。", "states": {"running": "运行中", "finished": "已完成", "stopped": "已停止",
                                             "failed": "出错"},
         "folder": "结果文件在电脑“{host}”的 {folder}（{n} 个文件）",
@@ -42,6 +43,7 @@ TEXT = {
                  "Enter. Type /help for commands.",
         "help": "Commands (no language model, no tokens):\n"
                 "  /runs  list the runs of this project: state, latest progress and result folder\n"
+                "  /last  read the last reply in a window you can page through (for long replies; q to return)\n"
                 "  /new   start a new conversation (use one conversation per case)\n"
                 "  /quit  leave (running simulations go on)\n"
                 "Everything else goes to the language model, for example: \"use 181L, the pocket around benzene, "
@@ -50,6 +52,7 @@ TEXT = {
         "changed": "Changed settings: ", "none": "none", "command": "Command: ", "check": "Structure check report:",
         "ask_start": "Start the run?", "ask_stop": "Stop the run?", "ask_resume": "Continue the run?",
         "yes_no": " [y/N] ", "not_done": "Nothing was done.", "new_chat": "Started a new conversation.",
+        "no_last": "No reply to show yet.",
         "bye": "Bye. Running simulations go on in the background.",
         "plain_md": "plain MD {ns:g} ns per replica", "no_runs": "No runs yet.", "states": {"running": "running", "finished": "finished", "stopped": "stopped",
                                              "failed": "failed"},
@@ -98,22 +101,54 @@ def show_card(card: dict, lang: str, out: Callable[[str], None]) -> None:
         out(T["command"] + card["command"])
 
 
+def page(text: str) -> None:
+    """Show text in a pager (less), so a long reply can be read in full whatever the terminal does with the
+    mouse wheel (tmux without mouse mode turns it into arrow keys, which scroll the input history)."""
+    import pydoc
+
+    pydoc.pager(text)
+
+
 def _watch_run_messages(assistant, state: dict, lang: str, out, stop: threading.Event,
                         every_s: float = 20.0) -> None:
-    """Print messages that runs write while the user is not typing (a suggestion, results ready ...)."""
+    """Print messages that runs write while the user is not typing (a suggestion, results ready ...).
+    Nothing is printed while the pager is open (state["paging"]); the messages come after it."""
     while not stop.wait(every_s):
+        if state.get("paging"):
+            continue
         for m in assistant.sync(state.get("chat"), lang):
             out("\n" + TEXT[lang]["agent"] + m["text"])
+            state["last"] = m["text"]
 
 
 def run_terminal(assistant, lang: str = "zh", read: Callable[[str], str] = input,
-                 out: Callable[[str], None] = print, watch_every_s: float = 20.0) -> int:
+                 out: Callable[[str], None] = print, watch_every_s: float = 20.0,
+                 pager: Callable[[str], None] = page) -> int:
     """Talk with the assistant in the terminal until /quit, Ctrl+D or Ctrl+C."""
     T = TEXT[lang]
     if read is input:
         _enable_line_editing()
     out(T["hello"].format(backend=BACKEND_NAMES.get(assistant.backend, assistant.backend)))
-    state = {"chat": None}
+    state = {"chat": None, "last": ""}
+
+    def local(text: str) -> bool:
+        """Commands that need no language model. Returns True if `text` was one of them."""
+        if text == "/help":
+            out(T["help"])
+        elif text == "/runs":
+            show_runs(assistant, lang, out)
+        elif text == "/last":
+            if not state["last"]:
+                out(T["no_last"])
+            else:
+                state["paging"] = True
+                try:
+                    pager(T["agent"] + state["last"])
+                finally:
+                    state["paging"] = False
+        else:
+            return False
+        return True
     stop = threading.Event()
     threading.Thread(target=_watch_run_messages, args=(assistant, state, lang, out, stop, watch_every_s),
                      daemon=True).start()
@@ -121,16 +156,13 @@ def run_terminal(assistant, lang: str = "zh", read: Callable[[str], str] = input
         while True:
             for m in assistant.sync(state["chat"], lang):
                 out(T["agent"] + m["text"])
+                state["last"] = m["text"]
             text = read("\n" + T["you"]).strip()
             if not text:
                 continue
             if text in ("/quit", "/exit", "/q"):
                 break
-            if text == "/help":
-                out(T["help"])
-                continue
-            if text == "/runs":
-                show_runs(assistant, lang, out)
+            if local(text):
                 continue
             if text == "/new":
                 state["chat"] = None
@@ -140,10 +172,14 @@ def run_terminal(assistant, lang: str = "zh", read: Callable[[str], str] = input
             r = assistant.message(text, lang, state["chat"])
             state["chat"] = r["chat"]
             out(T["agent"] + r["reply"])
+            state["last"] = r["reply"]
             card = r.get("card")
             if card:
                 show_card(card, lang, out)
-                answer = read(T[f"ask_{card['kind']}"] + T["yes_no"]).strip().lower()
+                while True:   # A command such as /runs or /last is done first; then the question comes again.
+                    answer = read(T[f"ask_{card['kind']}"] + T["yes_no"]).strip().lower()
+                    if not (answer.startswith("/") and local(answer)):
+                        break
                 if answer in ("y", "yes", "是", "好", "开始", "继续", "停止"):
                     out(T["agent"] + assistant.confirm(card["id"], lang))
                 else:
