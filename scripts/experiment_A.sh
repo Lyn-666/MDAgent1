@@ -1,41 +1,40 @@
 #!/usr/bin/env bash
-# Experiment A — plain MD on ubiquitin (1UBQ): how long, and how many replicas?
+# Experiment A — task-aware budget allocation for unbiased MD, on ubiquitin (1UBQ).
 #
-# Hypothesis A: online, uncertainty-aware allocation reaches the same accuracy of an observable as
-# fixed-budget MD, for less computing. README "实验 A" explains the design; the decisions are fixed here,
-# before any data exist, so that the verdict cannot be tuned afterwards.
+# Question: given an MD task and a precision fixed in advance, can the agent decide how many replicas,
+# how long each one runs and when to stop, so that the result is reliable for the least computing?
+# README "实验 A" explains the design. Every rule below is fixed before any data exist; the code version
+# is written into runs/expA_protocol.txt before the pool is analysed.
 #
-#   Observable   chi1 rotamer populations (g+, t, g-) of side chains that plain MD can answer. They are
-#                chosen by a separate pilot run (step 1-2), never from the pool itself.
-#   Accuracy     every population within TOLERANCE of the reference in at least TARGET_RATE of the repeats.
-#   Reference    HOLDOUT pool replicas at their full length, used by no strategy.
-#   Baselines    the protocols people use: 1 x 100 ns (CHARMM36, 300 K, one trajectory; Huang & MacKerell
-#                2013, doi:10.1002/jcc.23354), and 3 x 100, 5 x 100 ns (the replica counts recommended by
-#                Grossfield 2018 and Knapp 2018).
-#   Agents       early_stop: 5 replicas, decides only how long. mdagent: starts with 5, may add up to 10.
-#                Both stop with the "confidence" criterion (95% interval, alpha shared over the looks).
-#   Policy       frozen: the git commit is written into the protocol file before the pool is analysed.
+#   Observables  backbone basins. A-Easy: phi/psi Ramachandran basins of residues that plain MD can answer,
+#                chosen by a separate pilot. A-Hard: the D52/G53 beta-I/beta-II turn (psi D52, phi G53), which
+#                flips on the 10 us scale (Arasteh 2021, doi:10.1021/acs.jpclett.1c00778; Smith 2016,
+#                doi:10.1073/pnas.1519609113): a 1.6 us pool cannot give it a reference, so A-Hard tests only
+#                whether a method honestly says INSUFFICIENT_EVIDENCE instead of a false STOP.
+#   Arms         fixed plans of 1, 3, 4, 5, 8 replicas (scanned over length), Sequential-CI with 4 and 8
+#                replicas, and the agent. All unbiased; new replicas start from the prepared structure.
+#   Reference    6 pool replicas held out at full length, used by no method.
 #
 # Steps (from the MDAgent1 folder, mdagent environment active, inside tmux over SSH):
-#   bash scripts/experiment_A.sh pilot     # 3 x 20 ns, all residues (60 ns, a few hours)
-#   bash scripts/experiment_A.sh select    # which side chains plain MD can answer -> runs/expA_items.txt
-#   bash scripts/experiment_A.sh pool      # 16 x 100 ns (1600 ns: about 2 days at 850 ns/day)
-#   bash scripts/experiment_A.sh analyze   # replay; seconds. Result: runs/expA_pool/experiment_A.md
+#   bash scripts/experiment_A.sh pilot     # 3 x 20 ns (60 ns, a few hours)
+#   bash scripts/experiment_A.sh select    # which residues plain MD can answer -> runs/expA_easy.txt
+#   bash scripts/experiment_A.sh pool      # 16 x 100 ns (1600 ns: 2 to 5 days, depending on the GPU)
+#   bash scripts/experiment_A.sh analyze   # replay, a few minutes -> runs/expA_pool/experiment_A_*.md
 # Each step can be run again: a stopped run continues where it stopped.
 set -u
 cd "$(dirname "$0")/.."
 mkdir -p runs
 STEP=${1:-}
 
-TOLERANCE=${TOLERANCE:-0.1}
-TARGET_RATE=${TARGET_RATE:-0.9}
+POPULATION=${POPULATION:-0.05}     # tolerance on every basin population
+RELIABILITY=${RELIABILITY:-0.9}   # share of trials that must succeed
 POOL_REPLICAS=${POOL_REPLICAS:-16}
 POOL_NS=${POOL_NS:-100}
 HOLDOUT=${HOLDOUT:-6}
-REPEATS=${REPEATS:-50}
+TRIALS=${TRIALS:-50}
 PILOT=runs/expA_pilot
 POOL=runs/expA_pool
-ITEMS=runs/expA_items.txt
+EASY=runs/expA_easy.txt
 COMMON="--pdb structures/1UBQ.pdb --uniprot P0CG48 --termini charged --residues A:1-76 --allow none"
 
 [ -e structures/1UBQ.pdb ] || python -m mdagent fetch 1UBQ
@@ -53,29 +52,25 @@ run_or_resume() {   # $1 = folder, rest = run options
 
 case "$STEP" in
   pilot)
-    # --allow none: the pool and the pilot make no decisions of their own. They are data, not strategies.
+    # --allow none: the pilot and the pool make no decisions of their own. They are data, not methods.
     run_or_resume "$PILOT" --replicas 3 --first-ns 20 --max-ns 20 --seed 101
     ;;
   select)
-    # Rule fixed in advance: a side chain is in the experiment when it changed rotamer state at least
-    # 4 times in every pilot replica, which is the same rule the agent uses for "plain MD can answer it".
-    python - "$PILOT/status.json" "$ITEMS" <<'PY'
-import json, sys
-rows = json.load(open(sys.argv[1]))["residues"]
-keep = [f"{r['resname']}{r['resseq']}" for r in rows if r.get("transitions") and min(r["transitions"]) >= 4]
-slow = [f"{r['resname']}{r['resseq']}" for r in rows if r.get("transitions") and min(r["transitions"]) < 4]
-open(sys.argv[2], "w").write(",".join(keep) + "\n")
-print(f"In the experiment ({len(keep)}): {', '.join(keep) or 'none'}")
-print(f"Left out, too slow for plain MD in 20 ns ({len(slow)}): {', '.join(slow) or 'none'}")
-PY
+    # Rule fixed in advance: a residue enters A-Easy when its phi/psi basin changed at least 4 times in
+    # every pilot replica; if more qualify, the 5 with the fewest transitions are kept.
+    python -m mdagent experiment-a --run "$PILOT" --observables "rama:A:2-75" --select --at-most 5 --out "$EASY"
+    echo
+    echo "The beta-I/beta-II turn (A-Hard) in the pilot:"
+    python -m mdagent experiment-a --run "$PILOT" --observables "turn:A:52" --select --at-most 1 || true
     ;;
   pool)
-    [ -e "$ITEMS" ] || { echo "Run the pilot and 'select' first."; exit 2; }
+    [ -e "$EASY" ] || { echo "Run the pilot and 'select' first."; exit 2; }
     {
       echo "Experiment A protocol, frozen $(date '+%F %T')"
       echo "commit: $(git rev-parse HEAD)"
-      echo "items: $(cat $ITEMS)"
-      echo "tolerance: $TOLERANCE, target rate: $TARGET_RATE, holdout: $HOLDOUT, repeats: $REPEATS"
+      echo "A-Easy items: $(cat $EASY)"
+      echo "A-Hard item: turn:A:52"
+      echo "population tolerance: $POPULATION, reliability: $RELIABILITY, holdout: $HOLDOUT, trials: $TRIALS"
       echo "pool: $POOL_REPLICAS x $POOL_NS ns"
     } > runs/expA_protocol.txt
     # Rounds of 20 ns, so a stop loses at most 20 ns per replica.
@@ -83,11 +78,10 @@ PY
     ;;
   analyze)
     [ -e "$POOL/run.json" ] || { echo "Run the pool first."; exit 2; }
-    python -m mdagent budget --run "$POOL" --items "$(cat $ITEMS)" --holdout "$HOLDOUT" \
-      --replicas 5 --first-ns 5 --extend-ns 5 --max-ns "$POOL_NS" --extend-factor 1 --max-replicas 10 \
-      --precision "$TOLERANCE" --criterion confidence --alpha 0.05 --target-rate "$TARGET_RATE" \
-      --fixed-grid 1x100,3x100,5x100,3x20,3x50,5x20,5x40,5x60,5x80,10x20,10x50 \
-      --baseline 1x100,3x100,5x100 --repeats "$REPEATS" --name experiment_A
+    ARGS="--run $POOL --holdout $HOLDOUT --trials $TRIALS --max-ns $POOL_NS --population $POPULATION
+          --reliability $RELIABILITY"
+    python -m mdagent experiment-a $ARGS --observables "$(cat $EASY)" --name experiment_A_easy
+    python -m mdagent experiment-a $ARGS --observables "turn:A:52" --name experiment_A_hard
     ;;
   *)
     echo "Usage: bash scripts/experiment_A.sh pilot|select|pool|analyze"; exit 2 ;;

@@ -30,7 +30,7 @@
 
 **按新目标做了什么（2026-11-20）：** 加了三件事，都在 GPU 上没验证过。(1) 成本核算 `cost.py`：aggregate_ns（所有重复相加的生产时间）、compute_ns（加上每条重复各自的平衡时间，主要指标）、wall_ns（按同时能跑几条折算的等待时间）分开报告；运行每轮记下实测秒数（`run.json` 的 `notes.rounds`）；结果报告里写明用了多少计算量。(2) 精度判据 `uncertainty.Precision`：`--criterion standard_error`（默认，含义和以前一样）/`confidence`（α 平摊到预先知道的判断次数）/`sequence`（Robbins 置信序列）。默认没改，因为改成 `confidence` 会让运行长好几倍；先用 `budget` 量出代价再决定。(3) 策略对照 `budget.py` + `budget` 命令：一次高预算数据池，离线回放 fixed / early_stop / add_replicas / mdagent 四种策略，比成本和正确率；对"只加长、只加独立重复"的策略回放是精确的，"从挑出的帧重新起跑"回放不了。`compare` 从 `|z| ≤ 2` 换成等效性检验（TOST）。在已知比例的模型上看到（容差 0.05，10 次重复）：`early_stop` 省 83% 但 10 次里 2 次超出容差（最大偏差 0.097），`mdagent` 省 74%、9 次在容差内（最大偏差 0.057，和固定方案一样）；把判据换成 `confidence` 后各策略会跑更久，但在每条 20 ns 的预算下达不到这个判据，只是以"预算用完"停下，答案没变好——更严的判据要配更大的预算。
 
-**实验 A（2026-11-20 开始设计）：** 用户的第一个实验：1UBQ 上的普通 MD，回答"跑多久、跑几条"。假设 A：在线、考虑不确定度的分配，能以低于固定方案的计算成本达到同样的准确度。用户补充说：**agent 可以只回答跑多久；实验者常用的时长可以直接用文献数据**。所以基线是文献方案，不是事后挑的：1×100 ns（Huang & MacKerell 2013，CHARMM36、300 K、泛素侧链，doi:10.1002/jcc.23354），以及 3×100、5×100 ns（文献推荐的重复数）。两个 agent 分开判定：`early_stop`（5 条，只决定时长）和 `mdagent`（还可以加到 10 条）。侧链由独立预实验挑选（每条预实验轨迹翻转 ≥4 次），数据池 16×100 ns，留出 6 条作共同参考。默认容差 0.1、目标 90%，这两个数由用户在看结果前确认。脚本 `scripts/experiment_A.sh`（pilot / select / pool / analyze），说明在 README "实验 A"。**还没在 GPU 上跑。** 干跑看到的两点：事后最佳固定方案原理上赢不了，只用来量"不知道该跑多久的代价"；`standard_error` 判据太松（约 80% 准确）；`confidence` 准，但 5 条重复时事后最佳是 16 ns，普通 95% 区间跑到 24 ns，α 平摊到 20 次判断后跑到 40 ns。慢侧链（Bowman 2014：有的 chi1 翻转要 10 µs）会被预实验排除，留给实验 B。
+**实验 A（2026-11-20，按用户的设计重做）：** 问题：给定 MD 任务和事先定好的精度，agent 能否自己决定几条重复、每条多长、何时停，以最少计算量得到统计上可靠的结果（task-conditioned, uncertainty-aware budget optimization，不是收敛检测）。用户的要求：**在线停止判据只用自己的轨迹，离线成功判据才用独立参考，防止参考泄漏**；参考用同一力场流程的内部数据池（留出的重复），不用文献数值；测主链构象区（比例为主，另报自由能差、速率、角度图谱，各自单独判断，不能一并宣布收敛）；四个对照：固定方案（1 条和 3/4/5/8 条，按长度扫描）、Sequential-CI（最重要：agent 必须比它省）、Agent；报告成功率、过早停止率、区间覆盖率、C_stop 与 C_hit、GPU 小时、等待时间、成本–准确度曲线；预算不够时输出 INSUFFICIENT_EVIDENCE 也是正确行为；固定方案的成本取它自己达到同样可靠性所需的成本。A-Easy：预实验挑出的快速 φ/ψ 残基；A-Hard：50 环 D52/G53 β-I/β-II 转角。文献（PubMed 核对）：这个翻转约 8 µs 来回 7 次、NMR 约 13–15 µs、β-II 约 4%（Arasteh 2021 doi:10.1021/acs.jpclett.1c00778；Smith 2016 doi:10.1073/pnas.1519609113），所以 16×100 ns 的数据池建不起 A-Hard 的参考，A-Hard 只检验"会不会诚实地说证据不足"。代码：`basins.py`（rama:A:73、turn:A:52，核心半径 50°、过渡式分配）、`experiment_a.py`（全部逻辑，命令 `experiment-a`，`--model` 不需要 GPU，`--select` 用于预实验挑残基）、`scripts/experiment_A.sh`（pilot/select/pool/analyze）。agent 规则：一次只规划的查看（不停、不消耗 α），之后最多 3 次可停的查看（Bonferroni 按 3 次）；`allocate()` 在加长和加重复之间选成本最低的，只有重复间差别显著（卡方检验）才加重复；最后一次查看前余量更大；用掉四分之一预算后，投影超过预算 3 倍才放弃。规则只在模型上调过，现已冻结，**还没接进实时运行的 `policy.py`**（等实验 A 验证后再接）。模型干跑：快模型上 agent 100% 成功、0 过早停止、比 Sequential-CI 省约 32%，但比事后读出的最短可靠固定方案贵（原理上躲不开，约为区间系数平方比）。旧的 `budget.py`/`hypothesis_a` 保留作通用策略对照，不再是实验 A 的主体。默认容差 0.05、可靠性 90%，由用户在看结果前确认。**还没在 GPU 上跑。**
 
 ## 用户定下的规则和决定
 
@@ -67,7 +67,7 @@
 - `cost.py`：计算成本。`of()` 按每条重复的长度算，`of_run()` 从 `run.json` 算（增强采样接着普通 MD 跑，不再付平衡时间）；`reduction()` 比两个成本。
 - `budget.py`：策略对照（回放）。`Pool`（每条重复逐帧的状态）、`pool_from_run()`（从跑完的运行读，chi1 和距离都支持）、`markov_pool()`（已知比例的模型，不需要 GPU）、`replay()`（一种策略跑一遍）、`reference()`（独立参考：真值或没用到的重复）、`check_against()`（accurate = 真的在容差内；equivalent = TOST 证明了）、`compare_strategies()`（多次重复）、`write()`。四种策略：fixed / early_stop / add_replicas / mdagent。**mdagent 策略的规则是 `policy.py` 规则的镜像**，改 `policy.py` 的规则时要同步改 `budget._decide`；两边共用 `policy.spread_labels` 和 `policy.stalled_labels`。
 - `scripts/budget_experiment.sh`：通用的策略对照（数据池 + 回放四种策略、三种判据）。
-- `scripts/experiment_A.sh`：实验 A。`budget` 新增 `--fixed-grid`（一组固定方案）、`--baseline`（文献方案，判定以它们为准）、`--holdout`（留出的共同参考）、`--items`（只回放预实验挑出的项目）、`--target-rate`；`budget.hypothesis_a()` 给出判定，`markov_items()` 是多个速度不同的模型项目。
+- `basins.py`、`experiment_a.py`、`scripts/experiment_A.sh`：实验 A（见上面"实验 A"）。`budget` 的 `--fixed-grid`、`--baseline`、`--holdout`、`--items`、`--target-rate` 和 `hypothesis_a()` 是上一版实验 A 的做法，仍可用于通用对照。
 - 目标、精度判据（`criterion`、`alpha`）和权限在 `agent.Goal`（`run.json` 的 `goal`）；`RunState.precision()` 组装成 `Precision`；停下的原因 target_reached / stalled / budget_exhausted / failed 记在 `run.json`（`notes.plain_md_outcome`、`enhanced.outcome`、失败时 `notes.outcome`）。
 - `messages.py`：运行发给对话的消息。
 - `policy.py`：第 4 步，每轮后选下一步动作（停、加长、加重复并补跑、超出预算延长、建议重新播种），先查权限；没有权限就在对话里建议。记录在 `run.json` 的 `notes.actions`。增强采样的同类规则写在 `agent.run_all` 的循环里。
@@ -81,7 +81,7 @@
 - `outputs.py`：列出一个运行的结果文件（`protein.pdb`、轨迹、chi1 和偏置势数据），以及电脑名和完整路径。命令行的 Summary 和网页都用它。
 - `terminal.py`：终端对话（`chat --terminal`）和 `start` 菜单（选择记在 `runs/.chats/start.json`）。
 - `llm.py`：`ask` 命令和设置表 `RunPlan`。`ask` 也用 `backends.py`，不再只能用 API 密钥。
-- `cli.py`：命令行 `start`、`run`、`resume`、`diagnose`、`check`、`info`、`fetch`、`ask`、`chat`、`report`、`compare`、`budget`。
+- `cli.py`：命令行 `start`、`run`、`resume`、`diagnose`、`check`、`info`、`fetch`、`ask`、`chat`、`report`、`compare`、`budget`、`experiment-a`。
 - `.claude/commands/`：Claude Code 项目命令 `/md` 和 `/md-status`。
 
 测试：`pytest -q tests`（约 4 分钟，含在 CPU 上跑小肽段的测试）；`pytest -q tests -m "not slow"` 只跑快速测试。测试离线运行，UniProt 序列在 `tests/data/uniprot/`。测试体系 `examples/181L.pdb`（T4 溶菌酶 L99A 与苯，口袋里的 Val111 侧链在常规 MD 中很难翻转）。
