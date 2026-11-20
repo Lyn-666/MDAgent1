@@ -24,7 +24,7 @@ After each look at the data the agent does one of three things:
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from statistics import NormalDist
 
 STOP, INSUFFICIENT, CONTINUE = "STOP", "INSUFFICIENT_EVIDENCE", "continue"
@@ -66,6 +66,9 @@ class Step:
     # Why, as a short code for messages in other languages: converged, looks_used, budget_used, stuck,
     # hopeless, too_few_changes, projected.
     kind: str = ""
+    # Items left out because plain MD cannot answer them within the limits (label -> "stuck" or "hopeless").
+    # They are reported as INSUFFICIENT_EVIDENCE on their own; the other items go on to their precision.
+    set_aside: dict = field(default_factory=dict)
 
 
 def z_bonferroni(alpha: float, looks: int) -> float:
@@ -113,42 +116,63 @@ def allocate(items: list, n: int, ns: float, z: float, tolerance: float, max_n: 
 
 def next_step(items: list, n: int, ns: float, look: int, tests_before: int, z: float, tolerance: float,
               limits: Limits, equil_ns: float = 0.6) -> Step:
-    """One decision after look number `look` (1 = the first). `tests_before`: earlier looks that could stop."""
+    """One decision after look number `look` (1 = the first). `tests_before`: earlier looks that could stop.
+
+    An item that plain MD cannot answer within the limits (it never changed state after patience_ns, or its
+    own projected cost is far beyond the budget) is set aside: it gets INSUFFICIENT_EVIDENCE on its own, and
+    the time goes to the items that can still be answered. Only when nothing answerable is left does the
+    whole run stop with INSUFFICIENT_EVIDENCE.
+    """
     planning = look == 1
     tests = tests_before + (0 if planning else 1)
-    if not planning and items and all(i.converged for i in items):
-        return Step(STOP, n, ns, "every item is precise enough and adequately sampled", planning, "converged")
     max_n, max_ns = limits.max_replicas, limits.max_ns
     spent = n * ns
+    aside = {}
+    if ns >= limits.patience_ns:
+        aside = {i.label: "stuck" for i in items if sum(i.transitions) == 0}
+    if spent >= limits.budget_ns / 4:
+        # A projection from very little data is too noisy to give up on: wait for a quarter of the budget.
+        for i in items:
+            if i.label in aside or i.converged or not (i.transitions and min(i.transitions) >= limits.min_transitions):
+                continue
+            own = allocate([i], n, ns, z, tolerance, max_n, max_ns, equil_ns)
+            if own is None or own[2] > limits.give_up_factor * limits.budget_ns:
+                aside[i.label] = "hopeless"
+    active = [i for i in items if i.label not in aside]
+    left_out = (f" Left out, plain MD cannot answer them within the limits: {', '.join(aside)}."
+                if aside and active else "")
+    if not active:
+        why = ("; ".join(f"{k} never changed state in {ns:g} ns per replica" for k, v in aside.items() if v == "stuck")
+               or "the projected cost is far beyond the budget")
+        return Step(INSUFFICIENT, n, ns, f"{why}; plain MD cannot answer within the limits", planning,
+                    "stuck" if "stuck" in aside.values() else "hopeless", aside)
+    if not planning and all(i.converged for i in active):
+        return Step(STOP, n, ns, "every item that plain MD can answer is precise enough and adequately sampled"
+                    + left_out, planning, "converged", aside)
     if tests >= limits.stop_looks:
-        return Step(INSUFFICIENT, n, ns, "the largest number of looks is reached before the precision", planning,
-                    "looks_used")
+        return Step(INSUFFICIENT, n, ns, "the largest number of looks is reached before the precision" + left_out,
+                    planning, "looks_used", aside)
     if spent >= limits.budget_ns - 1e-9 or (ns >= max_ns - 1e-9 and n >= max_n):
-        return Step(INSUFFICIENT, n, ns, "the budget is used up before the precision", planning, "budget_used")
-    stuck = [i.label for i in items if sum(i.transitions) == 0]
-    if stuck and ns >= limits.patience_ns:
-        return Step(INSUFFICIENT, n, ns, f"{', '.join(stuck)} never changed state in {ns:g} ns per replica; "
-                    "plain MD cannot answer", planning, "stuck")
+        return Step(INSUFFICIENT, n, ns, "the budget is used up before the precision" + left_out, planning,
+                    "budget_used", aside)
     last = tests == limits.stop_looks - 1          # the next look is the last one that may stop
     margin = limits.final_margin if last else limits.margin
-    adequate = all(i.transitions and min(i.transitions) >= limits.min_transitions for i in items)
+    adequate = all(i.transitions and min(i.transitions) >= limits.min_transitions for i in active)
     new_n, new_ns = n, ns
     if not adequate:
         new_ns = min(max_ns, (4 if last else 2) * ns)
         why = "too few state changes to trust the errors yet; running longer"
     else:
-        plan = allocate(items, n, ns, z, tolerance, max_n, max_ns, equil_ns)
-        hopeless = plan is None or plan[2] > limits.give_up_factor * limits.budget_ns
-        if hopeless and spent < limits.budget_ns / 4:
-            # A projection from very little data is too noisy to give up on: wait for a quarter of the budget.
-            plan = (n, min(max_ns, max(2 * ns, limits.budget_ns / 4 / n)), 0.0)
-            hopeless = False
-        if hopeless:
-            need = "no allocation within the limits reaches it" if plan is None else \
-                f"the projected cost is {plan[2]:.0f} ns"
-            return Step(INSUFFICIENT, n, ns, f"{need}, more than {limits.give_up_factor:g} times the budget "
-                        f"({limits.budget_ns:g} ns), so more plain MD will not reach the precision", planning,
-                        "hopeless")
+        plan = allocate(active, n, ns, z, tolerance, max_n, max_ns, equil_ns)
+        if plan is None or plan[2] > limits.give_up_factor * limits.budget_ns:
+            if spent < limits.budget_ns / 4:
+                plan = (n, min(max_ns, max(2 * ns, limits.budget_ns / 4 / n)), 0.0)
+            else:
+                need = "no allocation within the limits reaches it" if plan is None else \
+                    f"the projected cost is {plan[2]:.0f} ns"
+                return Step(INSUFFICIENT, n, ns, f"{need}, more than {limits.give_up_factor:g} times the budget "
+                            f"({limits.budget_ns:g} ns), so more plain MD will not reach the precision" + left_out,
+                            planning, "hopeless", aside)
         new_n, new_ns = plan[0], min(max_ns, plan[1] * margin)
         why = (f"projected: {new_n} replicas of {plan[1]:.1f} ns reach the precision for the least compute "
                f"(plus a {margin - 1:.0%} margin)")
@@ -158,5 +182,5 @@ def next_step(items: list, n: int, ns: float, look: int, tests_before: int, z: f
             new_n, new_ns = n, min(max_ns, limits.budget_ns / n)
     if new_n == n and new_ns <= ns + 1e-9:
         new_ns = min(max_ns, ns + limits.chunk_ns)
-    return Step(CONTINUE, new_n, round(new_ns, 6), why, planning,
-                "projected" if adequate else "too_few_changes")
+    return Step(CONTINUE, new_n, round(new_ns, 6), why + left_out, planning,
+                "projected" if adequate else "too_few_changes", aside)

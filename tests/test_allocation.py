@@ -174,3 +174,16 @@ def test_a_live_backbone_run_decides_and_says_why(tmp_path):
     paths = write(tmp_path)
     assert (tmp_path / "landscape_rama_A_110.svg").exists()
     assert "The agent's decisions" in paths[1].read_text()
+
+
+def test_an_item_plain_md_cannot_answer_does_not_stop_the_others():
+    """A slow turn that never flips is set aside; the residues that do flip go on to their precision."""
+    slow = _item("turn:A:52", trans=(0, 0, 0, 0))
+    fast = _item("rama:A:9", se=0.03, w=0.03, b=0.03)
+    s = next_step([slow, fast], 4, 20.0, look=2, tests_before=0, z=2.39, tolerance=0.05, limits=LIM)
+    assert s.action == CONTINUE and s.set_aside == {"turn:A:52": "stuck"} and s.ns > 20.0
+    done = _item("rama:A:9", ok=True)
+    s = next_step([slow, done], 4, 40.0, look=3, tests_before=1, z=2.39, tolerance=0.05, limits=LIM)
+    assert s.action == STOP and "turn:A:52" in s.set_aside and "Left out" in s.reason
+    s = next_step([slow], 4, 20.0, look=2, tests_before=0, z=2.39, tolerance=0.05, limits=LIM)
+    assert s.action == INSUFFICIENT                     # nothing answerable left: the whole run says so
