@@ -9,8 +9,13 @@ the run (run.json, status.json, enhanced/populations.json); nothing is made up.
     python -m mdagent report --run runs/x                 # write the report again
     python -m mdagent compare --run runs/x --reference runs/long
 
-compare tells whether two runs agree within their errors: for every item and state,
-the difference divided by the combined error (z). |z| <= 2 for everything means they agree.
+compare asks whether two runs give the same answer, with an equivalence test: the two
+results are equivalent when the whole confidence interval of their difference lies inside
+the tolerance the user asked for (|difference| + z * combined error <= tolerance). This is
+the question that matters for a cheaper run: "is the answer still right?". It is not the
+same as the usual significance test. |z| <= 2 only says that a difference was not proven;
+with few data every difference passes that test, so a short run would look "right" exactly
+because it is imprecise. z is still printed, because it says which way a difference goes.
 """
 
 from __future__ import annotations
@@ -19,6 +24,7 @@ import json
 import math
 import time
 from pathlib import Path
+from statistics import NormalDist
 
 from .outputs import describe, host
 
@@ -57,6 +63,24 @@ def final_results(run_dir: Path) -> list[dict]:
     return list(out.values())
 
 
+def _cost(state: dict):
+    from .cost import of_run
+
+    return of_run(state)
+
+
+def _precision(state: dict):
+    """The precision the run asked for, read back from run.json."""
+    from .uncertainty import Precision, planned_looks
+
+    goal, loop = state.get("goal") or {}, state.get("loop") or {}
+    factor = goal.get("extend_factor", 2.0) if "extend" in (goal.get("permissions") or []) else 1.0
+    return Precision(epsilon=goal.get("precision", 0.05), criterion=goal.get("criterion", "standard_error"),
+                     alpha=goal.get("alpha", 0.05),
+                     looks=planned_looks(loop.get("first_ns", 1.0), loop.get("extend_ns", 5.0),
+                                         loop.get("max_ns", 20.0), factor))
+
+
 def _fmt(pops: dict, errs: dict) -> str:
     return ", ".join(f"{k} {pops[k]:.2f} ± {errs[k]:.2f}" for k in pops)
 
@@ -93,8 +117,8 @@ def write(run_dir: Path) -> list[Path]:
         L.append(T(f"- 目标量：{what}。", f"- Quantity: {what}."))
         if goal.get("description"):
             L.append(T(f"- 用户的原话：{goal['description']}", f"- In the user's words: {goal['description']}"))
-        L.append(T(f"- 要求的精度：每个比例的标准误差不超过 {precision:g}。",
-                   f"- Requested precision: standard error of every population at most {precision:g}."))
+        L.append(T(f"- 要求的精度：{_precision(state).describe(zh=True)}。",
+                   f"- Requested precision: {_precision(state).describe()}."))
         perms = goal.get("permissions")
         L.append(T(f"- agent 可以自己做的事：{', '.join(perms) if perms else '无（只提建议）'}。",
                    f"- The agent could by itself: {', '.join(perms) if perms else 'nothing (suggestions only)'}."))
@@ -124,6 +148,13 @@ def write(run_dir: Path) -> list[Path]:
                        f"每条 {pj.get('ns_per_replica', '?')} ns；比例用 Tiwary–Parrinello 方法重新加权。",
                        f"- Enhanced sampling (well-tempered metadynamics on chi1) with {pj.get('n_replicas', '?')} "
                        f"replicas of {pj.get('ns_per_replica', '?')} ns; populations reweighted (Tiwary-Parrinello)."))
+        c = _cost(state)
+        L.append(T(f"- 计算量：生产 {c.aggregate_ns:g} ns（所有重复相加），加上 {c.n_replicas} 条重复的平衡 "
+                   f"{c.overhead_ns:g} ns，合计 {c.compute_ns:g} ns"
+                   + (f"，实际用了 {c.measured_seconds / 3600:.1f} 小时。" if c.measured_seconds else "。"),
+                   f"- Cost: {c.aggregate_ns:g} ns of production (all replicas added up) plus {c.overhead_ns:g} ns to "
+                   f"equilibrate {c.n_replicas} replicas, {c.compute_ns:g} ns in total"
+                   + (f", which took {c.measured_seconds / 3600:.1f} hours." if c.measured_seconds else ".")))
         L.append("")
 
         L += [T("## 结论", "## Conclusion"), ""]
@@ -209,12 +240,37 @@ def write(run_dir: Path) -> list[Path]:
     return paths
 
 
-def compare(run: Path, reference: Path) -> tuple[str, bool]:
-    """Compare the final results of two runs. Returns a table and whether they agree (every |z| <= 2)."""
+def equivalent(pa: float, ea: float, pb: float, eb: float, tolerance: float,
+               alpha: float = 0.05) -> tuple[float, bool]:
+    """Are two populations the same within `tolerance`? Returns the difference and the verdict.
+
+    Equivalent when the whole (1 - 2*alpha) interval of the difference lies inside
+    (-tolerance, +tolerance), which is the usual two one-sided test (TOST). An imprecise
+    result is therefore never called equivalent, which is what a short run has to prove.
+    """
+    d = pa - pb
+    err = math.sqrt((ea if math.isfinite(ea) else 0.0) ** 2 + (eb if math.isfinite(eb) else 0.0) ** 2)
+    if not math.isfinite(d):
+        return float("nan"), False
+    z = NormalDist().inv_cdf(1 - alpha)
+    return d, abs(d) + z * err <= tolerance
+
+
+def compare(run: Path, reference: Path, tolerance: float | None = None,
+            alpha: float = 0.05) -> tuple[str, bool]:
+    """Compare the final results of two runs. Returns a table and whether they are equivalent.
+
+    `tolerance` defaults to the precision the compared run asked for. Without any
+    tolerance (an old run with no goal), it falls back to 0.05.
+    """
     a = {r["label"]: r for r in final_results(run)}
     b = {r["label"]: r for r in final_results(reference)}
+    if tolerance is None:
+        tolerance = ((_load(Path(run) / "run.json").get("goal") or {}).get("precision")) or 0.05
     common = [k for k in a if k in b]
-    lines = [f"{'item':<24}{'state':<8}{'run':>14}{'reference':>16}{'z':>8}"]
+    lines = [f"Tolerance: {tolerance:g} (populations equal within this count as the same answer), "
+             f"confidence {1 - 2 * alpha:.0%}.",
+             f"{'item':<24}{'state':<8}{'run':>14}{'reference':>16}{'diff':>8}{'z':>8}{'same':>7}"]
     agree = bool(common)
     for k in common:
         for s in a[k]["populations"]:
@@ -222,11 +278,14 @@ def compare(run: Path, reference: Path) -> tuple[str, bool]:
             ea, eb = a[k]["standard_error"][s], b[k]["standard_error"].get(s, float("nan"))
             err = math.sqrt(ea ** 2 + eb ** 2)
             z = (pa - pb) / err if err > 0 else (0.0 if pa == pb else float("inf"))
-            agree = agree and abs(z) <= 2
-            lines.append(f"{k:<24}{s:<8}{pa:>8.3f}±{ea:<5.3f}{pb:>10.3f}±{eb:<5.3f}{z:>8.2f}")
+            d, same = equivalent(pa, ea, pb, eb, tolerance, alpha)
+            agree = agree and same
+            lines.append(f"{k:<24}{s:<8}{pa:>8.3f}±{ea:<5.3f}{pb:>10.3f}±{eb:<5.3f}"
+                         f"{d:>8.3f}{z:>8.2f}{'yes' if same else 'no':>7}")
     missing = sorted(set(a) ^ set(b))
     if missing:
         lines.append(f"Only in one run: {', '.join(missing)}")
-    lines.append("The runs agree within their errors (every |z| <= 2)." if agree else
-                 "The runs do NOT agree within their errors (some |z| > 2), or have no item in common.")
+    lines.append(f"The two runs give the same answer within {tolerance:g} for every state." if agree else
+                 f"The two runs are NOT shown to give the same answer within {tolerance:g} (the difference or "
+                 "the error is too large), or they have no item in common.")
     return "\n".join(lines), agree

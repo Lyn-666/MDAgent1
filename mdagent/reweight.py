@@ -149,7 +149,7 @@ def analyze(run_dir: Path, labels: list[str], n_replicas: int, s: MetadSettings,
             "residues": residues}
 
 
-def assess(result: dict, previous: dict | None, rule: StopRule, precision: float) -> dict[str, str]:
+def assess(result: dict, previous: dict | None, rule: StopRule, precision) -> dict[str, str]:
     """A verdict for each residue:
 
     reached     the goal is met: error at most `precision`, replicas agree, every replica crossed
@@ -161,6 +161,9 @@ def assess(result: dict, previous: dict | None, rule: StopRule, precision: float
 
     The change since the previous check is only a diagnosis (see change_since_last), never a reason to stop.
     """
+    from .uncertainty import Precision
+
+    p = Precision.of(precision) or Precision()
     prev = {r["residue"]: r["populations"] for r in (previous or {}).get("residues", [])}
     out = {}
     for r in result["residues"]:
@@ -171,7 +174,7 @@ def assess(result: dict, previous: dict | None, rule: StopRule, precision: float
             out[r["residue"]] = "stalled"
         elif result["weights_degenerate"]:
             out[r["residue"]] = "unreliable"
-        elif (r["max_standard_error"] <= precision and not r["replicas_disagree"]
+        elif (p.met(r["standard_error"], r["populations"]) and not r["replicas_disagree"]
               and result["ns_per_replica"] >= rule.min_ns - 1e-9):
             out[r["residue"]] = "reached"
         else:

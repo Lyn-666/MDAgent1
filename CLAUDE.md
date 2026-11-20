@@ -20,10 +20,19 @@
 
 **用户后来说明的目的（2026-11-17）：** 用户描述任务后，agent 按文献建议方法和设置（普通 MD、自适应采样、增强采样；alchemical 只推荐外部工具），但跑什么由用户决定。默认 agent 自己判断（`--mode auto`）：边跑边分析，自己决定何时换方法、何时停、何时交付。用户指定方法时（`--mode guided`）照做，没有进展就在对话里发消息建议换方法，不暂停、不自己换。核心：再加重复或加长对结果没有增益时，agent 停下。
 
-**用户的开发计划（2026-11-17）：** 1 保存任务目标和权限（目标量、精度、预算；能否延长、加重复、换方法、提前停）；2 区分停止原因（达到目标、采样停滞、预算用完、运行失败；比例不再变化只是诊断，不是停止理由）；3 让分析可信（考虑时间相关性的不确定度、检查权重退化、验证多个耦合 chi1 的重新加权）；4 每轮后选择下一步动作（延长、加重复、重新播种、建议换方法、停止），执行前查权限；5 针对性验证（正常达标、所有重复同时困住、预算用完未达标）；6 完善交付，再扩展方法。**1–3 已完成（2026-11-17）。2026-11-18 用户同意先把"结果量"做成可替换的一层（`observables.py`），已完成：侧链构象和原子间距离两种量；增强采样只支持侧链构象。第 4 步已完成（`policy.py`），第 6 步的报告已完成（`report.py`），第 5 步的验证脚本已写好（`scripts/step5_validation.sh`），等用户在 GPU 上跑。** 5 里"三个场景"的逻辑测试已有（`tests/test_stop_reasons.py`），还缺用真实模拟检查停下时的误差。
+**用户重新定位的研究目标（2026-11-20，最重要）：** 项目不是"达到采样目标就停"的工作流，而是**在给定精度下用最少计算量得到和高预算参考一致的结果**（accuracy-constrained simulation budget optimization）。要回答的问题：给定体系、要测的量和预算，agent 能不能自己分配模拟时间、重复数和采样策略，用最小成本得到统计上可靠的结果。应用在两类任务上：(1) 普通 MD——跑多少 ns、几条重复、什么时候可以提前停；(2) 自适应采样——何时开新重复、从哪个构象重新起跑、每条跑多久、剩下的预算怎么分。注意自适应采样不等于增强采样；先做无偏 MD 的分配和重新起跑，更容易验证平衡量是否正确。
+
+用户当时明确说：**先不要再加新的采样方法。** 先把现有的决策框架改成"精度约束下的预算优化"，再把同一套决策接口扩展到自适应采样。用户的三阶段路线：1 普通 MD 的提前停和重复分配；2 自适应采样的智能重新起跑（和 uniform restart、least-counts 比）；3 在难度不同的体系上做基准测试（独立种子、冻结策略，报告误差、失败率、GPU 小时、累计 ns、重复数、达到精度的时间）。
+
+用户强调的几点：成本要以 total compute cost 为主要目标，replica 数、累计 ns、wall-clock 分开报告，不要把"最少时间"和"最少重复数"当成两个要同时最小化的指标（10×10 ns 和 1×100 ns 累计相同，但初始化开销和对慢跃迁的探索完全不同；GPU 够多时多开重复反而等得更短）；不同的量（rotamer 比例、自由能差、跃迁速率、MFPT）不能用同一套收敛判据；在线停止不能用高预算参考来指导，参考只能用于离线验证；`|z| ≤ 2` 不足以证明一致，要用等效性检验和校准过的序贯置信区间。
+
+**用户的开发计划（2026-11-17，在上面这个新目标之前写的）：** 1 保存任务目标和权限（目标量、精度、预算；能否延长、加重复、换方法、提前停）；2 区分停止原因（达到目标、采样停滞、预算用完、运行失败；比例不再变化只是诊断，不是停止理由）；3 让分析可信（考虑时间相关性的不确定度、检查权重退化、验证多个耦合 chi1 的重新加权）；4 每轮后选择下一步动作（延长、加重复、重新播种、建议换方法、停止），执行前查权限；5 针对性验证（正常达标、所有重复同时困住、预算用完未达标）；6 完善交付，再扩展方法。**1–3 已完成（2026-11-17）。2026-11-18 用户同意先把"结果量"做成可替换的一层（`observables.py`），已完成：侧链构象和原子间距离两种量；增强采样只支持侧链构象。第 4 步已完成（`policy.py`），第 6 步的报告已完成（`report.py`），第 5 步的验证脚本已写好（`scripts/step5_validation.sh`），等用户在 GPU 上跑。** 5 里"三个场景"的逻辑测试已有（`tests/test_stop_reasons.py`），还缺用真实模拟检查停下时的误差。
+
+**按新目标做了什么（2026-11-20）：** 加了三件事，都在 GPU 上没验证过。(1) 成本核算 `cost.py`：aggregate_ns（所有重复相加的生产时间）、compute_ns（加上每条重复各自的平衡时间，主要指标）、wall_ns（按同时能跑几条折算的等待时间）分开报告；运行每轮记下实测秒数（`run.json` 的 `notes.rounds`）；结果报告里写明用了多少计算量。(2) 精度判据 `uncertainty.Precision`：`--criterion standard_error`（默认，含义和以前一样）/`confidence`（α 平摊到预先知道的判断次数）/`sequence`（Robbins 置信序列）。默认没改，因为改成 `confidence` 会让运行长好几倍；先用 `budget` 量出代价再决定。(3) 策略对照 `budget.py` + `budget` 命令：一次高预算数据池，离线回放 fixed / early_stop / add_replicas / mdagent 四种策略，比成本和正确率；对"只加长、只加独立重复"的策略回放是精确的，"从挑出的帧重新起跑"回放不了。`compare` 从 `|z| ≤ 2` 换成等效性检验（TOST）。在已知比例的模型上看到：默认判据提前停省 83% 但 10 次里 2 次超出容差，换 `confidence` 后 10 次全对、省 40%。
 
 ## 用户定下的规则和决定
 
+- **"更省"要能验证（2026-11-20）：** 一个策略只有既更便宜、答案又仍然在容差以内，才算更好。所以：成本三个数分开报；参考必须独立（策略没用到的那些重复，或者已知真值），不能和整个数据池比，那等于和自己比；一致性用等效性检验，不用 `|z| ≤ 2`（数据越少越容易通过，短跑会正因为不精确而显得正确）；一次跑赢不算，要多次重复（`--repeats`）看正确率。同一个数据池的多次重复不是完全独立的（换的是取哪几条重复），报告里说明了这一点。
 - **要做结果分析（2026-11-17 改）：** 以前的规则"不做增强采样之后的分析"已取消。增强采样用 Tiwary–Parrinello 重新加权算各状态比例（`reweight.py`），结果和停下的理由要交付给用户。语言模型自己不算结果，只转述运行发来的消息。
 - **只有序列和参考序列一致、结构完好干净，才开始正式的下一步。** 结构检查有问题就停，除非用户明确说继续（`--accept-problems`）。181L 和 UniProt P00720 有两处未说明差异（R12G、I137R），用 181L 测试要加 `--accept-problems`。
 - **每项设置都有默认值。** 影响科学结论的选择（力场、离子、pH、质子化、末端）由用户决定；用户提出非默认要求时，agent 先执行（例如先跑 PROPKA），再开始 MD。所有搭体系选项都在 `SetupOptions` 里，聊天窗口也填同一张表。
@@ -52,11 +61,14 @@
 - `diagnose.py`：侧链 chi1 诊断和排序。脯氨酸和形成二硫键的半胱氨酸（按 SG-SG 距离判断）判为 `fixed_chi1`，跳过。`agent.py`：多轮循环，决定续跑或停止；`run_all` 在普通 MD 后自动做增强采样。
 - `enhanced.py`：chi1 上的 well-tempered metadynamics，在 OpenMM 里实现。一次最多偏置 `max_residues`（默认 10，`--enhanced-max-residues`）个最慢的侧链。各重复轮流跑，每轮 1 ns。
 - `reweight.py`：重放高斯峰重建偏置势，Tiwary–Parrinello 重新加权，算状态比例和误差；`assess` 给每个侧链判断 reached / stalled / unreliable / not_yet；`populations.json`。用已知比例的模型和两个耦合侧链的模型测试过。
-- `uncertainty.py`：分块平均的误差（考虑时间相关）、合并重复、有效样本数。普通 MD 和增强采样都用。
-- 目标和权限在 `agent.Goal`（`run.json` 的 `goal`）；停下的原因 target_reached / stalled / budget_exhausted / failed 记在 `run.json`（`notes.plain_md_outcome`、`enhanced.outcome`、失败时 `notes.outcome`）。
+- `uncertainty.py`：分块平均的误差（考虑时间相关）、合并重复、有效样本数。普通 MD 和增强采样都用。还有 `Precision`（容差 + 判据 + α + 判断次数，`met()` 判断够不够精确）和 `planned_looks()`（判断次数 = 预算 ÷ 每轮长度）。`judge`、`reweight.assess` 都接受 `Precision` 或一个浮点数（旧行为）。
+- `cost.py`：计算成本。`of()` 按每条重复的长度算，`of_run()` 从 `run.json` 算（增强采样接着普通 MD 跑，不再付平衡时间）；`reduction()` 比两个成本。
+- `budget.py`：策略对照（回放）。`Pool`（每条重复逐帧的状态）、`pool_from_run()`（从跑完的运行读，chi1 和距离都支持）、`markov_pool()`（已知比例的模型，不需要 GPU）、`replay()`（一种策略跑一遍）、`reference()`（独立参考：真值或没用到的重复）、`check_against()`（accurate = 真的在容差内；equivalent = TOST 证明了）、`compare_strategies()`（多次重复）、`write()`。四种策略：fixed / early_stop / add_replicas / mdagent。**mdagent 策略的规则是 `policy.py` 规则的镜像**，改 `policy.py` 的规则时要同步改 `budget._decide`；两边共用 `policy.spread_labels` 和 `policy.stalled_labels`。
+- `scripts/budget_experiment.sh`：核心实验。先跑数据池（`--allow none`），再回放四种策略、三种判据。
+- 目标、精度判据（`criterion`、`alpha`）和权限在 `agent.Goal`（`run.json` 的 `goal`）；`RunState.precision()` 组装成 `Precision`；停下的原因 target_reached / stalled / budget_exhausted / failed 记在 `run.json`（`notes.plain_md_outcome`、`enhanced.outcome`、失败时 `notes.outcome`）。
 - `messages.py`：运行发给对话的消息。
 - `policy.py`：第 4 步，每轮后选下一步动作（停、加长、加重复并补跑、超出预算延长、建议重新播种），先查权限；没有权限就在对话里建议。记录在 `run.json` 的 `notes.actions`。增强采样的同类规则写在 `agent.run_all` 的循环里。
-- `report.py`：第 6 步，运行结束时写 `report.zh.md`、`report.en.md`（结论、误差、停下原因、动作、限制、文件、遗留问题）；`compare` 判断两个运行是否在误差内一致（|z| ≤ 2）。命令 `report`、`compare`。
+- `report.py`：第 6 步，运行结束时写 `report.zh.md`、`report.en.md`（结论、误差、成本、停下原因、动作、限制、文件、遗留问题）；`equivalent()` 是等效性检验（TOST），`compare` 用它判断两个运行是不是给出同一个答案（容差默认取被比较的运行要求的精度，`--tolerance` 可改）。命令 `report`、`compare`、`budget`。
 - `scripts/step5_validation.sh`：第 5 步在 GPU 上跑的场景（达标、困住、预算用完、增强采样，加参考运行），汇总在 `runs/val_<蛋白>_summary.txt`。默认用 1UBQ（用户要求换掉 181L 作为主例子；`--uniprot P0CG48 --termini charged`），也可用 181L。
 - `observables.py`：结果量层。每个量换成逐帧的状态，再用同一套诊断、误差和停下判断。`chi1`（g+/t/g-）和 `distance`（近/远，`A:88:OH-A:111:CG1@0.6`，阈值 ±0.05 nm 的缓冲）。`--quantity`、`--distances`；对话里 `target_kind` 为 `distance`。
 - `adaptive.py`：可选的 AdaptivePy 自适应采样（`--sampling adaptive`）。
@@ -66,7 +78,7 @@
 - `outputs.py`：列出一个运行的结果文件（`protein.pdb`、轨迹、chi1 和偏置势数据），以及电脑名和完整路径。命令行的 Summary 和网页都用它。
 - `terminal.py`：终端对话（`chat --terminal`）和 `start` 菜单（选择记在 `runs/.chats/start.json`）。
 - `llm.py`：`ask` 命令和设置表 `RunPlan`。`ask` 也用 `backends.py`，不再只能用 API 密钥。
-- `cli.py`：命令行 `start`、`run`、`resume`、`diagnose`、`check`、`info`、`fetch`、`ask`、`chat`。
+- `cli.py`：命令行 `start`、`run`、`resume`、`diagnose`、`check`、`info`、`fetch`、`ask`、`chat`、`report`、`compare`、`budget`。
 - `.claude/commands/`：Claude Code 项目命令 `/md` 和 `/md-status`。
 
 测试：`pytest -q tests`（约 4 分钟，含在 CPU 上跑小肽段的测试）；`pytest -q tests -m "not slow"` 只跑快速测试。测试离线运行，UniProt 序列在 `tests/data/uniprot/`。测试体系 `examples/181L.pdb`（T4 溶菌酶 L99A 与苯，口袋里的 Val111 侧链在常规 MD 中很难翻转）。
@@ -75,7 +87,7 @@
 
 - **用户的电脑：** 项目在 `~/Desktop/MDAgent1`，conda 环境 `mdagent`，OpenMM 8.6.1 带 CUDA，GPU 上约每天 300 到 600 ns。用户有 Claude 订阅，但没有 API 密钥。
 - **不要在用户的 conda 环境里装 openmm-plumed：** conda-forge 上的版本会把 OpenMM 降到 8.2 并丢掉 CUDA，而且其中的 PLUMED 不带 OPES。
-- **云端会话**（Claude Code 网页版的临时容器）：没有 GPU，只适合很短的流程测试；装不了 AdaptivePy；没有 API 密钥。改动直接推送到 GitHub `Lyn-666/MDAgent1` 的 `main` 分支。最早的 `zcorn2017/binding-lang` 仓库已恢复原样，不再使用。
+- **云端会话**（Claude Code 网页版的临时容器）：没有 GPU，只适合很短的流程测试；装不了 AdaptivePy；没有 API 密钥。改动推送到 GitHub `Lyn-666/MDAgent1` 的开发分支 `claude/admiring-noether-6mlzki`（云端会话默认在这个分支上工作）。**注意：`main` 落后这个分支，合并由用户决定。**最早的 `zcorn2017/binding-lang` 仓库已恢复原样，不再使用。
 - **第一位测试者（2026-11-19，masi-pc，项目在 `~/MDAgent1`，不是 `~/Desktop/MDAgent1`）：** `~/.condarc` 里有 `solver: classic`，conda 卡在 “Collecting package metadata”，加 `--solver=libmamba` 解决；直接用 `pip` 会跑到系统旧 pip，要用 `python -m pip`；CUDA 报 PTX 版本错误（conda 装了 13.5，驱动 610.57 只支持 13.3），装 `cuda-version=13.3` 后 CUDA 可用（1UBQ 约 854 ns/day）；RTX 4090 + Intel CPU，CPU 8 和 9（物理核 16）不稳定（系统日志里 44 次段错误都在这两个 CPU 上），快速测试在 `addSolvent` 里段错误，要用 `taskset -c 0-7,10-31` 运行测试和 `mdagent start`（子进程继承限制）。日志查法和 `scripts/find_bad_cores.py` 见 README。11-19 在这台电脑上开始跑第 5 步（1UBQ）：reach_chi1 已完成且判断正确：ASP32 普通 MD 达标；LYS63、GLU16 各有一条重复几乎不翻转（每条至少 4 次的规则），普通 MD 用到 20 ns 上限后改用增强采样并达标；LYS63 约 89% 在 g+（+60°），和普通 MD 5 条重复的主要状态一致，说明重新加权正确。LYS63 翻转慢，不适合当“普通 MD 就能达标”的例子。
 - **用户怎样打开网页（还没确认）：** 截图里浏览器是 Mac 上的 Chrome，地址是 `localhost:8765`，但运行的进程号是 1749823，macOS 上不会出现这么大的进程号。所以模拟很可能跑在一台 Linux 电脑上，网页经 SSH 端口转发打开，结果文件在那台 Linux 电脑上。
 - **只能在用户电脑上验证的事项：** 网页下载链接经端口转发是否可用（还没验证）；AdaptivePy 的真实调用（已验证可用）；Claude Code 后台（已验证可用）；Codex 后台（还没验证；测试者会用到，公开前要验证）；`start` 加终端模式用 Claude 跑完开发测试（已验证可用）；181L 完整运行在 11-16 00:23 左右、增强采样第 1 条轨迹 5.4 ns 处停了，日志没有报错。已排除重启（11-17 08:47，非正常关机）和 SSH 断开（在 tmux 里跑，KillUserProcesses=no）；系统日志显示整台电脑在 11-16 00:22:54 之后就没有任何记录，直到 11-17 08:47 重启，所以是整机死机（不是程序或内存的问题），原因可能是 GPU、驱动、电源或散热。现在 run/resume 会在日志里记下进程号、开始时间、崩溃或 SIGTERM 时的调用栈，进度行带时间；CHARMM 加帽体系在 GPU 上的长时间运行（还没验证）；第 5 步第一次跑（1UBQ reach_chi1，11-19）：加重复的规则太激进，重复从 3 条加到 10 条（已改：只在重复明显不一致、且预算用了不到一半时加）；后来速度从 646 掉到 4 ns/day，同时一个 python 进程占了 23.4 GB 显存、GPU 使用率 0%，说明 OpenMM 悄悄改用了 CPU（已改：总是明确指定平台，GPU 不能用就报错）；占显存的是不是 MDAgent 自己的进程，还在确认。
