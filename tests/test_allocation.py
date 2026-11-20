@@ -25,8 +25,8 @@ def test_the_first_look_only_plans_even_when_everything_looks_precise():
 
 def test_it_says_insufficient_evidence_instead_of_running_on():
     stuck = _item(trans=(0, 0, 0, 0))
-    s = next_step([stuck], 4, 20.0, look=2, tests_before=0, z=2.39, tolerance=0.05, limits=LIM)
-    assert s.action == INSUFFICIENT and s.kind == "stuck"
+    s = next_step([stuck], 4, 40.0, look=2, tests_before=0, z=2.39, tolerance=0.05, limits=LIM)
+    assert s.action == INSUFFICIENT and s.kind == "stuck"   # 160 ns unchanged: ~1100 ns needed at best
     s = next_step([_item()], 4, 20.0, look=4, tests_before=2, z=2.39, tolerance=0.05, limits=LIM)
     assert s.action == INSUFFICIENT and s.kind == "looks_used"
     s = next_step([_item()], 8, 100.0, look=2, tests_before=0, z=2.39, tolerance=0.05, limits=LIM)
@@ -180,12 +180,12 @@ def test_an_item_plain_md_cannot_answer_does_not_stop_the_others():
     """A slow turn that never flips is set aside; the residues that do flip go on to their precision."""
     slow = _item("turn:A:52", trans=(0, 0, 0, 0))
     fast = _item("rama:A:9", se=0.03, w=0.03, b=0.03)
-    s = next_step([slow, fast], 4, 20.0, look=2, tests_before=0, z=2.39, tolerance=0.05, limits=LIM)
-    assert s.action == CONTINUE and s.set_aside == {"turn:A:52": "stuck"} and s.ns > 20.0
+    s = next_step([slow, fast], 4, 40.0, look=2, tests_before=0, z=2.39, tolerance=0.05, limits=LIM)
+    assert s.action == CONTINUE and s.set_aside == {"turn:A:52": "stuck"} and s.ns > 40.0
     done = _item("rama:A:9", ok=True)
-    s = next_step([slow, done], 4, 40.0, look=3, tests_before=1, z=2.39, tolerance=0.05, limits=LIM)
+    s = next_step([slow, done], 4, 60.0, look=3, tests_before=1, z=2.39, tolerance=0.05, limits=LIM)
     assert s.action == STOP and "turn:A:52" in s.set_aside and "Left out" in s.reason
-    s = next_step([slow], 4, 20.0, look=2, tests_before=0, z=2.39, tolerance=0.05, limits=LIM)
+    s = next_step([slow], 4, 40.0, look=2, tests_before=0, z=2.39, tolerance=0.05, limits=LIM)
     assert s.action == INSUFFICIENT                     # nothing answerable left: the whole run says so
 
 
@@ -227,3 +227,32 @@ def test_an_older_run_gets_its_looks_counted_again(tmp_path):
     _diagnose_and_decide(tmp_path, state)
     assert state.notes["allocation"]["counting"] == 2
     assert state.notes["allocation"]["tests"] == 0               # the jittered frames cannot stop either
+
+
+def test_an_unchanged_item_is_given_up_only_when_even_the_fastest_rate_misses_the_budget():
+    """Zero changes in A ns: at best one change per A/3 ns. Give up only if the ~20 changes the precision
+    needs would then still take more than the budget."""
+    from mdagent.allocation import stuck_projection
+
+    rate, need, data = stuck_projection(3, 16.0, 2.39, 0.05)
+    assert rate == pytest.approx(3 / 48) and 19 < need < 22 and data == pytest.approx(need * 16)
+    still = _item("rama:A:9", trans=(0, 0, 0))
+    big = Limits(max_replicas=8, max_ns=100.0, budget_ns=800.0, patience_ns=10.0)
+    s = next_step([still], 3, 16.0, look=4, tests_before=0, z=2.39, tolerance=0.05, limits=big)
+    assert s.action == CONTINUE and not s.set_aside            # 48 ns: ~330 ns needed at best, budget 800
+    s = next_step([still], 3, 64.0, look=6, tests_before=0, z=2.39, tolerance=0.05, limits=big)
+    assert s.action == INSUFFICIENT and s.set_aside == {"rama:A:9": "stuck"}   # 192 ns: ~1300 ns needed
+    assert "one change per 64 ns" in s.reason and "more than the budget of 800 ns" in s.reason
+
+
+def test_a_finished_run_decides_again_under_a_newer_rule(tmp_path):
+    from mdagent.agent import _apply_policy
+
+    state = _backbone_run(tmp_path)
+    old_key = {"ns": state.ns_done, "max_ns": state.loop.max_ns, "n_replicas": state.n_replicas,
+               "permissions": sorted(state.the_goal().permissions)}
+    state.notes["policy_round"] = {"key": old_key, "next_ns": 0.0, "decisions": {}}   # ended under the old rule
+    from mdagent.agent import _diagnose_and_decide
+
+    _, _, next_ns = _diagnose_and_decide(tmp_path, state)
+    assert next_ns > 0 and state.notes["policy_round"]["key"]["rule"] >= 3

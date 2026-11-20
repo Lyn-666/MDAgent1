@@ -159,3 +159,16 @@ def test_long_replies_can_be_read_in_a_pager_and_commands_work_at_the_question(p
     assert paged and "line 199" in paged[0]                     # the whole reply, in the pager
     assert started == ["dev"]                                   # /runs and /last did not decline the card
     assert "Nothing was done." not in text
+
+
+def test_the_report_can_be_read_in_the_chat(project):
+    a = Assistant(root=project, backend="claude", runs=Runs(project), call=None, ui="terminal")
+    run = a.runs.dir / "r1"
+    run.mkdir(parents=True)
+    (run / "run.json").write_text("{}")
+    out, paged = [], []
+    run_terminal(a, "zh", read=_scripted(["/report", "/quit"]), out=out.append, pager=paged.append)
+    assert "还没有结果报告" in "\n".join(out)
+    (run / "report.zh.md").write_text("# 结果报告\n结论", encoding="utf-8")
+    run_terminal(a, "zh", read=_scripted(["/report r1", "/quit"]), out=out.append, pager=paged.append)
+    assert paged and "结论" in paged[0]

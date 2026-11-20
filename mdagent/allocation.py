@@ -117,6 +117,23 @@ def allocate(items: list, n: int, ns: float, z: float, tolerance: float, max_n: 
     return best
 
 
+RULE_VERSION = 3   # Raised when the rule changes, so a resumed run decides again under the new rule.
+
+
+def stuck_projection(n: int, ns: float, z: float, tolerance: float) -> tuple[float, float, float]:
+    """For an item that never changed state: how much data would be needed at best.
+
+    Zero changes in A = n x ns of data: at 95% confidence the rate is at most 3/A (Poisson). To resolve even a
+    small basin (population about the tolerance) to within the tolerance, the error floor (about
+    2 q (1 - q) / sqrt(N) after N changes) needs N >= (2 (1 - tolerance) z)^2 changes. At the fastest rate that
+    takes N A / 3 of data. Returns (fastest rate per ns, changes needed, data needed in ns).
+    """
+    seen = max(n * ns, 1e-9)
+    rate = 3.0 / seen
+    need = (2 * (1 - tolerance) * z) ** 2
+    return rate, need, need / rate
+
+
 def _next_step(items: list, n: int, ns: float, look: int, tests_before: int, z: float, tolerance: float,
               limits: Limits, equil_ns: float = 0.6) -> Step:
     """One decision after look number `look` (1 = the first). `tests_before`: earlier looks that could stop.
@@ -131,7 +148,10 @@ def _next_step(items: list, n: int, ns: float, look: int, tests_before: int, z: 
     spent = n * ns
     aside = {}
     if ns >= limits.patience_ns:
-        aside = {i.label: "stuck" for i in items if sum(i.transitions) == 0}
+        # An item that never changed state is set aside only when even the fastest rate consistent with that
+        # cannot give enough changes within the budget (stuck_projection). More budget: more patience.
+        if stuck_projection(n, ns, z, tolerance)[2] > limits.budget_ns:
+            aside = {i.label: "stuck" for i in items if sum(i.transitions) == 0}
     if spent >= limits.budget_ns / 4:
         # A projection from very little data is too noisy to give up on: wait for a quarter of the budget.
         for i in items:
@@ -149,8 +169,14 @@ def _next_step(items: list, n: int, ns: float, look: int, tests_before: int, z: 
     left_out = (f" Left out, plain MD cannot answer them within the limits: {', '.join(aside)}."
                 if aside and active else "")
     if not active:
-        why = ("; ".join(f"{k} never changed state in {ns:g} ns per replica" for k, v in aside.items() if v == "stuck")
-               or "the projected cost is far beyond the budget")
+        stuck = [k for k, v in aside.items() if v == "stuck"]
+        if stuck:
+            rate, need, data = stuck_projection(n, ns, z, tolerance)
+            why = (f"{', '.join(stuck)} never changed state in {n * ns:g} ns of all replicas together; even at the "
+                   f"fastest rate that allows (one change per {1 / rate:.0f} ns), the precision needs about {need:.0f} "
+                   f"changes, that is {data:.0f} ns, more than the budget of {limits.budget_ns:g} ns")
+        else:
+            why = "the projected cost is far beyond the budget"
         return Step(INSUFFICIENT, n, ns, f"{why}; plain MD cannot answer within the limits", planning,
                     "stuck" if "stuck" in aside.values() else "hopeless", aside)
     if not planning and all(i.converged for i in active):
