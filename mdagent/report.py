@@ -25,6 +25,7 @@ from .outputs import describe, host
 REASONS = {
     "target_reached": ("达到目标", "goal reached"),
     "stalled": ("采样停滞", "sampling stalled"),
+    "not_reachable": ("上限内达不到", "not reachable within the limit"),
     "budget_exhausted": ("预算用完", "budget used up"),
     "failed": ("运行失败", "run failed"),
 }

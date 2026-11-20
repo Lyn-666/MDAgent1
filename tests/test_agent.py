@@ -131,7 +131,8 @@ def test_enhanced_sampling_biases_only_the_slowest_residues(tmp_path, monkeypatc
                         biased.append(list(residues)))
     state = RunState(pdb="x", target_description="t", target=[("A", 5), ("A", 9), ("A", 2)], n_replicas=1,
                      base_seed=1, md=MDSettings(), loop=LoopSettings(), rounds_ns=[1.0],
-                     enhanced={"enabled": True, "settings": {"max_residues": 2, "n_replicas": 1}})
+                     # "requested": the user confirmed enhanced sampling (resume --enhanced-sampling).
+                     enhanced={"enabled": True, "requested": True, "settings": {"max_residues": 2, "n_replicas": 1}})
     logs = []
     _, labels = agent.run_all(tmp_path, state, files=object(), log=logs.append)
     assert labels == ["VAL5", "VAL9"] and biased == [[("A", 5), ("A", 9)]]
@@ -187,7 +188,8 @@ def test_goal_and_permissions_from_the_command_line():
 
     base = ["run", "--pdb", "x.pdb", "--out", "runs/x", "--around-ligand", "BNZ"]
     goal = _goal_from_args(build_parser().parse_args(base))
-    assert goal.permissions == ["extend", "add_replicas", "switch_method", "stop_early"] and goal.precision == 0.05
+    # Default (auto): the user's time and replicas are limits and a new method needs a yes: only stop_early.
+    assert goal.permissions == ["stop_early"] and goal.precision == 0.05
     goal = _goal_from_args(build_parser().parse_args(base + ["--mode", "guided", "--goal", "Val111 rotamers"]))
     assert goal.permissions == [] and goal.description == "Val111 rotamers"
     goal = _goal_from_args(build_parser().parse_args(base + ["--allow", "stop_early", "--precision", "0.02"]))

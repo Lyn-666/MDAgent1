@@ -76,6 +76,9 @@ class ChatAction(BaseModel):
                           "a suggestion that plain MD makes no progress). Null keeps the run's methods.")
     resume_max_ns: Optional[float] = Field(
         None, description="resume: a new plain MD budget per replica in ns, if the user asks to run longer.")
+    resume_replicas: Optional[int] = Field(
+        None, description="resume: the new total number of plain MD replicas, if the user agrees to add replicas "
+                          "(for example 'add 2 replicas' to a run with 3 -> 5).")
     resume_enhanced_ns: Optional[float] = Field(
         None, description="resume: a new length per enhanced sampling replica in ns, if the user asks for it.")
     save_dir: Optional[str] = Field(
@@ -598,6 +601,9 @@ class Assistant:
                 if a.resume_max_ns is not None:
                     argv += ["--max-ns", f"{a.resume_max_ns:g}"]
                     changed.append(f"max_ns = {a.resume_max_ns:g}")
+                if a.resume_replicas is not None:
+                    argv += ["--replicas", str(a.resume_replicas)]
+                    changed.append(f"replicas = {a.resume_replicas}")
                 if a.resume_enhanced_ns is not None:
                     argv += ["--enhanced-ns", f"{a.resume_enhanced_ns:g}"]
                     changed.append(f"enhanced_ns = {a.resume_enhanced_ns:g}")
