@@ -382,18 +382,16 @@ def cmd_resume(args) -> int:
 
 
 def cmd_diagnose(args) -> int:
-    from .agent import RunState
-    from .diagnose import diagnose_trajectories, fixed_chi1_residues, format_report, load_run
+    from .agent import RunState, diagnose_run
+    from .diagnose import format_report
 
     run = Path(args.run)
     state = RunState.load(run)
     if not state.rounds_ns:
         print("No round has finished yet.")
         return 0
-    reports = diagnose_trajectories(
-        load_run(run, state.target, len(state.rounds_ns)), state.target, state.ns_done,
-        min_flips_per_replica=state.loop.min_flips_per_replica, fixed=fixed_chi1_residues(run / "protein.pdb"))
-    print(format_report(reports))
+    # The same diagnosis as the run itself: distances for a distance run, chi1 otherwise.
+    print(format_report(diagnose_run(run, state)))
     return 0
 
 

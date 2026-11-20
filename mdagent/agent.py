@@ -312,27 +312,28 @@ def _adaptive_starts(run_dir: Path, state: RunState, part: int, log) -> list[lis
     return state.starts[key]
 
 
-def _diagnose_and_decide(run_dir: Path, state: RunState):
+def diagnose_run(run_dir: Path, state: RunState) -> list[ResidueReport]:
+    """Diagnose the plain MD of a run for its quantity (chi1 or distances). The run and `mdagent diagnose`
+    both use this, so they always judge the same way."""
     if state.quantity == "distance_states":
-        reports = _diagnose_distances(run_dir, state)
-        decisions, next_ns = decide(reports, state.ns_done, state.loop, state.allowed("switch_method"),
-                                    bias_available=False)
-        next_ns = _apply_policy(run_dir, state, reports, decisions, next_ns)
-        _post_plain_md_messages(run_dir, state, decisions, next_ns)
-        return reports, decisions, next_ns
+        return _diagnose_distances(run_dir, state)
     fixed = fixed_chi1_residues(run_dir / "protein.pdb")
     if state.sampling == "adaptive":
         # Segments start from different frames on purpose, so judge the pooled flips.
-        reports = diagnose_trajectories(
+        return diagnose_trajectories(
             load_run(run_dir, state.target, len(state.rounds_ns), join=False), state.target,
             state.ns_done, min_flips_per_replica=state.loop.min_flips_per_replica,
             pooled_total_ns=state.ns_done * state.n_replicas, n_replicas=state.n_replicas, fixed=fixed)
-    else:
-        reports = diagnose_trajectories(
-            load_run(run_dir, state.target, len(state.rounds_ns)), state.target, state.ns_done,
-            min_flips_per_replica=state.loop.min_flips_per_replica, fixed=fixed,
-            precision=state.the_goal().precision)
-    decisions, next_ns = decide(reports, state.ns_done, state.loop, state.allowed("switch_method"))
+    return diagnose_trajectories(
+        load_run(run_dir, state.target, len(state.rounds_ns)), state.target, state.ns_done,
+        min_flips_per_replica=state.loop.min_flips_per_replica, fixed=fixed,
+        precision=state.the_goal().precision)
+
+
+def _diagnose_and_decide(run_dir: Path, state: RunState):
+    reports = diagnose_run(run_dir, state)
+    decisions, next_ns = decide(reports, state.ns_done, state.loop, state.allowed("switch_method"),
+                                bias_available=state.quantity != "distance_states")
     next_ns = _apply_policy(run_dir, state, reports, decisions, next_ns)
     _post_plain_md_messages(run_dir, state, decisions, next_ns)
     return reports, decisions, next_ns
