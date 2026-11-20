@@ -431,6 +431,10 @@ def _apply_policy(run_dir: Path, state: RunState, reports, decisions, next_ns: f
 
     key = {"ns": state.ns_done, "max_ns": state.loop.max_ns, "n_replicas": state.n_replicas,
            "permissions": sorted(state.the_goal().permissions)}
+    if state.the_goal().allocation == "projection":
+        from .allocation import RULE_VERSION
+
+        key["rule"] = RULE_VERSION   # A newer rule decides again when a run is resumed.
     done = state.notes.get("policy_round")
     if done and done.get("key") == key:
         if done.get("decisions"):   # Projection: restore what it decided for each item.

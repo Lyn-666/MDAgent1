@@ -27,13 +27,14 @@ TEXT = {
         "help": "命令（不用语言模型，不花 token）：\n"
                 "  /runs  列出这个项目的运行：状态、最近的进度和结果文件夹\n"
                 "  /last  在可以翻页的窗口里看上一条回复（长回复用它看全；按 q 回来）\n"
+                "  /report [运行名]  在翻页窗口里看结果报告（不写运行名就看最近的运行）\n"
                 "  /new   开始一个新对话（不同的案例用不同的对话）\n"
                 "  /quit  退出（正在跑的模拟不会停）\n"
                 "其他输入都发给语言模型，例如：“用 181L，看苯周围的口袋，开发测试，有问题也继续”。",
         "you": "你> ", "agent": "MDAgent> ", "thinking": "（思考中…）",
         "changed": "改动的设置：", "none": "无", "command": "命令：", "check": "结构检查报告：",
         "ask_start": "开始运行？", "ask_stop": "停止运行？", "ask_resume": "继续运行？", "yes_no": " [y/N] ",
-        "not_done": "没有执行。", "new_chat": "已开始新对话。", "no_last": "还没有回复可看。", "bye": "再见。正在跑的模拟会继续在后台运行。",
+        "not_done": "没有执行。", "new_chat": "已开始新对话。", "no_last": "还没有回复可看。", "no_report": "{name} 还没有结果报告（运行结束时才写）。", "bye": "再见。正在跑的模拟会继续在后台运行。",
         "plain_md": "普通 MD 每条 {ns:g} ns", "no_runs": "还没有运行。", "states": {"running": "运行中", "finished": "已完成", "stopped": "已停止",
                                             "failed": "出错"},
         "folder": "结果文件在电脑“{host}”的 {folder}（{n} 个文件）",
@@ -44,6 +45,7 @@ TEXT = {
         "help": "Commands (no language model, no tokens):\n"
                 "  /runs  list the runs of this project: state, latest progress and result folder\n"
                 "  /last  read the last reply in a window you can page through (for long replies; q to return)\n"
+                "  /report [run]  read the result report in that window (without a name: the latest run)\n"
                 "  /new   start a new conversation (use one conversation per case)\n"
                 "  /quit  leave (running simulations go on)\n"
                 "Everything else goes to the language model, for example: \"use 181L, the pocket around benzene, "
@@ -52,7 +54,7 @@ TEXT = {
         "changed": "Changed settings: ", "none": "none", "command": "Command: ", "check": "Structure check report:",
         "ask_start": "Start the run?", "ask_stop": "Stop the run?", "ask_resume": "Continue the run?",
         "yes_no": " [y/N] ", "not_done": "Nothing was done.", "new_chat": "Started a new conversation.",
-        "no_last": "No reply to show yet.",
+        "no_last": "No reply to show yet.", "no_report": "{name} has no result report yet (it is written when the run ends).",
         "bye": "Bye. Running simulations go on in the background.",
         "plain_md": "plain MD {ns:g} ns per replica", "no_runs": "No runs yet.", "states": {"running": "running", "finished": "finished", "stopped": "stopped",
                                              "failed": "failed"},
@@ -137,6 +139,20 @@ def run_terminal(assistant, lang: str = "zh", read: Callable[[str], str] = input
             out(T["help"])
         elif text == "/runs":
             show_runs(assistant, lang, out)
+        elif text.split()[0] == "/report":
+            names = assistant.runs.names()
+            parts = text.split()
+            name = parts[1] if len(parts) > 1 else (max(names, key=lambda n: (assistant.runs.dir / n).stat().st_mtime)
+                                                    if names else "")
+            report = assistant.runs.dir / name / f"report.{lang}.md" if name else None
+            if not report or not report.exists():
+                out(T["no_report"].format(name=name or "-"))
+            else:
+                state["paging"] = True
+                try:
+                    pager(report.read_text(encoding="utf-8"))
+                finally:
+                    state["paging"] = False
         elif text == "/last":
             if not state["last"]:
                 out(T["no_last"])

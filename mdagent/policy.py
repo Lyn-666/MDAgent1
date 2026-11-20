@@ -313,14 +313,26 @@ def allocation_next(run_dir, state, reports, decisions) -> float:
     alloc["tests"] += 1 if step.counted else 0
     what = f"{n} × {ns:g} ns"
     why_zh = STEP_ZH.get(step.kind, step.reason)
+    stuck = [k for k, v in step.set_aside.items() if v == "stuck"]
+    if step.kind == "stuck" and stuck:
+        from .allocation import stuck_projection
+
+        rate, need, data = stuck_projection(n, ns, precision.z, goal.precision)
+        why_zh = (f"{', '.join(stuck)} 在所有重复加起来 {n * ns:g} ns 里一次都没有变化。按这个结果，变化最快也只能约每 "
+                  f"{1 / rate:.0f} ns 一次（95% 置信上限）；要达到你要的精度，大约需要 {need:.0f} 次变化，也就是至少 "
+                  f"{data:.0f} ns，超过了预算 {limits.budget_ns:g} ns。再跑普通 MD 也得不到可靠的比例")
     # Items plain MD cannot answer are set aside on their own: told once, marked for the report, while the
     # other items go on to their precision.
     for d in live:
         if d.residue in step.set_aside:
             d.action, d.cause = "stalled", ("stalled" if step.set_aside[d.residue] == "stuck" else "insufficient_evidence")
+    others_go_on = any(d.residue not in step.set_aside for d in live)
+    for label in [k for k in list(state.notes) if k.startswith("said_set_aside_")]:
+        if label[len("said_set_aside_"):] not in step.set_aside:
+            state.notes.pop(label)   # It moved again: tell anew if it is ever set aside again.
     for label, why in step.set_aside.items():
-        if state.notes.get(f"said_set_aside_{label}"):
-            continue   # Told once is enough; it stays marked above at every look.
+        if state.notes.get(f"said_set_aside_{label}") or not others_go_on:
+            continue   # Told once is enough; and when nothing goes on, the stop message says it all.
         stuck = why == "stuck"
         record(run_dir, state, Action("plain_md", "set_aside", True,
                                       f"{label}: INSUFFICIENT_EVIDENCE on its own ("
@@ -366,6 +378,8 @@ def allocation_next(run_dir, state, reports, decisions) -> float:
                "support the asked precision.", "suggestion")
         return 0.0
     assert step.action == CONTINUE
+    if state.notes.pop("allocation_decision", None) is not None:
+        state.notes.pop("plain_done", None)   # A run that had ended goes on: tell its new end again.
     added = step.replicas - n
     if added > 0:
         state.n_replicas = step.replicas
