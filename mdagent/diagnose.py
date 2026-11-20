@@ -372,19 +372,23 @@ def load_run(run_dir: str | Path, target: list[ResidueKey], n_parts: int,
 def format_report(reports: list[ResidueReport]) -> str:
     flagged = [r for r in reports if r.verdict in NEEDS_WORK]
     ns = next((r.ns_per_replica for r in reports if r.transitions), 0.0)
+    distance = bool(reports) and all(r.quantity == "distance" for r in reports)
+    what, item = ("distances", "distance") if distance else ("residues", "residue")
+    width = max([len(item) + 2] + [len(r.label) + 2 for r in reports])
     lines = [
-        f"{len(flagged)} of {len(reports)} target residues were not sampled well "
+        f"{len(flagged)} of {len(reports)} target {what} were not sampled well "
         f"after {ns:g} ns per replica.",
-        "Rank 1 is the slowest side chain.",
+        "Rank 1 is the slowest distance." if distance else "Rank 1 is the slowest side chain.",
         "",
-        f"{'rank':<6}{'residue':<10}{'verdict':<20}{'flips per traj.':<20}"
-        f"{'time between flips':<20}{'max error':<11}dominant state per replica",
+        f"{'rank':<6}{item:<{width}}{'verdict':<20}{'changes per traj.' if distance else 'flips per traj.':<20}"
+        f"{'time between changes' if distance else 'time between flips':<22}{'max error':<11}"
+        "dominant state per replica",
     ]
     for i, r in enumerate(reports, 1):
         rank_text = str(i) if r.verdict in NEEDS_WORK else "-"
         flips = ",".join(map(str, r.transitions)) or "-"
         dom = ",".join(r.dominant) or "-"
         err = f"{max(r.standard_error.values()):.3f}" if r.standard_error else "-"
-        lines.append(f"{rank_text:<6}{r.label:<10}{r.verdict:<20}{flips:<20}"
-                     f"{r.time_between_flips_text():<20}{err:<11}{dom}")
+        lines.append(f"{rank_text:<6}{r.label:<{width}}{r.verdict:<20}{flips:<20}"
+                     f"{r.time_between_flips_text():<22}{err:<11}{dom}")
     return "\n".join(lines)
