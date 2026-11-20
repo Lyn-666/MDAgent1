@@ -354,7 +354,8 @@ python -m mdagent compare --run runs/<名字> --reference runs/<参考>
 
 ```bash
 # 不需要 GPU：已知比例的两状态模型，10 次重复
-python -m mdagent budget --synthetic 0.3,0.7 --rate-per-ns 5 --pool-replicas 16 --pool-ns 60     --repeats 10 --fixed-replicas 5 --fixed-ns 40 --parallel 4 --ns-per-day 600
+python -m mdagent budget --synthetic 0.3,0.7 --rate-per-ns 5 --pool-replicas 16 --pool-ns 60 \
+    --repeats 10 --fixed-replicas 5 --fixed-ns 40 --parallel 4 --ns-per-day 600
 
 # 用一个跑完的长运行作为数据池
 python -m mdagent budget --run runs/long_1UBQ --repeats 10 --criterion confidence
