@@ -187,3 +187,16 @@ def test_an_item_plain_md_cannot_answer_does_not_stop_the_others():
     assert s.action == STOP and "turn:A:52" in s.set_aside and "Left out" in s.reason
     s = next_step([slow], 4, 20.0, look=2, tests_before=0, z=2.39, tolerance=0.05, limits=LIM)
     assert s.action == INSUFFICIENT                     # nothing answerable left: the whole run says so
+
+
+def test_a_look_that_could_not_stop_does_not_use_up_the_looks():
+    """Too few state changes: STOP is impossible there, so the look spends none of alpha."""
+    few = _item(trans=(1, 2, 1, 0))
+    s = next_step([few], 4, 2.0, look=2, tests_before=0, z=2.39, tolerance=0.05, limits=LIM)
+    assert s.action == CONTINUE and not s.counted and s.ns > 2.0
+    # Even after many such looks the run goes on; only looks that could stop are counted.
+    s = next_step([few], 4, 8.0, look=6, tests_before=0, z=2.39, tolerance=0.05, limits=LIM)
+    assert s.action == CONTINUE and not s.counted
+    ready = _item(se=0.03, w=0.03, b=0.03)
+    s = next_step([ready], 4, 10.0, look=7, tests_before=0, z=2.39, tolerance=0.05, limits=LIM)
+    assert s.counted
