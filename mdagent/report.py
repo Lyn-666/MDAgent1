@@ -209,8 +209,12 @@ def write(run_dir: Path) -> list[Path]:
     return paths
 
 
+SAME_WITHIN = 0.01  # Populations that differ by less than one percentage point count as the same.
+
+
 def compare(run: Path, reference: Path) -> tuple[str, bool]:
-    """Compare the final results of two runs. Returns a table and whether they agree (every |z| <= 2)."""
+    """Compare the final results of two runs. Returns a table and whether they agree: every population
+    differs by at most two combined standard errors (|z| <= 2), or by less than SAME_WITHIN."""
     a = {r["label"]: r for r in final_results(run)}
     b = {r["label"]: r for r in final_results(reference)}
     common = [k for k in a if k in b]
@@ -222,11 +226,13 @@ def compare(run: Path, reference: Path) -> tuple[str, bool]:
             ea, eb = a[k]["standard_error"][s], b[k]["standard_error"].get(s, float("nan"))
             err = math.sqrt(ea ** 2 + eb ** 2)
             z = (pa - pb) / err if err > 0 else (0.0 if pa == pb else float("inf"))
-            agree = agree and abs(z) <= 2
+            agree = agree and (abs(z) <= 2 or abs(pa - pb) < SAME_WITHIN)
             lines.append(f"{k:<24}{s:<8}{pa:>8.3f}±{ea:<5.3f}{pb:>10.3f}±{eb:<5.3f}{z:>8.2f}")
     missing = sorted(set(a) ^ set(b))
     if missing:
         lines.append(f"Only in one run: {', '.join(missing)}")
-    lines.append("The runs agree within their errors (every |z| <= 2)." if agree else
-                 "The runs do NOT agree within their errors (some |z| > 2), or have no item in common.")
+    lines.append(f"The runs agree within their errors (every |z| <= 2, or a difference below {SAME_WITHIN:g})."
+                 if agree else
+                 "The runs do NOT agree within their errors (some |z| > 2 and a difference of at least "
+                 f"{SAME_WITHIN:g}), or have no item in common.")
     return "\n".join(lines), agree

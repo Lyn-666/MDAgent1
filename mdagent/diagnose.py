@@ -42,7 +42,7 @@ import mdtraj as md
 import numpy as np
 
 from .target import ResidueKey
-from .uncertainty import block_standard_error, combine_replicas, error_parts
+from .uncertainty import block_standard_error, combine_replicas, error_parts, floor_from_transitions
 
 STATE_CENTERS_DEG = {"g+": 60.0, "t": 180.0, "g-": -60.0}
 STATE_NAMES = list(STATE_CENTERS_DEG)
@@ -119,11 +119,13 @@ def populations_with_errors(states: list[np.ndarray], names: list[str]) -> tuple
     whether two replicas differ beyond their errors, and whether the largest error comes mainly from
     the spread between replicas (then more replicas help more than longer ones)."""
     pops, errs, differ, worst, from_replicas = {}, {}, False, -1.0, False
+    changes = sum(count_transitions(s_) for s_ in states)
     for i, name in enumerate(names):
         hits = [(s_[s_ >= 0] == i).astype(float) for s_ in states]
         values = [float(h.mean()) if h.size else 0.0 for h in hits]
         errors = [block_standard_error(h) for h in hits]
         mean, err, dis = combine_replicas(values, errors)
+        err = max(err, floor_from_transitions(mean, changes, len(states)))  # Never 0 for an unseen state.
         pops[name], errs[name], differ = round(mean, 3), round(err, 3), differ or dis
         if err > worst:
             within, between = error_parts(values, errors)
