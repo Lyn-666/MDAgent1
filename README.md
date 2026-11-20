@@ -464,6 +464,10 @@ python -m mdagent ask --pdb examples/181L.pdb --out runs/a "用 CHARMM，看苯�
 
 MIT 许可证，见 `LICENSE`。任何人都可以使用、修改和分发这个程序，只要保留版权声明。
 
+## 通用决策核心（开发中）
+
+MDAgent 正在改成通用的科学 MD agent。新的决策核心在 `mdagent/core/`：它读任务里每个估计量自己的成功要求，用相互竞争的假设解释为什么还没达到，再在权限和预算内选下一步动作，并把每个决定和它依据的证据写进 `decisions.jsonl`。核心不认识任何观测量、模拟引擎或体系；具体的数值估计在 `mdagent/estimators.py`。目前它只在合成体系上测试（`mdagent/synthetic.py`），正式运行还用原来的流程。架构评估、计划和评估方法见 [docs/architecture.md](docs/architecture.md)。
+
 ## 下一步
 
 公开仓库、邀请更多人测试之前，还要在 GPU 电脑上完成两项验证：
