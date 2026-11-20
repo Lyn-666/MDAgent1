@@ -265,6 +265,19 @@ STEP_ZH = {
 }
 
 
+def recount_tests(actions: list) -> int:
+    """Looks that could have stopped, from the recorded plain MD looks: not the planning look, and not a
+    look that only ran longer because the state changes were too few."""
+    n = 0
+    for a in actions:
+        reason = a.get("reason", "")
+        if a.get("phase") != "plain_md" or not reason.startswith("Look ") or "(planning only)" in reason:
+            continue
+        if "too few state changes" not in reason:
+            n += 1
+    return n
+
+
 def allocation_next(run_dir, state, reports, decisions) -> float:
     """Projection allocation (allocation.py) in the live loop. Returns the length of the next round (0: stop).
 
@@ -284,6 +297,11 @@ def allocation_next(run_dir, state, reports, decisions) -> float:
                        by[d.residue].error_between or 0.0, by[d.residue].transitions, by[d.residue].verdict == "ok")
              for d in live]
     alloc = state.notes.setdefault("allocation", {"looks": 0, "tests": 0})
+    if alloc.get("counting") != 2:
+        # Runs started before 2026-11-20 counted every look after the first, also looks that could not stop
+        # because the state changes were too few. Count them again from the recorded looks.
+        alloc["tests"] = recount_tests(state.notes.get("actions", []))
+        alloc["counting"] = 2
     limits = Limits(max_replicas=goal.max_replicas if state.allowed("add_replicas") else n,
                     max_ns=state.max_ns_per_replica(), budget_ns=state.budget_ns(), chunk_ns=state.loop.extend_ns,
                     patience_ns=state.loop.no_flip_patience_ns, stop_looks=goal.stop_looks,
