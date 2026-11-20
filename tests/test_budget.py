@@ -217,3 +217,86 @@ def test_a_distance_pool_can_be_read_back_too(tmp_path):
     assert pool.labels == [spec]
     assert pool.state_names[pool.labels[0]] == ["near", "far"]
     assert all(len(s) == 40 for s in pool.series[pool.labels[0]])
+
+
+# --- Experiment A: a grid of fixed plans, a common held-out reference, and the verdict ---
+
+from mdagent.budget import grid_name, hypothesis_a, markov_items, parse_grid, wilson  # noqa: E402
+
+THREE = [([0.6, 0.3, 0.1], 6.0), ([0.5, 0.5], 3.0), ([0.7, 0.3], 1.5)]
+
+
+def test_fixed_plans_are_written_as_replicas_times_length():
+    assert parse_grid("1x100, 5x20") == [(1, 100.0), (5, 20.0)]
+    assert grid_name(5, 20.0) == "fixed_5x20"
+    with pytest.raises(ValueError, match="5x20"):
+        parse_grid("five by twenty")
+
+
+def test_items_are_chosen_before_the_replay():
+    pool = markov_items(THREE, n_replicas=3, ns=4.0)
+    assert pool.select(["item2"]).labels == ["item2"]
+    assert set(pool.select(["item1", "item3"]).truth) == {"item1", "item3"}
+    with pytest.raises(ValueError, match="not in the pool"):
+        pool.select(["item9"])
+
+
+def test_every_strategy_is_checked_against_the_same_held_out_replicas():
+    pool = markov_items(THREE, n_replicas=12, ns=30.0, seed=2)
+    pool.truth = None                                  # Behave like a real run: no known answer.
+    plan = Plan(replicas=3, first_ns=5.0, extend_ns=5.0, max_ns=30.0, max_replicas=6)
+    out = compare_strategies(pool, plan, Precision(epsilon=0.1), CostModel(), repeats=3, seed=4,
+                             fixed_grid=[(3, 10.0), (6, 30.0)], holdout=4)
+    held = out.pool["holdout"]
+    assert len(held) == 4 and out.pool["strategy_replicas"] == 8
+    for rep in out.repeats:
+        assert not set(rep["order"]) & set(held)
+        for t in rep["trials"].values():
+            assert t["check"]["reference_replicas"] == held      # Same reference for everyone.
+            assert not set(t["replicas"]) & set(held)            # Never used by a strategy.
+
+
+def test_a_single_trajectory_is_a_valid_fixed_plan():
+    """The literature often runs one long trajectory, so the grid must accept it."""
+    pool = markov_items(THREE, n_replicas=6, ns=20.0)
+    t = replay(pool, "fixed", Plan(fixed_replicas=1, fixed_ns=20.0), Precision(epsilon=0.1), CostModel())
+    assert t.cost["n_replicas"] == 1 and t.ns_per_replica == 20.0
+
+
+def test_hypothesis_a_is_judged_against_the_literature_plans():
+    pool = markov_items(THREE, n_replicas=16, ns=60.0, seed=0)
+    plan = Plan(replicas=5, first_ns=5.0, extend_ns=5.0, max_ns=60.0)
+    out = compare_strategies(pool, plan, Precision(epsilon=0.1, criterion="confidence", looks=plan.looks()),
+                             CostModel(), repeats=10, seed=0,
+                             fixed_grid=[(1, 60.0), (5, 20.0), (5, 60.0)], baselines=["fixed_5x60"])
+    assert set(out.hypothesis) == {"early_stop", "mdagent"}
+    h = out.hypothesis["early_stop"]
+    assert set(h["baselines"]) == {"fixed_5x60"}
+    b = h["baselines"]["fixed_5x60"]
+    assert b["saving_interval"][0] <= b["saving_mean"] <= b["saving_interval"][1]
+    assert h["verdict"] in ("supported", "not_cheaper", "not_accurate", "baseline_not_accurate", "mixed")
+    assert h["how_long"][5]["tried_ns"] == [20.0, 60.0]
+    if "best_in_hindsight" in h:
+        assert h["best_in_hindsight"]["price_of_not_knowing"] > 0
+
+
+def test_the_verdict_keeps_its_three_causes_apart():
+    """Not accurate, not cheaper and supported must not be mixed up."""
+    pool = markov_items(THREE, n_replicas=12, ns=40.0, seed=1)
+    plan = Plan(replicas=5, first_ns=5.0, extend_ns=5.0, max_ns=40.0)
+    out = compare_strategies(pool, plan, Precision(epsilon=0.1, criterion="confidence", looks=plan.looks()),
+                             CostModel(), repeats=6, seed=0, fixed_grid=[(5, 10.0), (5, 40.0)])
+    # A target nobody can reach: the agent is called not accurate, whatever it costs.
+    assert hypothesis_a(out, "early_stop", target_rate=1.01)["verdict"] == "not_accurate"
+    # A baseline that is itself not accurate is reported as such, not as a saving.
+    h = hypothesis_a(out, "early_stop", target_rate=0.0, baselines=["fixed_5x10"])
+    assert h["baselines"]["fixed_5x10"]["verdict"] in ("supported", "not_cheaper")
+    with pytest.raises(ValueError, match="not in the fixed grid"):
+        hypothesis_a(out, "early_stop", baselines=["fixed_9x9"])
+
+
+def test_the_rate_interval_is_wide_with_few_repeats():
+    lo, hi = wilson(9, 10)
+    assert lo < 0.6 < 0.9 < hi
+    lo50, hi50 = wilson(45, 50)
+    assert hi50 - lo50 < hi - lo

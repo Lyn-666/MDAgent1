@@ -606,6 +606,21 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("--precision", type=float, default=0.05, help="Tolerance on any population (default 0.05).")
     b.add_argument("--criterion", default="standard_error", choices=list(CRITERIA))
     b.add_argument("--alpha", type=float, default=0.05)
+    b.add_argument("--fixed-grid", default=None,
+                   help="Several fixed plans to compare with, replicas x ns, for example '3x10,5x20,10x40'. "
+                        "Needed for the verdict on Hypothesis A: the baseline is the cheapest of them that reaches "
+                        "the same accuracy as the agent.")
+    b.add_argument("--items", default=None,
+                   help="Replay only these items, for example 'GLU16,ASP32' or '16,32'. Choose them from a separate "
+                        "pilot run, never from the pool's own results.")
+    b.add_argument("--baseline", default=None,
+                   help="The fixed plans people really use, from the literature, for example '1x100,3x100' (they must "
+                        "also be in --fixed-grid). Hypothesis A is judged against these. Default: the largest grid plan.")
+    b.add_argument("--holdout", type=int, default=0,
+                   help="Reserve this many pool replicas as the reference, used by no strategy (for a run as pool; "
+                        "a model has a known truth). Recommended: about 40%% of the pool.")
+    b.add_argument("--target-rate", type=float, default=0.9,
+                   help="Hypothesis A: the share of repeats whose answer must be within the tolerance (default 0.9).")
     b.add_argument("--min-flips", type=int, default=4, help="Flips per replica before a result counts (default 4).")
     b.add_argument("--no-flip-patience-ns", type=float, default=10.0)
     b.add_argument("--repeats", type=int, default=1,
@@ -705,14 +720,25 @@ def cmd_budget(args) -> int:
         return 2
     equil = args.equilibration_ns
     if args.synthetic:
-        pops = [float(x) for x in args.synthetic.replace(";", ",").split(",") if x.strip()]
-        if len(pops) < 2:
-            raise ValueError("--synthetic needs at least two populations, for example '0.3,0.7'.")
-        pool = markov_pool(pops, args.rate_per_ns, args.pool_replicas, args.pool_ns, seed=args.seed)
+        from .budget import markov_items
+
+        items = []
+        for chunk in [c for c in args.synthetic.split(";") if c.strip()]:
+            pops_text, _, rate = chunk.partition("@")
+            pops = [float(x) for x in pops_text.split(",") if x.strip()]
+            if len(pops) < 2:
+                raise ValueError("--synthetic needs at least two populations per item, for example '0.3,0.7'. "
+                                 "Several items: '0.3,0.7@5;0.6,0.4@1' (populations@rate per ns).")
+            items.append((pops, float(rate) if rate else args.rate_per_ns))
+        pool = (markov_pool(items[0][0], items[0][1], args.pool_replicas, args.pool_ns, seed=args.seed)
+                if len(items) == 1 else
+                markov_items(items, args.pool_replicas, args.pool_ns, seed=args.seed))
         out_dir = Path(args.out or "runs/budget")
     else:
         pool = pool_from_run(args.run)
         out_dir = Path(args.out or args.run)
+    if args.items:
+        pool = pool.select([x for x in args.items.split(",") if x.strip()])
         if equil is None:
             import json as _json
 
@@ -730,9 +756,16 @@ def cmd_budget(args) -> int:
     if pool.n_replicas <= max(args.replicas, args.fixed_replicas or 0):
         print(f"Warning: the pool has {pool.n_replicas} replicas, so no replica is left over as an independent "
               "reference. Run the pool with more replicas, or start the strategies with fewer.")
-    out = compare_strategies(pool, plan, precision, model, repeats=args.repeats, seed=args.seed)
+    from .budget import grid_name, parse_grid
+
+    out = compare_strategies(pool, plan, precision, model, repeats=args.repeats, seed=args.seed,
+                             fixed_grid=parse_grid(args.fixed_grid), holdout=args.holdout,
+                             target_rate=args.target_rate,
+                             baselines=[grid_name(n, ns) for n, ns in parse_grid(args.baseline)] or None)
     print()
     print(format_table(out))
+    for name, h in out.hypothesis.items():
+        print(f"\nHypothesis A, {name}: {h['verdict']}. {h['why']}")
     if args.ns_per_day > 0:
         print()
         for name, v in out.summary.items():
