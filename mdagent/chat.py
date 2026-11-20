@@ -602,6 +602,10 @@ class Assistant:
                 check_text = check.report()
                 if not check.clean and not a.plan.accept_problems:
                     raise CheckProblems(check_text)
+                if a.plan.termini and a.plan.termini != "auto":   # as the command line says it (cli._structure_check)
+                    check_text += (f"\n  note: chain ends: --termini {a.plan.termini} replaces the suggestion above."
+                                   + {"charged": " Both ends stay charged (NH3+, COO-).",
+                                      "capped": " Both ends get neutral ACE/NME caps."}.get(a.plan.termini, ""))
             changed = [f"{n} = {getattr(a.plan, n)}" for n, _ in FLAGS + SWITCHES
                        if getattr(a.plan, n) not in (None, False)]
             save_to = self._save_folder(a.save_dir, name, lang)
