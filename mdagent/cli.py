@@ -636,6 +636,45 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("--name", default="budget")
     b.set_defaults(func=cmd_budget)
 
+    ea = sub.add_parser("experiment-a", help="Experiment A: how many replicas, how long, and when to stop. "
+                                             "Replays fixed plans, Sequential-CI and the agent on a pool run.")
+    ea.add_argument("--run", default=None, help="The pool: a finished plain MD run with many replicas.")
+    ea.add_argument("--observables", default=None,
+                    help="Backbone basins to judge, for example 'turn:A:52' or 'rama:A:73;rama:A:74' "
+                         "(a range like rama:A:2-75 expands).")
+    ea.add_argument("--model", default=None,
+                    help="Instead of a run: model items with known populations, 'populations@rate per ns', "
+                         "separated by ';', for example '0.7,0.3@8'. Needs no GPU.")
+    ea.add_argument("--model-replicas", type=int, default=16)
+    ea.add_argument("--model-ns", type=float, default=100.0)
+    ea.add_argument("--select", action="store_true",
+                    help="Pilot mode: only print (and with --out write) the items that plain MD can answer.")
+    ea.add_argument("--at-most", type=int, default=5, help="With --select: keep at most this many items.")
+    ea.add_argument("--trials", type=int, default=50)
+    ea.add_argument("--holdout", type=int, default=6)
+    ea.add_argument("--seed", type=int, default=0)
+    ea.add_argument("--replicas", type=int, default=4, help="The agent starts with this many replicas.")
+    ea.add_argument("--sequential", default="4,8", help="Replica counts of the Sequential-CI arms.")
+    ea.add_argument("--families", default="1,3,4,5,8", help="Replica counts of the fixed plans.")
+    ea.add_argument("--chunk-ns", type=float, default=5.0)
+    ea.add_argument("--max-ns", type=float, default=100.0)
+    ea.add_argument("--budget-ns", type=float, default=800.0)
+    ea.add_argument("--max-replicas", type=int, default=8)
+    ea.add_argument("--agent-looks", type=int, default=3)
+    ea.add_argument("--burn-in-ns", type=float, default=0.0)
+    ea.add_argument("--population", type=float, default=0.05, help="Tolerance on populations (default 0.05).")
+    ea.add_argument("--dg-kt", type=float, default=0.5)
+    ea.add_argument("--rate-rel", type=float, default=0.2)
+    ea.add_argument("--landscape-js", type=float, default=0.05)
+    ea.add_argument("--alpha", type=float, default=0.05)
+    ea.add_argument("--reliability", type=float, default=0.9)
+    ea.add_argument("--false-stop-max", type=float, default=0.1)
+    ea.add_argument("--parallel", type=int, default=1)
+    ea.add_argument("--ns-per-day", type=float, default=0.0)
+    ea.add_argument("--out", default=None)
+    ea.add_argument("--name", default="experiment_A")
+    ea.set_defaults(func=cmd_experiment_a)
+
     st = sub.add_parser("start", help="Start here: choose the language, the language model (Claude or ChatGPT) "
                                       "and where to talk (web page or terminal).")
     st.add_argument("--backend", default=None, choices=["claude", "codex", "api"],
@@ -772,6 +811,54 @@ def cmd_budget(args) -> int:
             print(f"{name:<14}{v['compute_ns_median'] / args.ns_per_day * 24:.1f} GPU-hours (median)")
     for path in write(out, out_dir, args.name):
         print(f"\nWritten: {path.resolve()}")
+    return 0
+
+
+def cmd_experiment_a(args) -> int:
+    from .experiment_a import Design, Targets, model_pool, pool_from_run, run, select_items, write_outputs
+
+    def ints(text):
+        return tuple(int(x) for x in text.split(",") if x.strip())
+
+    if args.model:
+        items = []
+        for chunk in [c for c in args.model.split(";") if c.strip()]:
+            pops, _, rate = chunk.partition("@")
+            items.append(([float(x) for x in pops.split(",")], float(rate or 5)))
+        pool = model_pool(items, args.model_replicas, args.model_ns, seed=args.seed)
+        out_dir = Path(args.out or "runs/experiment_A_model")
+    elif args.run and args.observables:
+        pool = pool_from_run(args.run, args.observables)
+        out_dir = Path(args.out or args.run)
+    else:
+        print("Give --run with --observables (a pool run), or --model (no GPU).")
+        return 2
+    if args.select:
+        chosen, counts = select_items(pool, at_most=args.at_most)
+        for k, c in counts.items():
+            print(f"{k:<14} transitions per replica {c}" + ("  <- chosen" if k in chosen else ""))
+        print("\nChosen: " + (";".join(chosen) or "none"))
+        if args.out:
+            Path(args.out).write_text(";".join(chosen) + "\n")
+            print(f"Written: {Path(args.out).resolve()}")
+        return 0 if chosen else 1
+    design = Design(replicas=args.replicas, sequential=ints(args.sequential), families=ints(args.families),
+                    chunk_ns=args.chunk_ns, max_ns=args.max_ns, budget_ns=args.budget_ns,
+                    max_replicas=args.max_replicas, agent_looks=args.agent_looks, burn_in_ns=args.burn_in_ns)
+    targets = Targets(population=args.population, dg_kt=args.dg_kt, rate_rel=args.rate_rel,
+                      landscape_js=args.landscape_js, alpha=args.alpha, reliability=args.reliability,
+                      false_stop_max=args.false_stop_max)
+    print(f"Pool: {pool.source}; {pool.n_replicas} replicas of {pool.ns_per_replica:g} ns; items {', '.join(pool.labels)}.")
+    out = run(pool, design, targets, trials=args.trials, holdout=args.holdout, seed=args.seed,
+              n_parallel=args.parallel, ns_per_day=args.ns_per_day)
+    v = out["verdict"]
+    print(f"\nVerdict: {v['result']}" + (f" ({'; '.join(v['failed'])})" if v["failed"] else ""))
+    for arm, s in out["summary"].items():
+        if arm != "fixed":
+            print(f"  {arm:<16} success {s['success_rate']:.0%}  false stops {s['false_stop_rate']:.0%}  "
+                  f"compute {s['compute_ns_median']:.0f} ns  ({s['replicas_median']:g} x {s['ns_per_replica_median']:.0f} ns)")
+    for path in write_outputs(out, out_dir, args.name):
+        print(f"Written: {path.resolve()}")
     return 0
 
 
