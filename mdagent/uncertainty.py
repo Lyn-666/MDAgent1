@@ -17,6 +17,19 @@ more than three combined standard errors (and by more than `min_diff`).
 These checks can show that sampling is poor; they cannot prove that it is good
 (Grossfield et al., LiveCoMS 2018). For example, if all replicas are trapped in the
 same state, the errors are small. That is why the callers also count transitions.
+
+Error floor: block averaging gives an error of exactly 0 for a state that was never
+seen, and a too small error for a state seen in a few long visits. A population cannot
+be known better than the number of independent visits allows, so the error is never
+smaller than a floor:
+- plain MD (unbiased): for a two-state jump process the standard error of the time
+  fraction p after N state changes is about 2 p (1 - p) / sqrt(N). N is the number of
+  state changes in all replicas plus the number of replicas (each replica starts one
+  visit).
+- reweighted enhanced sampling: the binomial error sqrt(p (1 - p) / n) with n the
+  Kish effective number of samples of all replicas.
+In both, p is shrunk by half an observation, p' = (p n + 0.5) / (n + 1), so a state
+never seen gets an error that reflects how little was seen.
 """
 
 from __future__ import annotations
@@ -78,3 +91,21 @@ def combine_replicas(values: list[float], errors: list[float], min_diff: float =
     disagree = any(abs(v[i] - v[j]) > max(min_diff, 3 * math.sqrt(e[i] ** 2 + e[j] ** 2))
                    for i in range(len(v)) for j in range(i + 1, len(v)))
     return mean, max(within, between), disagree
+
+
+def _shrunk(p: float, n: float) -> float:
+    return (p * n + 0.5) / (n + 1)
+
+
+def floor_from_transitions(p: float, transitions: int, n_replicas: int) -> float:
+    """Smallest credible standard error of a population from unbiased trajectories (see the module notes)."""
+    n = max(transitions + n_replicas, 1)
+    q = _shrunk(p, n)
+    return 2 * q * (1 - q) / math.sqrt(n)
+
+
+def floor_from_samples(p: float, n_effective: float) -> float:
+    """Smallest credible standard error of a population from n_effective independent (weighted) samples."""
+    n = max(n_effective, 1.0)
+    q = _shrunk(p, n)
+    return math.sqrt(q * (1 - q) / n)

@@ -54,7 +54,8 @@ def test_distances_are_judged_like_side_chains():
     assert ok.verdict == "ok" and ok.quantity == "distance" and abs(ok.populations["near"] - 0.5) < 0.1
     assert ok.label == "A:1:A-A:2:B@0.6" and ok.extra["cutoff_nm"] == 0.6
     trapped = diagnose_distances(stuck, spec, [(0, 1)], 10.0, precision=0.1)[0]
-    assert trapped.verdict == "no_flip" and trapped.standard_error["near"] == 0   # Agree, tiny error, not done.
+    # Trapped: not done, and the error is not 0 any more (error floor): nothing was seen to change.
+    assert trapped.verdict == "no_flip" and trapped.standard_error["near"] > 0.1
 
     # No enhanced sampling for distances: a stuck distance is "stalled", not "enhanced_sampling".
     loop = LoopSettings(max_ns=20.0, no_flip_patience_ns=10.0)

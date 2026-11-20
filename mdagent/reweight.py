@@ -37,7 +37,8 @@ import numpy as np
 
 from .diagnose import STATE_NAMES, assign_states, count_transitions
 from .enhanced import KB_KJ, MetadSettings, deposit
-from .uncertainty import block_standard_error, combine_replicas, effective_samples, error_parts
+from .uncertainty import (block_standard_error, combine_replicas, effective_samples, error_parts,
+                          floor_from_samples)
 
 KJ_PER_KCAL = 4.184
 
@@ -123,6 +124,7 @@ def analyze(run_dir: Path, labels: list[str], n_replicas: int, s: MetadSettings,
         for k in STATE_NAMES:
             values, errors = [r["populations"][k] for r in reps], [r["errors"][k] for r in reps]
             mean, err, dis = combine_replicas(values, errors)
+            err = max(err, floor_from_samples(mean, sum(n_eff)))  # Never 0 for a state that was hardly seen.
             pops[k], errs[k], disagree = mean, err, disagree or dis
             if err > worst:
                 within, between = error_parts(values, errors)
