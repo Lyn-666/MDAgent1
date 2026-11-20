@@ -153,7 +153,9 @@ def plain_md_next(run_dir, state, reports, decisions, next_ns: float) -> float:
 
     # Rule 6: no gain within the user's limit.
     going_on = [d for d in open_ if d.action == "extend"]
-    if next_ns > 0 and going_on and len(state.rounds_ns) >= 2 and ns >= 0.25 * state.loop.max_ns - 1e-9:
+    # Not for a change to see (event_seen): when a rare event comes cannot be estimated from the rate so far.
+    if next_ns > 0 and going_on and state.quantity != "event_seen" and len(state.rounds_ns) >= 2 \
+            and ns >= 0.25 * state.loop.max_ns - 1e-9:
         needs = {}
         for d in going_on:
             need = projected_ns(by_label.get(d.residue), ns, goal.precision, state.loop.min_flips_per_replica)
@@ -211,15 +213,25 @@ def plain_md_next(run_dir, state, reports, decisions, next_ns: float) -> float:
                    f"{state.loop.max_ns:g} ns per replica (at most {cap:g}).")
             return step
         if not state.allowed("extend"):
-            need = max((projected_ns(by_label.get(d.residue), ns, goal.precision, state.loop.min_flips_per_replica)
-                        or ns) for d in flipping)
+            need = (ns + state.loop.extend_ns if state.quantity == "event_seen" else
+                    max((projected_ns(by_label.get(d.residue), ns, goal.precision, state.loop.min_flips_per_replica)
+                         or ns) for d in flipping))
             target = max(round(need + 0.5), round(ns + state.loop.extend_ns))
+            if state.quantity == "event_seen":
+                zh = (f"{name}：你定的上限每条 {ns:g} ns 用完了，还没看到 {names} 的变化（它们在状态之间有来回，"
+                      f"但没有在目标状态停够时间）。我不会超过你定的上限。如果同意加长，可以说“把 {name} 加长到 "
+                      f"{target} ns”；也可以用自适应采样，从最接近目标的帧重新起跑。")
+                en = (f"{name}: your limit of {ns:g} ns per replica is used up and the change of {names} was not seen "
+                      "(they change state, but did not stay in the target state long enough). I do not go past your "
+                      f"limit. If you agree to run longer, say \"run {name} to {target} ns\"; or use adaptive "
+                      "sampling to restart from the frames closest to the target.")
+            else:
+                zh = (f"{name}：你定的上限每条 {ns:g} ns 用完了。{names} 在状态之间有来回，只是数据还不够；按目前的速度，"
+                      f"大约需要每条 {need:.0f} ns。我不会超过你定的上限。如果同意加长，可以说“把 {name} 加长到 {target} ns”。")
+                en = (f"{name}: your limit of {ns:g} ns per replica is used up. {names} change state but need more "
+                      f"data; at the rate so far, about {need:.0f} ns per replica. I do not go past your limit. If you "
+                      f"agree to run longer, say \"run {name} to {target} ns\".")
             record(run_dir, state, Action("plain_md", "extend_budget", False,
                                           f"Budget used up; {names} need more data (about {need:.0f} ns).", ns),
-                   f"{name}：你定的上限每条 {ns:g} ns 用完了。{names} 在状态之间有来回，只是数据还不够；按目前的速度，"
-                   f"大约需要每条 {need:.0f} ns。我不会超过你定的上限。如果同意加长，可以说“把 {name} 加长到 {target} ns”。",
-                   f"{name}: your limit of {ns:g} ns per replica is used up. {names} change state but need more "
-                   f"data; at the rate so far, about {need:.0f} ns per replica. I do not go past your limit. If you "
-                   f"agree to run longer, say \"run {name} to {target} ns\".", "suggestion",
-                   once_key="said_extend")
+                   zh, en, "suggestion", once_key="said_extend")
     return next_ns

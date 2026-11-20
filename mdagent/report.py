@@ -88,14 +88,24 @@ def write(run_dir: Path) -> list[Path]:
 
         L += [T("## 问题", "## The question"), ""]
         quantity = goal.get("quantity", "chi1_populations")
-        what = (T("原子间距离处在“近”和“远”两种状态的比例", "populations of the near and far states of atom distances")
+        events = quantity == "event_seen"
+        what = (T(f"能否看到这些变化：{', '.join(state.get('events', []))}",
+                  f"whether these changes are seen: {', '.join(state.get('events', []))}") if events else
+                T("原子间距离处在“近”和“远”两种状态的比例", "populations of the near and far states of atom distances")
                 if quantity == "distance_states" else
                 T("目标区域侧链的 chi1 构象（g+、t、g-）的比例", "populations of the chi1 states (g+, t, g-) of the target side chains"))
         L.append(T(f"- 目标量：{what}。", f"- Quantity: {what}."))
         if goal.get("description"):
             L.append(T(f"- 用户的原话：{goal['description']}", f"- In the user's words: {goal['description']}"))
-        L.append(T(f"- 要求的精度：每个比例的标准误差不超过 {precision:g}。",
-                   f"- Requested precision: standard error of every population at most {precision:g}."))
+        if events:
+            L.append(T(f"- 怎样算看到：从别的状态进入目标状态，并停留至少 {goal.get('hold_ps', 100):g} ps；"
+                       f"在 {goal.get('seen_in', 1)} 条重复里看到就停。",
+                       f"- What counts as seen: the item enters the target state from another state and stays at "
+                       f"least {goal.get('hold_ps', 100):g} ps; it stops once seen in {goal.get('seen_in', 1)} "
+                       "replica(s)."))
+        else:
+            L.append(T(f"- 要求的精度：每个比例的标准误差不超过 {precision:g}。",
+                       f"- Requested precision: standard error of every population at most {precision:g}."))
         perms = goal.get("permissions")
         L.append(T(f"- agent 可以自己做的事：{', '.join(perms) if perms else '无（只提建议）'}。",
                    f"- The agent could by itself: {', '.join(perms) if perms else 'nothing (suggestions only)'}."))
@@ -130,6 +140,19 @@ def write(run_dir: Path) -> list[Path]:
         L += [T("## 结论", "## Conclusion"), ""]
         if not results:
             L.append(T("还没有结果。", "No results yet."))
+        elif events:
+            for r in results:
+                seen = (r.get("extra") or {}).get("seen_ns") or []
+                where = [f"{T('重复', 'replica')} {i} {T('在', 'at')} {t:g} ns" for i, t in enumerate(seen) if t is not None]
+                if where:
+                    L.append(T(f"- {r['label']}：看到了（{'；'.join(where)}）。",
+                               f"- {r['label']}: seen ({'; '.join(where)})."))
+                else:
+                    L.append(T(f"- {r['label']}：没有看到（各重复的状态变化次数：{r['transitions']}）。",
+                               f"- {r['label']}: not seen (state changes per replica: {r['transitions']})."))
+            L += ["", T("下表是各状态所占的时间，只作参考：这类目标不要求比例的精度。",
+                        "The table gives the time spent in each state, for information only: this goal asks for no "
+                        "precision of populations.")]
         elif not open_:
             L.append(T(f"全部 {len(results)} 个项目都达到了要求的精度。下面的比例可以作为这个力场和条件下的平衡比例，"
                        "引用时请附上误差。",
@@ -177,10 +200,10 @@ def write(run_dir: Path) -> list[Path]:
         L.append(T("- 结果只对所用的力场、温度和体系成立。", "- The result holds for the force field, temperature and system used."))
         frozen = [r["label"] for r in results if r["transitions"] and sum(r["transitions"]) == 0]
         if frozen:
-            L.append(T(f"- {', '.join(frozen)} 从来没有改变状态。它们的误差显示为 0，这不表示很精确，而是表示被困住了；"
+            L.append(T(f"- {', '.join(frozen)} 从来没有改变状态。它们被困住了；误差只按“看到得太少”估计（误差下限），"
                        "比例只说明它们一直停在哪个状态。",
-                       f"- {', '.join(frozen)} never changed state. Their error shows as 0; that does not mean precise, "
-                       "it means trapped. The population only says which state they stayed in."))
+                       f"- {', '.join(frozen)} never changed state: they are trapped. Their error only reflects how "
+                       "little was seen (error floor); the population only says which state they stayed in."))
         if any(r["verdict"] == "stalled" for r in results):
             L.append(T("- 判为 stalled 的项目在状态之间几乎没有来回，它们的比例不能信，即使各条重复看起来一致。",
                        "- Items judged stalled hardly moved between states; their populations cannot be trusted even "

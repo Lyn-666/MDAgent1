@@ -112,6 +112,10 @@ What to measure: side-chain conformations (rotamers) of a region -> target_kind 
 A distance between atoms (a pocket opening or closing, a contact forming, a gate) -> target_kind "distance"
 with `distances`. MDAgent has enhanced sampling only for side chains; for distances it runs plain MD and says
 when that is not enough.
+"Stop when you see X" (a side chain reaching a state, a pocket opening) -> target_kind "change" with `observe`.
+The user's time and replica numbers are limits. The agent stops early when the goal is reached or going on
+would not help, and only suggests a longer run, more replicas or another method; the user confirms. To add
+replicas to a stopped run, set resume_replicas (the new total).
 
 Save folder: if the user says where to save the results (a folder path), put it in save_dir exactly as written.
 The card shows the full path before anything starts.
@@ -565,6 +569,11 @@ class Assistant:
                 from .observables import distance_atoms, parse_distances
 
                 distance_atoms(md.load_topology(str(self.root / a.pdb)), parse_distances(a.plan.distances))
+            if a.plan.target_kind == "change" and a.pdb:
+                from .cli import _check_events
+                from .observables import parse_events
+
+                _check_events(parse_events(a.plan.observe), self.root / a.pdb)
             check_text = None
             if a.pdb and not a.prmtop:
                 from .check import check_structure

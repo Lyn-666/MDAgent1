@@ -46,7 +46,7 @@ from .uncertainty import block_standard_error, combine_replicas, error_parts, fl
 
 STATE_CENTERS_DEG = {"g+": 60.0, "t": 180.0, "g-": -60.0}
 STATE_NAMES = list(STATE_CENTERS_DEG)
-NEEDS_WORK = ("replicas_disagree", "no_flip", "rare_flips", "imprecise")
+NEEDS_WORK = ("replicas_disagree", "no_flip", "rare_flips", "imprecise", "not_yet")
 
 
 DISULFIDE_MAX_NM = 0.25  # SG-SG distance; a disulfide bond is about 0.205 nm.
