@@ -115,3 +115,60 @@ def test_added_replicas_catch_up_before_the_next_round(tmp_path, monkeypatch):
     assert calls[:3] == [(0, 0), (1, 0), (2, 0)]
     # Round 2: replicas 3 and 4 first run round 1, then everyone runs round 2.
     assert calls[3:] == [(0, 1), (1, 1), (2, 1), (3, 0), (3, 1), (4, 0), (4, 1)]
+
+
+def test_rule6_stop_early_when_the_limit_is_too_short_to_reach_the_goal(tmp_path):
+    from mdagent.policy import projected_ns
+
+    slow = _report("rare_flips", transitions=(1, 0, 2))            # 1 change per replica in 6 ns: needs ~24 ns.
+    slow.standard_error = {"g+": 0.02, "t": 0.03, "g-": 0.01}
+    assert 20 < projected_ns(slow, 6.0, 0.05, 4) < 30
+
+    ext = [Decision("VAL111", "extend", "rare flips")]
+    state = _state(tmp_path, ["stop_early"], ns=(1.0, 5.0), max_ns=10.0)   # Limit 10 ns, needs ~24 ns.
+    assert plain_md_next(tmp_path, state, [slow], ext, 4.0) == 0.0
+    assert ext[0].cause == "not_reachable" and ext[0].action == "enhanced_sampling"
+    assert state.notes["projected_ns"]["VAL111"] > 15
+    assert "提前停下" in read(tmp_path)[-1]["zh"]
+
+    # The same with a limit the estimate fits into: go on.
+    ext = [Decision("VAL111", "extend", "rare flips")]
+    state = _state(tmp_path, ["stop_early"], ns=(1.0, 5.0), max_ns=20.0)
+    assert plain_md_next(tmp_path, state, [slow], ext, 5.0) == 5.0 and ext[0].action == "extend"
+
+    # Guided (no stop_early): only say so, and go on to the limit.
+    ext = [Decision("VAL111", "extend", "rare flips")]
+    state = _state(tmp_path, [], ns=(1.0, 5.0), max_ns=10.0)
+    assert plain_md_next(tmp_path, state, [slow], ext, 4.0) == 4.0 and ext[0].action == "extend"
+    assert "按你的设置继续" in read(tmp_path)[-1]["zh"]
+
+    # Too early to judge (one round): go on.
+    ext = [Decision("VAL111", "extend", "rare flips")]
+    state = _state(tmp_path, ["stop_early"], ns=(1.0,), max_ns=10.0)
+    assert plain_md_next(tmp_path, state, [slow], ext, 5.0) == 5.0
+
+
+def test_limits_are_not_passed_without_a_yes_and_the_message_says_how(tmp_path):
+    # Budget used up, more data needed, no permission to extend: suggest a length, do not extend.
+    ext = [Decision("VAL111", "extend", "imprecise")]
+    state = _state(tmp_path, ["stop_early"], ns=(1.0, 5.0, 4.0), max_ns=10.0)
+    rep = _report("imprecise", transitions=(8, 9, 10))
+    rep.standard_error = {"g+": 0.07, "t": 0.03, "g-": 0.01}
+    assert plain_md_next(tmp_path, state, [rep], ext, 0.0) == 0.0 and state.loop.max_ns == 10.0
+    assert "加长到" in read(tmp_path)[-1]["zh"]
+    # Replicas disagree, no permission to add: say how to confirm.
+    ext = [Decision("VAL111", "extend", "imprecise")]
+    state = _state(tmp_path, ["stop_early"])
+    plain_md_next(tmp_path, state, [_report("imprecise", differ=True)], ext, 5.0)
+    assert state.n_replicas == 3 and "加 2 条重复" in read(tmp_path)[-1]["zh"]
+
+
+def test_no_change_after_the_patience_time_closes_the_item_when_stopping_early_is_allowed():
+    from mdagent.agent import decide
+
+    stuck = _report("no_flip", transitions=(0, 0, 0))
+    loop = LoopSettings(max_ns=20.0, no_flip_patience_ns=5.0)
+    decisions, next_ns = decide([stuck], 6.0, loop, may_switch=False, may_stop=True)
+    assert next_ns == 0.0 and decisions[0].cause == "stalled"
+    decisions, next_ns = decide([stuck], 6.0, loop, may_switch=False, may_stop=False)   # Guided: goes on.
+    assert next_ns > 0 and decisions[0].stalled

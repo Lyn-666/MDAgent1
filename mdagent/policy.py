@@ -15,6 +15,16 @@ Plain MD (after agent.decide has judged every item), in this order:
 5. Replicas sit in different states and never change: suggest restarting from chosen frames (adaptive
    sampling). It is only suggested: segments that start from chosen frames no longer give equilibrium
    populations without further analysis.
+6. No gain within the limit: after at least two rounds and a quarter of the budget, estimate for each open
+   item how long it would need: state changes come at the rate seen so far (the mean over replicas, which
+   is optimistic), and the error falls as one over the square root of the time. If even this estimate is
+   more than NO_GAIN_MARGIN times the user's limit for every open item, more plain MD would not reach the
+   goal in time: stop early (permission stop_early) with the reason "not_reachable", and suggest a higher
+   limit or another method. Without the permission, only say so.
+
+Since 2026-11-20 the default (auto) permissions are only stop_early: the user's time and replica numbers
+are limits, and another method needs the user's yes. Rules 3 and 4 then become suggestions that say how
+to confirm them.
 
 Each choice is kept in run.json (notes["actions"]) and decisions.log. An action without permission
 becomes a suggestion in the chat.
@@ -26,6 +36,32 @@ import time
 from dataclasses import asdict, dataclass
 
 from .messages import post
+
+NO_GAIN_MARGIN = 1.5   # Rule 6 stops only when even the optimistic estimate is this much over the limit.
+
+
+def projected_ns(report, ns: float, precision: float | None, min_flips: int) -> float | None:
+    """Rough total ns per replica an item needs to meet the goal, from what was seen so far.
+
+    None when it cannot be estimated (no state change yet). Optimistic on purpose: it uses the mean
+    rate of state changes over replicas, so a slow replica does not make the agent give up too early.
+    """
+    if report is None or ns <= 0 or not report.transitions or sum(report.transitions) == 0:
+        return None
+    need = ns
+    if report.total_ns_override is not None:
+        # Adaptive sampling: transitions are counted per segment and judged in total (diagnose.judge_pooled).
+        if report.verdict == "rare_flips" and sum(report.transitions) > 0:
+            need = max(need, ns * 2)   # Needs more segments; how many cannot be told from a pooled count.
+    else:
+        mean_changes = sum(report.transitions) / len(report.transitions)
+        if min(report.transitions) < min_flips:
+            need = max(need, ns * min_flips / mean_changes)
+    if precision and report.standard_error:
+        err = max(report.standard_error.values())
+        if err > precision:
+            need = max(need, ns * (err / precision) ** 2)
+    return need
 
 
 def spread_labels(reports) -> list[str]:
@@ -125,10 +161,54 @@ def plain_md_next(run_dir, state, reports, decisions, next_ns: float) -> float:
                        f"ones first catch up to {ns:g} ns.")
             else:
                 record(run_dir, state, Action("plain_md", "add_replicas", False, why, ns),
-                       f"{name}：各条重复对 {', '.join(spread)} 的结果明显不一致。建议增加重复（需要允许 add_replicas）。",
-                       f"{name}: the replicas clearly disagree about {', '.join(spread)}. I suggest more replicas "
-                       "(needs permission add_replicas).", "suggestion",
+                       f"{name}：各条重复对 {', '.join(spread)} 的结果明显不一致，增加独立重复比加长更有用。"
+                       f"你定的是 {state.n_replicas} 条重复，我不会自己加。如果同意，可以说“给 {name} 加 2 条重复”。",
+                       f"{name}: the replicas clearly disagree about {', '.join(spread)}; more independent replicas "
+                       f"help more than longer ones. You set {state.n_replicas} replicas, so I do not add any myself. "
+                       f"If you agree, say \"add 2 replicas to {name}\".", "suggestion",
                        once_key="said_add_replicas")
+
+    # Rule 6: no gain within the user's limit.
+    going_on = [d for d in open_ if d.action == "extend"]
+    # Not for a change to see (event_seen): when a rare event comes cannot be estimated from the rate so far.
+    if next_ns > 0 and going_on and state.quantity != "event_seen" and len(state.rounds_ns) >= 2 \
+            and ns >= 0.25 * state.loop.max_ns - 1e-9:
+        needs = {}
+        for d in going_on:
+            need = projected_ns(by_label.get(d.residue), ns, goal.precision, state.loop.min_flips_per_replica)
+            if need is None or need <= NO_GAIN_MARGIN * state.loop.max_ns:
+                needs = {}
+                break
+            needs[d.residue] = need
+        if needs:
+            longest = max(needs.values())
+            items_zh = "，".join(f"{k} 约 {v:.0f} ns" for k, v in needs.items())
+            items_en = ", ".join(f"{k} about {v:.0f} ns" for k, v in needs.items())
+            what = (f"按目前的速度，要达到目标（每条重复至少来回 {state.loop.min_flips_per_replica} 次、"
+                    f"误差不超过 {goal.precision:g}），每条重复大约需要：{items_zh}。这超过了你定的上限 "
+                    f"{state.loop.max_ns:g} ns，所以在上限内再跑下去也达不到。")
+            what_en = (f"At the rate so far, reaching the goal (at least {state.loop.min_flips_per_replica} state "
+                       f"changes per replica and errors of at most {goal.precision:g}) needs per replica: "
+                       f"{items_en}. That is more than your limit of {state.loop.max_ns:g} ns, so more of the same "
+                       "will not reach it within the limit.")
+            state.notes["projected_ns"] = {k: round(v, 1) for k, v in needs.items()}
+            if state.allowed("stop_early"):
+                for d in going_on:
+                    d.action = "enhanced_sampling" if state.quantity == "chi1_populations" else "stalled"
+                    d.cause = "not_reachable"
+                record(run_dir, state, Action("plain_md", "stop", True,
+                                              f"No gain within the limit: needs {items_en} (limit "
+                                              f"{state.loop.max_ns:g} ns).", ns),
+                       f"{name}：{what}普通 MD 在每条 {ns:g} ns 处提前停下，省下剩余的时间。如果仍想用普通 MD，"
+                       f"可以把上限提高到约 {longest:.0f} ns（说“把 {name} 加长到 {longest:.0f} ns”）。",
+                       f"{name}: {what_en} Plain MD stops early at {ns:g} ns per replica to save the rest. To stay "
+                       f"with plain MD, raise the limit to about {longest:.0f} ns (say \"run {name} to "
+                       f"{longest:.0f} ns\").", "info")
+                return 0.0
+            record(run_dir, state, Action("plain_md", "stop", False, f"No gain within the limit: needs {items_en}.", ns),
+                   f"{name}：{what}运行会按你的设置继续到上限。",
+                   f"{name}: {what_en} The run goes on to the limit as you set it.", "suggestion",
+                   once_key="said_no_gain")
 
     # Rule 4: the budget is used up, items change state but are not precise enough, none is stuck.
     stuck = [d for d in open_ if d.cause == "stalled" or d.stalled]
@@ -150,8 +230,27 @@ def plain_md_next(run_dir, state, reports, decisions, next_ns: float) -> float:
                    f"{state.loop.max_ns:g} ns per replica (at most {cap:g}).")
             return step
         if not state.allowed("extend"):
+            need = (ns + state.loop.extend_ns if state.quantity == "event_seen" else
+                    max((projected_ns(by_label.get(d.residue), ns, goal.precision, state.loop.min_flips_per_replica)
+                         or ns) for d in flipping))
+            target = max(round(need + 0.5), round(ns + state.loop.extend_ns))
+            if state.quantity == "event_seen":
+                zh = (f"{name}：你定的上限每条 {ns:g} ns 用完了，还没看到 {names} 的变化（它们在状态之间有来回，"
+                      f"但没有在目标状态停够时间）。我不会超过你定的上限。如果同意加长，可以说“把 {name} 加长到 "
+                      f"{target} ns”；也可以用自适应采样，从最接近目标的帧重新起跑。")
+                en = (f"{name}: your limit of {ns:g} ns per replica is used up and the change of {names} was not seen "
+                      "(they change state, but did not stay in the target state long enough). I do not go past your "
+                      f"limit. If you agree to run longer, say \"run {name} to {target} ns\"; or use adaptive "
+                      "sampling to restart from the frames closest to the target.")
+            else:
+                zh = (f"{name}：你定的上限每条 {ns:g} ns 用完了。{names} 在状态之间有来回，只是数据还不够；按目前的速度，"
+                      f"大约需要每条 {need:.0f} ns。我不会超过你定的上限。如果同意加长，可以说“把 {name} 加长到 {target} ns”。")
+                en = (f"{name}: your limit of {ns:g} ns per replica is used up. {names} change state but need more "
+                      f"data; at the rate so far, about {need:.0f} ns per replica. I do not go past your limit. If you "
+                      f"agree to run longer, say \"run {name} to {target} ns\".")
             record(run_dir, state, Action("plain_md", "extend_budget", False,
-                                          f"Budget used up; {names} need more data.", ns))
+                                          f"Budget used up; {names} need more data (about {need:.0f} ns).", ns),
+                   zh, en, "suggestion", once_key="said_extend")
     return next_ns
 
 

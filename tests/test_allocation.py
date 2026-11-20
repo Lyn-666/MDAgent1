@@ -99,7 +99,8 @@ def test_projection_runs_are_calibrated_for_their_stop_looks(tmp_path):
     state = _backbone_run(tmp_path)
     p = state.precision()
     assert p.criterion == "confidence" and p.looks == 3 and p.z == pytest.approx(z_bonferroni(0.05, 3))
-    assert state.budget_ns() == 3 * 2.0                        # 3 replicas x (1 ns x extend factor 2)
+    assert state.budget_ns() == 3 * 1.0                        # the user's plan: 3 replicas x 1 ns, never more
+    assert state.max_ns_per_replica() == 1.0
 
 
 def test_a_chat_plan_for_backbone_basins_becomes_a_valid_run():
