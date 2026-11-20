@@ -11,9 +11,9 @@ Candidate actions (general verbs; the tool decides what they mean physically):
 - stop           stopping before the planned budget is used needs "stop_early"; at the end of the
                  budget, stopping is always allowed
 
-Value: each candidate gets a heuristic expected information value: for every open estimand, the
-strongest of its hypotheses (reasoner.py) times how much this kind of action addresses that hypothesis
-(EFFECT). This is a ranking device, not a probability. Ties go to the cheaper action, then to the order
+Value: each candidate gets a heuristic expected information value: for every open estimand the action's
+tool can serve, the strongest of its hypotheses (reasoner.py) times how much this kind of action addresses
+that hypothesis (EFFECT). More of the current tool gives no value to an estimand that tool does not serve. This is a ranking device, not a probability. Ties go to the cheaper action, then to the order
 of KINDS, so the same evidence always gives the same choice.
 
 Selection:
@@ -127,16 +127,17 @@ def propose(task: TaskSpec, hyps: list[Hypothesis], progress: Progress, tools, e
             continue
         other = tools.get(name)
         covered = {e for e, kind in open_kinds.items()
-                   if other.supports(kind) and estimators.find(kind, other.regime) is not None}
+                   if other.supports(kind, e) and estimators.find(kind, other.regime) is not None}
         if covered and other.regime != tool.regime:
             c = Candidate("switch_method", name, task.step, task.step * n * other.cost_factor,
                           permission="switch_method")
             c.value, c.addresses = _value("switch_method", hyps, covered)
             out.append(c)
 
+    here = {e for e, kind in open_kinds.items() if tool.supports(kind, e)}   # More of this tool only helps these.
     for c in out:
         if c.kind != "switch_method":
-            c.value, c.addresses = _value(c.kind, hyps)
+            c.value, c.addresses = _value(c.kind, hyps, here)
         why = []
         if c.permission and c.permission not in granted:
             why.append(f"needs permission {c.permission}")

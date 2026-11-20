@@ -466,7 +466,15 @@ MIT 许可证，见 `LICENSE`。任何人都可以使用、修改和分发这个
 
 ## 通用决策核心（开发中）
 
-MDAgent 正在改成通用的科学 MD agent。新的决策核心在 `mdagent/core/`：它读任务里每个估计量自己的成功要求，用相互竞争的假设解释为什么还没达到，再在权限和预算内选下一步动作，并把每个决定和它依据的证据写进 `decisions.jsonl`。核心不认识任何观测量、模拟引擎或体系；具体的数值估计在 `mdagent/estimators.py`。目前它只在合成体系上测试（`mdagent/synthetic.py`），正式运行还用原来的流程。架构评估、计划和评估方法见 [docs/architecture.md](docs/architecture.md)。
+MDAgent 正在改成通用的科学 MD agent。新的决策核心在 `mdagent/core/`：它读任务里每个估计量自己的成功要求，用相互竞争的假设解释为什么还没达到，再在权限和预算内选下一步动作，并把每个决定和它依据的证据写进 `decisions.jsonl`。核心不认识任何观测量、模拟引擎或体系；具体的数值估计在 `mdagent/estimators.py`。正式运行还用原来的流程。新核心现在以“影子模式”跟着每个运行：每跑完一轮普通 MD、每做一次增强采样检查，它都按同样的数据记下自己会怎么做，但不执行。记录在运行目录的 `decisions.core.jsonl`。不想要时，运行前设 `MDAGENT_SHADOW=0`。
+
+已经跑完的运行也能比较，不用重新模拟：
+
+```bash
+python -m mdagent shadow --run runs/val_1UBQ_reach_chi1 runs/val_1UBQ_trapped_chi1
+```
+
+它从运行目录里的轨迹和增强采样数据，重建每个过去的决定点，问新核心会怎么做，再和当时实际做的并排列出（相同、停下原因不同、新核心更早停、新核心继续、不同动作），并写出每个决定依据的证据 `decisions.core.replay.jsonl`。对新开始的运行，用 `--live` 比较运行中记下的影子决定。架构评估、计划和评估方法见 [docs/architecture.md](docs/architecture.md)。
 
 ## 下一步
 

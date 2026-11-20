@@ -49,12 +49,12 @@ def spent(tools: ToolRegistry, history: list) -> float:
     return sum(t.length() * t.replicas() * t.cost_factor for t in (tools.get(n) for n in dict.fromkeys(history)))
 
 
-def _source(kind: str, history: list, tools: ToolRegistry, estimators: EstimatorRegistry):
-    """The newest tool of the run that serves this kind and has data, with its estimator."""
+def _source(kind: str, estimand: str, history: list, tools: ToolRegistry, estimators: EstimatorRegistry):
+    """The newest tool of the run that serves this estimand and has data, with its estimator."""
     for name in reversed(history):
         t = tools.get(name)
         e = estimators.find(kind, t.regime)
-        if t.supports(kind) and e is not None and t.length() > EPS:
+        if t.supports(kind, estimand) and e is not None and t.length() > EPS:
             return t, e
     return None, None
 
@@ -76,6 +76,58 @@ def _check_limits(task: TaskSpec, tools: ToolRegistry, history: list) -> float:
     return now
 
 
+def decide(task: TaskSpec, tools: ToolRegistry, estimators: EstimatorRegistry, ledger: Ledger, history: list,
+           extra: dict | None = None):
+    """One decision point (steps 1 to 6 and 8 of the protocol): assess, hypothesize, propose, select, record.
+
+    Nothing is executed. The loop below executes the choice; the shadow mode (shadow.py) only records it.
+    Streaks and the previous projection come from the ledger, so repeated calls continue where it left off.
+    Returns (decision, assessments, record).
+    """
+    tool = tools.get(history[-1])
+    now = spent(tools, history)
+    last = ledger.last
+    looks = (last["progress"]["looks"] if last else 0) + 1
+    streak = next((dict(r["streak"]) for r in reversed(ledger.records) if "streak" in r), {})
+    assessments = []
+    for r in task.requirements:
+        t, est = _source(r.kind, r.estimand, history, tools, estimators)
+        if t is None:
+            assessments.append(Assessment(r.estimand, "none", "indeterminate",
+                                          note="no tool used in this run serves this estimand"))
+            continue
+        assessments.append(est.assess(r.estimand, t.observe([r.estimand])[r.estimand], r.params))
+    for a in assessments:
+        streak[a.estimand] = streak.get(a.estimand, 0) + 1 if a.passes else 0
+    reqs = {r.estimand: r for r in task.requirements}
+    open_ = [e for e, r in reqs.items() if r.required and streak[e] < r.confirm_looks]
+    progress = Progress(tool.name, tool.length(), tool.replicas(), now, looks)
+
+    before = next((r for r in reversed(ledger.records) if r["kind"] == "decision"), None)
+    previous = {h["estimand"]: h["projected_cost"] for h in (before or {}).get("hypotheses", [])
+                if h["id"] == "slow_mixing" and h.get("projected_cost") is not None
+                and before["progress"]["tool"] == tool.name}
+    hyps = hypothesize([a for a in assessments if a.estimand in open_], progress,
+                       _limits(task)[0], tool.cost_factor, previous)
+    hyps += [Hypothesis("awaiting_confirmation", e, "high",
+                        [f"met at {streak[e]} of {reqs[e].confirm_looks} consecutive looks"])
+             for e in open_ if streak[e] > 0]
+    open_kinds = {e: reqs[e].kind for e in open_}
+    unsupported = [e for e in open_ if any(h.estimand == e and h.id in ("trapped_or_single_state", "bias_ineffective")
+                                            for h in hyps)
+                   and not any(n != tool.name and tools.get(n).supports(open_kinds[e], e)
+                               and estimators.find(open_kinds[e], tools.get(n).regime) is not None
+                               and tools.get(n).regime != tool.regime for n in tools.names())]
+    cands = propose(task, hyps, progress, tools, estimators, open_kinds)
+    decision = select(task, cands, hyps, progress, open_, unsupported)
+    record = ledger.append({"kind": "decision", "progress": _progress(tool, now, looks, history), "streak": streak,
+                            "task": task.to_dict() if looks == 1 else None,
+                            "assessments": [a.to_dict() for a in assessments],
+                            "hypotheses": [h.to_dict() for h in hyps], "decision": decision.to_dict(),
+                            "stop_reason": decision.stop_reason, **(extra or {})})
+    return decision, assessments, record
+
+
 def run(task: TaskSpec, tools: ToolRegistry, estimators: EstimatorRegistry, ledger: Ledger,
         max_steps: int = 1000) -> Outcome:
     last = ledger.last
@@ -84,58 +136,22 @@ def run(task: TaskSpec, tools: ToolRegistry, estimators: EstimatorRegistry, ledg
                        last["progress"]["history"], {a["estimand"]: a for a in last.get("assessments", [])},
                        last.get("decision", {}).get("suggestions", []))
     history = list(last["progress"]["history"]) if last else [task.method]
-    streak = next((dict(r["streak"]) for r in reversed(ledger.records) if "streak" in r), {})
-    looks = last["progress"]["looks"] if last else 0
     tool = tools.get(history[-1])
 
     if tool.length() <= EPS:   # The first round of the user's plan.
         n = task.budget.planned_replicas
         amount = min(task.step, task.budget.planned_cost / (n * tool.cost_factor))
-        ledger.append({"kind": "start", "progress": _progress(tool, 0.0, looks, history),
+        ledger.append({"kind": "start", "progress": _progress(tool, 0.0, 0, history),
                        "executed": {"kind": "continue", "tool": tool.name, "amount": amount}})
         tool.advance(n, amount)
         _check_limits(task, tools, history)
 
+    looks = last["progress"]["looks"] if last else 0
     for _ in range(max_steps):
         now = _check_limits(task, tools, history)
-        assessments = []
-        for r in task.requirements:
-            t, est = _source(r.kind, history, tools, estimators)
-            if t is None:
-                assessments.append(Assessment(r.estimand, "none", "indeterminate",
-                                              note="no tool used in this run serves this estimand"))
-                continue
-            assessments.append(est.assess(r.estimand, t.observe([r.estimand])[r.estimand], r.params))
-        looks += 1
-        for a in assessments:
-            streak[a.estimand] = streak.get(a.estimand, 0) + 1 if a.passes else 0
-        reqs = {r.estimand: r for r in task.requirements}
-        open_ = [e for e, r in reqs.items() if r.required and streak[e] < r.confirm_looks]
-        progress = Progress(tool.name, tool.length(), tool.replicas(), now, looks)
-
-        before = next((r for r in reversed(ledger.records) if r["kind"] == "decision"), None)
-        previous = {h["estimand"]: h["projected_cost"] for h in (before or {}).get("hypotheses", [])
-                    if h["id"] == "slow_mixing" and h.get("projected_cost") is not None
-                    and before["progress"]["tool"] == tool.name}
-        hyps = hypothesize([a for a in assessments if a.estimand in open_], progress,
-                           _limits(task)[0], tool.cost_factor, previous)
-        hyps += [Hypothesis("awaiting_confirmation", e, "high",
-                            [f"met at {streak[e]} of {reqs[e].confirm_looks} consecutive looks"])
-                 for e in open_ if streak[e] > 0]
-        open_kinds = {e: reqs[e].kind for e in open_}
-        unsupported = [e for e in open_ if any(h.estimand == e and h.id in ("trapped_or_single_state", "bias_ineffective")
-                                                for h in hyps)
-                       and not any(n != tool.name and tools.get(n).supports(open_kinds[e])
-                                   and estimators.find(open_kinds[e], tools.get(n).regime) is not None
-                                   and tools.get(n).regime != tool.regime for n in tools.names())]
-        cands = propose(task, hyps, progress, tools, estimators, open_kinds)
-        decision = select(task, cands, hyps, progress, open_, unsupported)
+        decision, assessments, record = decide(task, tools, estimators, ledger, history)
+        looks = record["progress"]["looks"]
         c = decision.chosen
-        ledger.append({"kind": "decision", "progress": _progress(tool, now, looks, history), "streak": streak,
-                       "task": task.to_dict() if looks == 1 else None,
-                       "assessments": [a.to_dict() for a in assessments],
-                       "hypotheses": [h.to_dict() for h in hyps], "decision": decision.to_dict(),
-                       "stop_reason": decision.stop_reason})
         if not c.authorized:
             raise PermissionViolation(f"the controller chose an unauthorized action: {c.kind} ({c.blocked_by})")
         if c.kind == "stop":
