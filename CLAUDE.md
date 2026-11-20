@@ -30,6 +30,8 @@
 
 **按新目标做了什么（2026-11-20）：** 加了三件事，都在 GPU 上没验证过。(1) 成本核算 `cost.py`：aggregate_ns（所有重复相加的生产时间）、compute_ns（加上每条重复各自的平衡时间，主要指标）、wall_ns（按同时能跑几条折算的等待时间）分开报告；运行每轮记下实测秒数（`run.json` 的 `notes.rounds`）；结果报告里写明用了多少计算量。(2) 精度判据 `uncertainty.Precision`：`--criterion standard_error`（默认，含义和以前一样）/`confidence`（α 平摊到预先知道的判断次数）/`sequence`（Robbins 置信序列）。默认没改，因为改成 `confidence` 会让运行长好几倍；先用 `budget` 量出代价再决定。(3) 策略对照 `budget.py` + `budget` 命令：一次高预算数据池，离线回放 fixed / early_stop / add_replicas / mdagent 四种策略，比成本和正确率；对"只加长、只加独立重复"的策略回放是精确的，"从挑出的帧重新起跑"回放不了。`compare` 从 `|z| ≤ 2` 换成等效性检验（TOST）。在已知比例的模型上看到（容差 0.05，10 次重复）：`early_stop` 省 83% 但 10 次里 2 次超出容差（最大偏差 0.097），`mdagent` 省 74%、9 次在容差内（最大偏差 0.057，和固定方案一样）；把判据换成 `confidence` 后各策略会跑更久，但在每条 20 ns 的预算下达不到这个判据，只是以"预算用完"停下，答案没变好——更严的判据要配更大的预算。
 
+**实验 A（2026-11-20 开始设计）：** 用户的第一个实验：1UBQ 上的普通 MD，回答"跑多久、跑几条"。假设 A：在线、考虑不确定度的分配，能以低于固定方案的计算成本达到同样的准确度。用户补充说：**agent 可以只回答跑多久；实验者常用的时长可以直接用文献数据**。所以基线是文献方案，不是事后挑的：1×100 ns（Huang & MacKerell 2013，CHARMM36、300 K、泛素侧链，doi:10.1002/jcc.23354），以及 3×100、5×100 ns（文献推荐的重复数）。两个 agent 分开判定：`early_stop`（5 条，只决定时长）和 `mdagent`（还可以加到 10 条）。侧链由独立预实验挑选（每条预实验轨迹翻转 ≥4 次），数据池 16×100 ns，留出 6 条作共同参考。默认容差 0.1、目标 90%，这两个数由用户在看结果前确认。脚本 `scripts/experiment_A.sh`（pilot / select / pool / analyze），说明在 README "实验 A"。**还没在 GPU 上跑。** 干跑看到的两点：事后最佳固定方案原理上赢不了，只用来量"不知道该跑多久的代价"；`standard_error` 判据太松（约 80% 准确）；`confidence` 准，但 5 条重复时事后最佳是 16 ns，普通 95% 区间跑到 24 ns，α 平摊到 20 次判断后跑到 40 ns。慢侧链（Bowman 2014：有的 chi1 翻转要 10 µs）会被预实验排除，留给实验 B。
+
 ## 用户定下的规则和决定
 
 - **"更省"要能验证（2026-11-20）：** 一个策略只有既更便宜、答案又仍然在容差以内，才算更好。所以：成本三个数分开报；参考必须独立（策略没用到的那些重复，或者已知真值），不能和整个数据池比，那等于和自己比；一致性用等效性检验，不用 `|z| ≤ 2`（数据越少越容易通过，短跑会正因为不精确而显得正确）；一次跑赢不算，要多次重复（`--repeats`）看正确率。同一个数据池的多次重复不是完全独立的（换的是取哪几条重复），报告里说明了这一点。
@@ -64,7 +66,8 @@
 - `uncertainty.py`：分块平均的误差（考虑时间相关）、合并重复、有效样本数。普通 MD 和增强采样都用。还有 `Precision`（容差 + 判据 + α + 判断次数，`met()` 判断够不够精确）和 `planned_looks()`（判断次数 = 预算 ÷ 每轮长度）。`judge`、`reweight.assess` 都接受 `Precision` 或一个浮点数（旧行为）。
 - `cost.py`：计算成本。`of()` 按每条重复的长度算，`of_run()` 从 `run.json` 算（增强采样接着普通 MD 跑，不再付平衡时间）；`reduction()` 比两个成本。
 - `budget.py`：策略对照（回放）。`Pool`（每条重复逐帧的状态）、`pool_from_run()`（从跑完的运行读，chi1 和距离都支持）、`markov_pool()`（已知比例的模型，不需要 GPU）、`replay()`（一种策略跑一遍）、`reference()`（独立参考：真值或没用到的重复）、`check_against()`（accurate = 真的在容差内；equivalent = TOST 证明了）、`compare_strategies()`（多次重复）、`write()`。四种策略：fixed / early_stop / add_replicas / mdagent。**mdagent 策略的规则是 `policy.py` 规则的镜像**，改 `policy.py` 的规则时要同步改 `budget._decide`；两边共用 `policy.spread_labels` 和 `policy.stalled_labels`。
-- `scripts/budget_experiment.sh`：核心实验。先跑数据池（`--allow none`），再回放四种策略、三种判据。
+- `scripts/budget_experiment.sh`：通用的策略对照（数据池 + 回放四种策略、三种判据）。
+- `scripts/experiment_A.sh`：实验 A。`budget` 新增 `--fixed-grid`（一组固定方案）、`--baseline`（文献方案，判定以它们为准）、`--holdout`（留出的共同参考）、`--items`（只回放预实验挑出的项目）、`--target-rate`；`budget.hypothesis_a()` 给出判定，`markov_items()` 是多个速度不同的模型项目。
 - 目标、精度判据（`criterion`、`alpha`）和权限在 `agent.Goal`（`run.json` 的 `goal`）；`RunState.precision()` 组装成 `Precision`；停下的原因 target_reached / stalled / budget_exhausted / failed 记在 `run.json`（`notes.plain_md_outcome`、`enhanced.outcome`、失败时 `notes.outcome`）。
 - `messages.py`：运行发给对话的消息。
 - `policy.py`：第 4 步，每轮后选下一步动作（停、加长、加重复并补跑、超出预算延长、建议重新播种），先查权限；没有权限就在对话里建议。记录在 `run.json` 的 `notes.actions`。增强采样的同类规则写在 `agent.run_all` 的循环里。

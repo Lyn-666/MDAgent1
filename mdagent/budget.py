@@ -53,7 +53,7 @@ import json
 import math
 import random
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 import numpy as np
@@ -111,6 +111,23 @@ class Pool:
         if not self.labels:
             return 0.0
         return min(len(s) for s in self.series[self.labels[0]]) * self.ns_per_frame
+
+    def select(self, wanted: list[str]) -> "Pool":
+        """Keep only some items, named by label (GLU16) or residue number (16).
+
+        The items have to be chosen before the replay (from a separate pilot run), never from the pool's
+        own results: picking the items that look good in the pool would bias the comparison.
+        """
+        keys = []
+        for w in wanted:
+            w = str(w).strip()
+            hit = [k for k in self.labels if k == w or k.rstrip("0123456789") + w == k]
+            if not hit:
+                raise ValueError(f"item {w!r} is not in the pool ({', '.join(self.labels)}).")
+            keys += [k for k in hit if k not in keys]
+        return Pool(keys, {k: self.state_names[k] for k in keys}, {k: self.series[k] for k in keys},
+                    self.ns_per_frame, self.source + f" (items: {', '.join(keys)})",
+                    {k: self.truth[k] for k in keys} if self.truth else None)
 
     def frames(self, ns: float) -> int:
         return max(2, int(round(ns / self.ns_per_frame)))
@@ -220,6 +237,23 @@ def markov_pool(populations: list[float], rate_per_ns: float = 1.0, n_replicas: 
                 truth={label: {n: float(v) for n, v in zip(names, p)}})
 
 
+def markov_items(items: list[tuple[list[float], float]], n_replicas: int = 12, ns: float = 60.0,
+                 ns_per_frame: float = 0.005, seed: int = 0) -> Pool:
+    """Several model items with different speeds, like residues of one protein: some flip fast, some slowly.
+
+    items: (populations, rate per ns) for each item. Every item has its own known truth.
+    """
+    pools = [markov_pool(p, rate, n_replicas, ns, ns_per_frame, seed=seed + 1000 * i, label=f"item{i + 1}")
+             for i, (p, rate) in enumerate(items)]
+    labels = [lab for q in pools for lab in q.labels]
+    return Pool(labels, {k: v for q in pools for k, v in q.state_names.items()},
+                {k: v for q in pools for k, v in q.series.items()}, ns_per_frame,
+                source="synthetic Markov model, " + "; ".join(
+                    f"{lab}: populations {[round(x, 3) for x in (q.truth[lab].values())]}, rate {rate:g}/ns"
+                    for lab, q, (_, rate) in zip(labels, pools, items)) + f", seed {seed}",
+                truth={k: v for q in pools for k, v in q.truth.items()})
+
+
 @dataclass
 class Step:
     look: int
@@ -309,8 +343,8 @@ def replay(pool: Pool, strategy: str, plan: Plan, precision: Precision,
     order = list(order if order is not None else range(pool.n_replicas))
     start, baseline_ns = plan.baseline() if strategy == "fixed" else (plan.replicas, plan.max_ns)
     replicas = order[:start]
-    if len(replicas) < 2:
-        raise ValueError("replaying needs at least 2 replicas in the pool.")
+    if len(replicas) < (1 if strategy == "fixed" else 2):
+        raise ValueError("replaying needs at least 2 replicas in the pool (1 for a fixed plan).")
     ns = min(plan.first_ns, pool.ns_per_replica)
     cap = max(baseline_ns * (plan.extend_factor if strategy == "mdagent" else 1.0), plan.first_ns)
     trial = Trial(strategy=strategy, stop_reason="", ns_per_replica=ns)
@@ -417,36 +451,101 @@ class Comparison:
     pool: dict
     repeats: list = field(default_factory=list)   # [{"seed": int, "trials": {strategy: Trial}}]
     summary: dict = field(default_factory=dict)   # strategy -> medians and rates
+    hypothesis: dict = field(default_factory=dict)  # agent -> hypothesis_a(), when a fixed grid was given
+
+
+def parse_grid(text: str | list | None) -> list[tuple[int, float]]:
+    """Fixed plans written as "3x10,5x20": replicas x ns per replica."""
+    if not text:
+        return []
+    parts = text if isinstance(text, list) else [x for x in text.replace(";", ",").split(",") if x.strip()]
+    out = []
+    for part in parts:
+        try:
+            n, ns = str(part).lower().split("x")
+            out.append((int(n), float(ns)))
+        except ValueError:
+            raise ValueError(f"cannot read the fixed plan {part!r}. Write it like 5x20 (5 replicas of 20 ns).") from None
+    return out
+
+
+def grid_name(n: int, ns: float) -> str:
+    return f"fixed_{n}x{ns:g}"
 
 
 def compare_strategies(pool: Pool, plan: Plan | None = None, precision: Precision | None = None,
                        model: cost_mod.CostModel | None = None, repeats: int = 1,
-                       seed: int = 0, strategies: list[str] | None = None) -> Comparison:
-    """Replay every strategy on the pool, `repeats` times with different replicas."""
+                       seed: int = 0, strategies: list[str] | None = None,
+                       fixed_grid: list[tuple[int, float]] | None = None, holdout: int = 0,
+                       target_rate: float = 0.9, baselines: list[str] | None = None) -> Comparison:
+    """Replay every strategy on the pool, `repeats` times with different replicas.
+
+    fixed_grid: more fixed plans (replicas, ns), each replayed as its own strategy "fixed_<n>x<ns>".
+      A single fixed plan makes "saved" depend on how generous that one plan happens to be. A grid
+      shows what the cheapest fixed plan is that reaches the same accuracy (see hypothesis_a).
+    holdout: reserve this many pool replicas as the reference. They are chosen once (by `seed`) and
+      no strategy ever uses them, so every strategy is checked against the same independent answer.
+      Without it, the reference is whatever replicas a strategy happened to leave over, which
+      differs from strategy to strategy and from repeat to repeat. A model pool has a known truth
+      and needs no holdout.
+    """
     plan = plan or Plan()
     precision = precision or Precision(looks=plan.looks())
     model = model or cost_mod.CostModel()
     names = list(strategies or STRATEGIES)
+    grid = [(int(n), float(ns)) for n, ns in (fixed_grid or [])]
+    reserved: list[int] = []
+    if holdout and not pool.truth:
+        if holdout < 2:
+            raise ValueError("--holdout needs at least 2 replicas to give the reference an error estimate.")
+        reserved = sorted(random.Random(seed).sample(range(pool.n_replicas), holdout))
+    usable = [i for i in range(pool.n_replicas) if i not in set(reserved)]
+    need = max([plan.replicas, plan.max_replicas] + [n for n, _ in grid])
+    if len(usable) < max([plan.replicas] + [n for n, _ in grid]):
+        raise ValueError(f"the pool has {len(usable)} replicas for the strategies, but a plan needs "
+                         f"{max([plan.replicas] + [n for n, _ in grid])}. Use a larger pool or a smaller --holdout.")
+    for n, ns in grid:
+        if ns > pool.ns_per_replica + 1e-9:
+            raise ValueError(f"the fixed plan {n}x{ns:g} is longer than the pool ({pool.ns_per_replica:g} ns).")
     out = Comparison(plan=asdict(plan), precision=asdict(precision), cost_model=asdict(model),
                      pool={"source": pool.source, "n_replicas": pool.n_replicas,
                            "ns_per_replica": round(pool.ns_per_replica, 4), "items": pool.labels,
-                           "ns_per_frame": pool.ns_per_frame})
-    rng = random.Random(seed)
+                           "ns_per_frame": pool.ns_per_frame, "holdout": reserved,
+                           "strategy_replicas": len(usable), "max_replicas_wanted": need,
+                           "fixed_grid": [grid_name(n, ns) for n, ns in grid]})
+    common_ref = None
+    if reserved:
+        common_ref, _, _ = reference(pool, [i for i in usable], plan, precision)
+    rng = random.Random(seed + 1)
+    all_names = names + [grid_name(n, ns) for n, ns in grid]
     for k in range(max(1, repeats)):
-        order = list(range(pool.n_replicas))
+        order = list(usable)
         if k:
             rng.shuffle(order)
         trials = {}
-        for name in names:
-            t = replay(pool, name, plan, precision, model, order)
-            ref, used_by_ref, independent = reference(pool, t.replicas, plan, precision)
+        for name in all_names:
+            if name.startswith("fixed_"):
+                n, ns = next((n, ns) for n, ns in grid if grid_name(n, ns) == name)
+                t = replay(pool, "fixed", replace(plan, fixed_replicas=n, fixed_ns=ns), precision, model, order)
+                t.strategy = name
+            else:
+                t = replay(pool, name, plan, precision, model, order)
+            if common_ref is not None:
+                ref, used_by_ref, independent = common_ref, reserved, True
+            else:
+                ref, used_by_ref, independent = reference(pool, t.replicas, plan, precision)
             check_against(t, ref, precision.epsilon, precision.alpha)
             t.check["reference_replicas"] = used_by_ref
             t.check["independent_reference"] = independent
             trials[name] = t
         out.repeats.append({"seed": k, "order": order,
                             "trials": {n: asdict(t) for n, t in trials.items()}})
-    out.summary = _summarize(out, names)
+    out.summary = _summarize(out, all_names)
+    if grid:
+        # Two questions, two verdicts. early_stop keeps the replica count and decides only how long;
+        # mdagent also decides how many replicas.
+        out.hypothesis = {a: hypothesis_a(out, a, target_rate, baselines, seed=seed)
+                          for a in ("early_stop", "mdagent") if a in all_names}
     return out
 
 
@@ -488,6 +587,114 @@ def _summarize(out: Comparison, names: list[str]) -> dict:
         if per_day > 0:
             s["gpu_hours_median"] = round(s["compute_ns_median"] / per_day * 24.0, 2)
     return summary
+
+
+def wilson(successes: int, n: int, z: float = 1.96) -> tuple[float, float]:
+    """95% interval of a rate counted over n repeats. With few repeats it is wide: that is the point."""
+    if n <= 0:
+        return float("nan"), float("nan")
+    p = successes / n
+    d = 1 + z * z / n
+    c = p + z * z / (2 * n)
+    h = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n))
+    return (c - h) / d, (c + h) / d
+
+
+def hypothesis_a(out: Comparison, agent: str = "mdagent", target_rate: float = 0.9,
+                 baselines: list[str] | None = None, bootstrap: int = 4000, seed: int = 0) -> dict:
+    """Hypothesis A: online allocation reaches the same accuracy as fixed-budget MD for less computing.
+
+    Written down before the data exist, so the verdict cannot be tuned afterwards:
+
+    1. "Accurate" means: in at least `target_rate` of the repeats, the answer is within the tolerance
+       of the reference for every item and state (the `accurate` column).
+    2. The baselines are the fixed plans people really use, taken from the literature (`baselines`,
+       for example fixed_1x100 for one 100 ns trajectory). They are written down before running,
+       just as the agent has to decide without knowing the answer. Without `baselines`, the largest
+       plan of the grid stands in for "a careful plan".
+    3. Supported against a baseline when the agent is accurate (1) and its saving, paired over the
+       repeats, has a 95% bootstrap interval above 0. If the baseline itself is not accurate, the
+       verdict says so: then the agent can be better by being right, not only by being cheaper.
+
+    The cheapest grid plan that is accurate is also reported. It is chosen with the answer in hand,
+    which no one can do before running, so no online rule can beat it in principle; agent cost divided
+    by its cost is the price of not knowing in advance how long is enough. It is a measure, not a test.
+    The repeats take different replicas from one pool, so they are not independent: the intervals show
+    how much the result depends on which replicas you get, not what a new campaign would give.
+    """
+    s = out.summary
+    if agent not in s:
+        raise ValueError(f"the comparison has no strategy {agent!r}.")
+    plans = [k for k in s if k.startswith("fixed_")] or [k for k in s if k == "fixed"]
+    unknown = [b for b in (baselines or []) if b not in s]
+    if unknown:
+        raise ValueError(f"baseline(s) {', '.join(unknown)} are not in the fixed grid ({', '.join(plans)}).")
+    n_rep = s[agent]["repeats"]
+    a_rate = s[agent]["accurate_rate"]
+    accurate = a_rate >= target_rate
+    result = {"agent": agent, "target_rate": target_rate, "repeats": n_rep,
+              "agent_accurate_rate": a_rate,
+              "agent_accurate_interval": [round(x, 3) for x in wilson(round(a_rate * n_rep), n_rep)],
+              "agent_compute_ns_median": s[agent]["compute_ns_median"],
+              "agent_ns_per_replica_median": s[agent]["ns_per_replica_median"],
+              "agent_replicas_median": s[agent]["replicas_median"],
+              "fixed": {k: {"accurate_rate": s[k]["accurate_rate"], "compute_ns_median": s[k]["compute_ns_median"],
+                            "reaches_target": s[k]["accurate_rate"] >= target_rate} for k in plans}}
+
+    def paired(base: str) -> dict:
+        a = [r["trials"][agent]["cost"]["compute_ns"] for r in out.repeats]
+        b = [r["trials"][base]["cost"]["compute_ns"] for r in out.repeats]
+        saving = [1 - x / y if y else 0.0 for x, y in zip(a, b)]
+        rng = random.Random(seed)
+        means = sorted(sum(rng.choice(saving) for _ in saving) / len(saving) for _ in range(bootstrap))
+        lo, hi = means[int(0.025 * bootstrap)], means[int(0.975 * bootstrap) - 1]
+        b_rate = s[base]["accurate_rate"]
+        if not accurate:
+            verdict = "not_accurate"
+        elif b_rate < target_rate:
+            verdict = "baseline_not_accurate"
+        elif lo > 0:
+            verdict = "supported"
+        else:
+            verdict = "not_cheaper"
+        return {"baseline": base, "baseline_compute_ns_median": s[base]["compute_ns_median"],
+                "baseline_accurate_rate": b_rate, "saving_mean": round(sum(saving) / len(saving), 3),
+                "saving_interval": [round(lo, 3), round(hi, 3)], "verdict": verdict}
+
+    names = list(baselines or ([max(plans, key=lambda k: s[k]["compute_ns_median"])] if plans else []))
+    result["baselines"] = {b: paired(b) for b in names}
+    qualifying = sorted((k for k in plans if s[k]["accurate_rate"] >= target_rate),
+                        key=lambda k: s[k]["compute_ns_median"])
+    if qualifying:
+        best = qualifying[0]
+        result["best_in_hindsight"] = {"plan": best, "compute_ns_median": s[best]["compute_ns_median"],
+                                       "price_of_not_knowing": round(s[agent]["compute_ns_median"]
+                                                                     / s[best]["compute_ns_median"], 3)}
+    # "How long?" for a replica count taken from convention: the shortest fixed length that is accurate.
+    how_long: dict = {}
+    for k in plans:
+        if not k.startswith("fixed_"):
+            continue
+        n, ns = k[len("fixed_"):].split("x")
+        row = how_long.setdefault(int(n), {"shortest_ns": None, "tried_ns": []})
+        row["tried_ns"].append(float(ns))
+        if s[k]["accurate_rate"] >= target_rate and (row["shortest_ns"] is None or float(ns) < row["shortest_ns"]):
+            row["shortest_ns"] = float(ns)
+    result["how_long"] = {n: {**row, "tried_ns": sorted(row["tried_ns"])} for n, row in sorted(how_long.items())}
+
+    verdicts = {b: v["verdict"] for b, v in result["baselines"].items()}
+    result["verdict"] = ("supported" if verdicts and all(v == "supported" for v in verdicts.values()) else
+                         "not_accurate" if not accurate else
+                         "mixed" if any(v == "supported" for v in verdicts.values()) else
+                         next(iter(verdicts.values()), "no_baseline"))
+    parts = []
+    for b, v in result["baselines"].items():
+        parts.append(f"against {b} ({v['baseline_accurate_rate']:.0%} accurate, "
+                     f"{v['baseline_compute_ns_median']:g} ns) the saving is {v['saving_mean']:.0%}, "
+                     f"95% interval {v['saving_interval']}: {v['verdict']}")
+    result["why"] = (f"the agent is accurate in {a_rate:.0%} of the repeats (target {target_rate:.0%}); "
+                     + "; ".join(parts) + ".")
+    return result
 
 
 def format_table(out: Comparison, zh: bool = False) -> str:
@@ -565,6 +772,37 @@ def write(out: Comparison, out_dir: Path, name: str = "budget") -> list[Path]:
         L.append(f"- {name_}: stop reasons {v['stop_reasons']}"
                  + (f", unresolved: {', '.join(v['unresolved'])}" if v["unresolved"] else "")
                  + f", largest difference from the reference {v['worst_difference_max']:.3f}.")
+    for agent_name, h in out.hypothesis.items():
+        what = ("how long only (replica count kept)" if agent_name == "early_stop"
+                else "how long and how many replicas")
+        L += ["", f"## Hypothesis A, agent {agent_name}: {what}", "",
+              f"**Verdict: {h['verdict']}.** {h['why']}", "",
+              f"- Target: the answer within {out.precision['epsilon']:g} of the reference in at least "
+              f"{h['target_rate']:.0%} of the {h['repeats']} repeats.",
+              f"- The agent: accurate in {h['agent_accurate_rate']:.0%} of the repeats "
+              f"(95% interval {h['agent_accurate_interval']}), median cost {h['agent_compute_ns_median']:g} compute ns, "
+              f"stopped at {h['agent_ns_per_replica_median']:g} ns per replica (median) with "
+              f"{h['agent_replicas_median']:g} replicas.",
+              "- Fixed plans: " + ", ".join(
+                  f"{k} {v['accurate_rate']:.0%} at {v['compute_ns_median']:g} ns"
+                  + ("" if v["reaches_target"] else " (below target)") for k, v in h["fixed"].items()) + "."]
+        for b, v in h["baselines"].items():
+            L.append(f"- Against the baseline {b} ({v['baseline_accurate_rate']:.0%} accurate, "
+                     f"{v['baseline_compute_ns_median']:g} ns): saving {v['saving_mean']:.0%}, 95% interval "
+                     f"{v['saving_interval']} → {v['verdict']}.")
+        best = h.get("best_in_hindsight")
+        if best:
+            L.append(f"- Best plan in hindsight: {best['plan']} ({best['compute_ns_median']:g} ns). Nobody can pick it "
+                     f"before running. The agent costs {best['price_of_not_knowing']:g} times as much: that is the price "
+                     "of not knowing in advance how long is enough.")
+        if h.get("how_long"):
+            L.append("- How long, for a replica count fixed by convention (shortest tried length that is accurate): "
+                     + "; ".join(f"{n} replicas: " + (f"{r['shortest_ns']:g} ns" if r["shortest_ns"] else
+                                                     f"none of {r['tried_ns']} ns")
+                                 for n, r in h["how_long"].items()) + ".")
+    if out.hypothesis:
+        L.append(f"\nReference: {len(out.pool.get('holdout', []))} pool replicas that no strategy used "
+                 "(or the known truth of a model), the same for every strategy.")
     L += ["", "## Limits", "",
           "- The replay is exact for strategies that only run longer or start another independent replica. "
           "A strategy that restarts from a chosen frame cannot be replayed: those frames do not exist in the pool.",
