@@ -74,6 +74,7 @@ class RunState:
     notes: dict = field(default_factory=dict)     # Which messages were posted already, so each is posted once.
     goal: dict = field(default_factory=dict)      # Goal fields. Empty in runs made before goals existed.
     distances: list = field(default_factory=list)  # Distance specs (observables.py) for quantity distance_states.
+    events: list = field(default_factory=list)     # Changes to see (observables.EventSpec) for quantity event_seen.
     adaptive: dict = field(default_factory=dict)  # AdaptiveSettings fields
     starts: dict = field(default_factory=dict)    # Round index -> [[replica, part, frame], ...]
 
@@ -139,12 +140,14 @@ class Goal:
       stop_early     stop before the budget once the goal is met, or once going on would not help
     """
 
-    quantity: str = "chi1_populations"   # or "distance_states" (observables.py)
+    quantity: str = "chi1_populations"   # or "distance_states", "event_seen" (observables.py)
     description: str = ""          # The user's own words.
     precision: float = 0.05
     permissions: list = field(default_factory=lambda: list(PERMISSIONS))
     max_replicas: int = 10          # add_replicas stops here (literature: 5 to 10 replicas).
     extend_factor: float = 2.0      # extend may run to this many times the first budget.
+    hold_ps: float = 100.0          # event_seen: the new state must last this long to count as seen.
+    seen_in: int = 1                # event_seen: in how many replicas the change must be seen.
 
     @classmethod
     def for_mode(cls, mode: str, **kw) -> "Goal":
@@ -322,6 +325,8 @@ def diagnose_run(run_dir: Path, state: RunState) -> list[ResidueReport]:
     both use this, so they always judge the same way."""
     if state.quantity == "distance_states":
         return _diagnose_distances(run_dir, state)
+    if state.quantity == "event_seen":
+        return _diagnose_events(run_dir, state)
     fixed = fixed_chi1_residues(run_dir / "protein.pdb")
     if state.sampling == "adaptive":
         # Segments start from different frames on purpose, so judge the pooled flips.
@@ -338,7 +343,7 @@ def diagnose_run(run_dir: Path, state: RunState) -> list[ResidueReport]:
 def _diagnose_and_decide(run_dir: Path, state: RunState):
     reports = diagnose_run(run_dir, state)
     decisions, next_ns = decide(reports, state.ns_done, state.loop, state.allowed("switch_method"),
-                                bias_available=state.quantity != "distance_states",
+                                bias_available=state.quantity == "chi1_populations",
                                 may_stop=state.allowed("stop_early"))
     next_ns = _apply_policy(run_dir, state, reports, decisions, next_ns)
     _post_plain_md_messages(run_dir, state, decisions, next_ns)
@@ -374,6 +379,53 @@ def _diagnose_distances(run_dir: Path, state: RunState) -> list[ResidueReport]:
     trajs = load_run(run_dir, state.target, len(state.rounds_ns), atoms=atoms)
     return diagnose_distances(trajs, specs, [(where[i], where[j]) for i, j in pairs], state.ns_done,
                               state.loop.min_flips_per_replica, state.the_goal().precision)
+
+
+def _diagnose_events(run_dir: Path, state: RunState) -> list[ResidueReport]:
+    """Changes to see: per-frame states of each item (chi1 or distance), then observables.diagnose_events."""
+    import mdtraj as md
+    import numpy as np
+
+    from .diagnose import assign_states
+    from .observables import diagnose_events, distance_atoms, parse_events, two_state
+
+    specs = parse_events(state.events)
+    n_parts = len(state.rounds_ns)
+    # Adaptive sampling: each segment starts from a chosen frame, so judge every segment on its own. Joined,
+    # a segment that starts in the target state would look like an entry into it.
+    join = state.sampling != "adaptive"
+    series: list = [None] * len(specs)
+    chi_specs = [(k, sp) for k, sp in enumerate(specs) if sp.distance is None]
+    if chi_specs:
+        keys = sorted({sp.residue for _, sp in chi_specs}, key=lambda r: (r[0] or "", r[1]))
+        top = md.load_topology(str(run_dir / "protein.pdb"))
+        full = [(r.chain.chain_id, r.resSeq) for r in top.residues
+                if any(r.resSeq == n and (c is None or r.chain.chain_id == c) for c, n in keys)]
+        trajs = load_run(run_dir, full, n_parts, join=join)
+        idx, _ = md.compute_chi1(trajs[0][:1])
+        where = {}
+        for j, quad in enumerate(idx):
+            res = trajs[0].topology.atom(int(quad[1])).residue
+            where[(res.chain.chain_id, res.resSeq)] = j
+        angles = [np.degrees(md.compute_chi1(t)[1]) for t in trajs]
+        for k, sp in chi_specs:
+            c, n = sp.residue
+            match = [key for key in where if key[1] == n and (c is None or key[0] == c)]
+            if not match:
+                raise ValueError(f"residue {sp.label.split('=')[0]} has no chi1 angle (Gly, Ala) or is not in the run.")
+            series[k] = [assign_states(a[:, where[match[0]]]) for a in angles]
+    dist_specs = [(k, sp) for k, sp in enumerate(specs) if sp.distance is not None]
+    if dist_specs:
+        pairs = distance_atoms(md.load_topology(str(run_dir / "protein.pdb")), [sp.distance for _, sp in dist_specs])
+        atoms = sorted({i for pair in pairs for i in pair})
+        pos = {a: j for j, a in enumerate(atoms)}
+        trajs = load_run(run_dir, state.target, n_parts, join=join, atoms=atoms)
+        for (k, sp), (i, j) in zip(dist_specs, pairs):
+            values = [md.compute_distances(t, [(pos[i], pos[j])])[:, 0] for t in trajs]
+            series[k] = [two_state(v, sp.distance.cutoff_nm, sp.distance.buffer_nm) for v in values]
+    goal = state.the_goal()
+    return diagnose_events(series, specs, state.ns_done, state.md.save_interval_ps / 1000.0,
+                           hold_ps=goal.hold_ps, seen_in=goal.seen_in)
 
 
 def _once(run_dir: Path, state: RunState, key: str, zh: str, en: str, kind: str) -> None:
@@ -442,7 +494,14 @@ def _post_plain_md_messages(run_dir: Path, state: RunState, decisions: list[Deci
               "not_reachable": "上限内达不到"}[reason]
     why_en = {"target_reached": "goal reached", "stalled": "sampling stalled", "budget_exhausted": "budget used up",
               "not_reachable": "not reachable within the limit"}[reason]
-    if not need:
+    if not need and state.quantity == "event_seen":
+        seen = "；".join(d.reason.replace("Sampled well: ", "") for d in decisions if d.action == "done")
+        _once(run_dir, state, "plain_done",
+              f"看到了你要的变化，普通 MD 提前停下（每条 {state.ns_done:g} ns，上限 {state.loop.max_ns:g} ns）。{seen}"
+              f"轨迹和结果在 {run_dir.resolve()}。",
+              f"The change you asked for was seen, so plain MD stopped early ({state.ns_done:g} ns per replica, "
+              f"limit {state.loop.max_ns:g} ns). {seen} Trajectories and results are in {run_dir.resolve()}.", "done")
+    elif not need:
         _once(run_dir, state, "plain_done",
               f"普通 MD 结束，原因是{why_zh}（每条 {state.ns_done:g} ns）：所有目标都在状态之间来回了足够多次，"
               f"比例的误差也不超过 {state.the_goal().precision:g}。结果在 {(run_dir / 'status.json').resolve()}。",

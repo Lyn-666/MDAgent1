@@ -30,6 +30,12 @@ from .target import Target, parse_residue_spec, resolve_target
 def _target_from_args(args) -> Target:
     if args.around_ligand:
         return Target(ligand=args.around_ligand, cutoff_nm=args.cutoff_angstrom / 10.0)
+    if not args.residues and getattr(args, "observe", None):
+        # A run that waits for a change: the target is the residues named in the changes.
+        from .observables import parse_events
+
+        res = {(c, n) for s in parse_events(args.observe) for c, n in s.residues()}
+        return Target(residues=tuple(sorted(res, key=lambda k: (k[0] or "", k[1]))))
     if not args.residues and getattr(args, "distances", None):
         # A distance run without a target region: the target is the residues of the distance atoms.
         from .observables import parse_distances
@@ -48,6 +54,17 @@ def _check_distances(args, structure: str | Path) -> list:
     specs = parse_distances(args.distances)
     distance_atoms(md.load_topology(str(structure)), specs)
     return specs
+
+
+def _check_events(events, structure: str | Path) -> None:
+    """Find every atom of the distance changes in the structure. Raises ValueError with a clear message."""
+    import mdtraj as md
+
+    from .observables import distance_atoms
+
+    dists = [e.distance for e in events if e.distance is not None]
+    if dists:
+        distance_atoms(md.load_topology(str(structure)), dists)
 
 
 def _print_summary(decisions, enhanced_labels, run_dir) -> None:
@@ -119,7 +136,8 @@ def _goal_from_args(args):
 
     goal = Goal.for_mode(args.mode, description=args.goal, precision=args.precision,
                          quantity=QUANTITIES[getattr(args, "quantity", "chi1")],
-                         max_replicas=getattr(args, "max_replicas", 10), extend_factor=getattr(args, "extend_factor", 2.0))
+                         max_replicas=getattr(args, "max_replicas", 10), extend_factor=getattr(args, "extend_factor", 2.0),
+                         hold_ps=getattr(args, "hold_ps", 100.0), seen_in=getattr(args, "seen_in", 1))
     if args.allow is not None:
         allowed = [a.strip() for a in args.allow.split(",") if a.strip() and a.strip() != "none"]
         unknown = [a for a in allowed if a not in PERMISSIONS]
@@ -220,6 +238,24 @@ def cmd_run(args) -> int:
         print(f"error: {out} already has a run. Use 'resume --run {out}' to continue it.",
               file=sys.stderr)
         return 2
+    if args.observe:
+        if args.quantity not in ("chi1", "event") or args.distances:
+            print("error: --observe is a goal of its own; do not combine it with --quantity distance or --distances. "
+                  "Write a distance change in --observe, for example \"A:88:OH-A:111:CG1@0.6=far\".", file=sys.stderr)
+            return 2
+        args.quantity = "event"
+        print("Note: --observe given, so the run stops once the change is seen.")
+        from .observables import parse_events
+        try:
+            events = parse_events(args.observe)
+            if args.pdb:
+                _check_events(events, args.pdb)
+        except ValueError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 2
+    elif args.quantity == "event":
+        print("error: --quantity event needs --observe, for example \"A:111=t\".", file=sys.stderr)
+        return 2
     if args.distances and args.quantity == "chi1":
         args.quantity = "distance"
         print("Note: --distances given, so the quantity is distance.")
@@ -305,6 +341,9 @@ def cmd_run(args) -> int:
     if check is not None:
         built, setup = _build_from_pdb(args, keys, out, check.remove_residues, check.cap_ends)
     specs = _check_distances(args, out / "protein.pdb") if args.quantity == "distance" else []
+    from .observables import parse_events
+    if args.quantity == "event":
+        _check_events(parse_events(args.observe), out / "protein.pdb")
 
     loop = LoopSettings(
         first_ns=min(args.first_ns, args.max_ns),
@@ -325,6 +364,7 @@ def cmd_run(args) -> int:
         mode=args.mode,
         goal=asdict(_goal_from_args(args)),
         distances=[s.label for s in specs],
+        events=[e.label for e in parse_events(args.observe)] if args.quantity == "event" else [],
         adaptive={"policy": args.adaptive_policy, "n_clusters": args.adaptive_clusters,
                   "full_interval_ps": args.full_save_ps} if args.sampling == "adaptive" else {},
         enhanced={"enabled": not args.no_enhanced_sampling,
@@ -337,10 +377,15 @@ def cmd_run(args) -> int:
         print(f"To start MD: python -m mdagent resume --run {out}")
         return 0
     goal = state.the_goal()
-    what = (f"near/far populations of {', '.join(state.distances)}" if state.distances
-            else "chi1 populations of the target side chains")
-    print(f"Goal: {what}, standard error at most {goal.precision:g}"
-          + (f" ({goal.description})" if goal.description else "") + ".")
+    if state.events:
+        print(f"Goal: see the change {', '.join(state.events)} (the new state lasts at least {goal.hold_ps:g} ps, in "
+              f"{goal.seen_in} replica(s)); stop once it is seen"
+              + (f" ({goal.description})" if goal.description else "") + ".")
+    else:
+        what = (f"near/far populations of {', '.join(state.distances)}" if state.distances
+                else "chi1 populations of the target side chains")
+        print(f"Goal: {what}, standard error at most {goal.precision:g}"
+              + (f" ({goal.description})" if goal.description else "") + ".")
     print("The agent may by itself: " + (", ".join(goal.permissions) or "nothing (it only suggests)") + ".")
     print(f"Plan: {args.replicas} replicas. Round 1 is {loop.first_ns:g} ns per replica. "
           f"Later rounds add {loop.extend_ns:g} ns. Budget: {loop.max_ns:g} ns per replica.")
@@ -464,7 +509,15 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Build and run even if the structure check finds problems.")
     r.add_argument("--equil-ps", type=float, default=600.0,
                    help="Equilibration length: restrained heating, restrained NPT, restraint release, free NPT.")
-    r.add_argument("--quantity", default="chi1", choices=["chi1", "distance"],
+    r.add_argument("--observe", default=None,
+                   help="Stop once this change is seen, instead of measuring populations. item=state, separated by "
+                        "';': \"A:111=t\" (side chain 111 enters t; states g+, t, g-) or "
+                        "\"A:88:OH-A:111:CG1@0.6=far\" (the distance becomes far; near or far).")
+    r.add_argument("--hold-ps", type=float, default=100.0,
+                   help="--observe: the new state must last this long (ps) to count as seen (default 100).")
+    r.add_argument("--seen-in", type=int, default=1,
+                   help="--observe: in how many replicas the change must be seen (default 1).")
+    r.add_argument("--quantity", default="chi1", choices=["chi1", "distance", "event"],
                    help="What you want to know. chi1 (default): the rotamer states of the target side chains. "
                         "distance: how often atom distances are near or far (give them with --distances).")
     r.add_argument("--distances", default=None,
