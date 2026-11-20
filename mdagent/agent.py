@@ -333,7 +333,8 @@ def diagnose_run(run_dir: Path, state: RunState) -> list[ResidueReport]:
         return diagnose_trajectories(
             load_run(run_dir, state.target, len(state.rounds_ns), join=False), state.target,
             state.ns_done, min_flips_per_replica=state.loop.min_flips_per_replica,
-            pooled_total_ns=state.ns_done * state.n_replicas, n_replicas=state.n_replicas, fixed=fixed)
+            pooled_total_ns=state.ns_done * state.n_replicas, n_replicas=state.n_replicas, fixed=fixed,
+            precision=state.the_goal().precision)
     return diagnose_trajectories(
         load_run(run_dir, state.target, len(state.rounds_ns)), state.target, state.ns_done,
         min_flips_per_replica=state.loop.min_flips_per_replica, fixed=fixed,

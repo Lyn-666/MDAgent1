@@ -299,6 +299,23 @@ def diagnose_trajectories(
             judge(rep, min_flips_per_replica, precision)
         else:
             judge_pooled(rep, min_flips_per_replica * (n_replicas or len(trajs)))
+            # Segments start from chosen frames, so time fractions are biased: populations come from a
+            # Markov state model of the transitions (msm.py).
+            from .msm import populations_with_errors as msm_populations
+
+            rep.populations, rep.standard_error, left_out = msm_populations(states, STATE_NAMES)
+            rep.populations = {k: round(v, 3) for k, v in rep.populations.items()}
+            rep.standard_error = {k: round(v, 3) for k, v in rep.standard_error.items()}
+            rep.extra = {**(rep.extra or {}), "populations_from": "Markov state model of the segments",
+                         "states_not_connected": left_out}
+            if rep.verdict == "ok" and left_out:
+                rep.verdict = "rare_flips"
+                rep.reason = (f"{rep.reason} But {', '.join(left_out)} was entered or left only one way, so its "
+                              "population cannot be estimated yet.")
+            elif rep.verdict == "ok" and precision is not None and max(rep.standard_error.values()) > precision:
+                rep.verdict = "imprecise"
+                rep.reason = (f"{rep.reason} The largest population error is {max(rep.standard_error.values()):.3f}, "
+                              f"more than the requested {precision:g}.")
         reports.append(rep)
 
     names = {(r.chain.chain_id, r.resSeq): r.name for r in top.residues}

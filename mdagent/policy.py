@@ -49,9 +49,14 @@ def projected_ns(report, ns: float, precision: float | None, min_flips: int) -> 
     if report is None or ns <= 0 or not report.transitions or sum(report.transitions) == 0:
         return None
     need = ns
-    mean_changes = sum(report.transitions) / len(report.transitions)
-    if min(report.transitions) < min_flips:
-        need = max(need, ns * min_flips / mean_changes)
+    if report.total_ns_override is not None:
+        # Adaptive sampling: transitions are counted per segment and judged in total (diagnose.judge_pooled).
+        if report.verdict == "rare_flips" and sum(report.transitions) > 0:
+            need = max(need, ns * 2)   # Needs more segments; how many cannot be told from a pooled count.
+    else:
+        mean_changes = sum(report.transitions) / len(report.transitions)
+        if min(report.transitions) < min_flips:
+            need = max(need, ns * min_flips / mean_changes)
     if precision and report.standard_error:
         err = max(report.standard_error.values())
         if err > precision:
