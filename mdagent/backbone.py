@@ -211,19 +211,25 @@ def worst_rate_error(stats: dict, populations: dict, min_population: float = 0.0
 # ---------------------------------------------------------------- free-energy landscape
 
 def landscape(phi_list: list, psi_list: list, temperature_k: float, bins_deg: float = 15.0,
-              n_effective: float | None = None) -> dict:
+              n_effective: float | None = None, weights: list | None = None) -> dict:
     """F(phi, psi) in kcal/mol with errors, from one phi and one psi series per replica.
 
     n_effective: independent samples for the error floor (basin transitions + replicas); None: no floor.
+    weights: per-frame weights per replica (reweighted biased sampling); replicas then count by their Kish
+    effective sample size.
     """
+    from .uncertainty import effective_samples
+
     nb = int(round(360.0 / bins_deg))
     edges = np.linspace(-180.0, 180.0, nb + 1)
-    hists, weights = [], []
-    for phi, psi in zip(phi_list, psi_list):
-        h, _, _ = np.histogram2d(_norm(phi), _norm(psi), bins=[edges, edges])
-        weights.append(h.sum())
-        hists.append(h / max(h.sum(), 1))
-    w = np.array(weights) / max(sum(weights), 1)
+    hists, sizes = [], []
+    for k, (phi, psi) in enumerate(zip(phi_list, psi_list)):
+        w = None if weights is None else np.asarray(weights[k], dtype=float)
+        h, _, _ = np.histogram2d(_norm(phi), _norm(psi), bins=[edges, edges], weights=w)
+        sizes.append(h.sum() if w is None else effective_samples(w))
+        hists.append(h / h.sum() if h.sum() > 0 else h)
+    weights_ = sizes
+    w = np.array(weights_) / max(sum(weights_), 1e-300)
     p = np.tensordot(w, np.array(hists), axes=1)
     n = len(hists)
     se = (np.std(np.array(hists), axis=0, ddof=1) / math.sqrt(n)) if n > 1 else np.full(p.shape, np.nan)
@@ -338,36 +344,45 @@ def save_details(folder, details: dict, basins_used: str) -> list:
     written = []
     for label, d in details.items():
         stem = label.replace(":", "_")
-        fes = d["landscape"]
         (folder / f"{stem}.json").write_text(json.dumps(
             {"residue": label, "basins": basins_used, "transitions": d["transitions"], "basin_minima_kcal": d["minima"],
              "landscape_file": f"{stem}_fes.npz"}, indent=1))
-        np.savez(folder / f"{stem}_fes.npz", edges_deg=fes["edges_deg"], free_energy_kcal=fes["free_energy_kcal"],
-                 error_kcal=fes["error_kcal"], probability=fes["probability"])
-        e = fes["edges_deg"]
-        c = (e[:-1] + e[1:]) / 2
-        rows = ["phi_deg,psi_deg,free_energy_kcal,error_kcal,probability"]
-        for i, x in enumerate(c):
-            for j, y in enumerate(c):
-                f, err, p = fes["free_energy_kcal"][i, j], fes["error_kcal"][i, j], fes["probability"][i, j]
-                rows.append(f"{x:g},{y:g},{'' if np.isnan(f) else f'{f:.3f}'},{'' if np.isnan(err) else f'{err:.3f}'},"
-                            f"{p:.6g}")
-        (folder / f"{stem}_fes.csv").write_text("\n".join(rows) + "\n")
-        written += [folder / f"{stem}.json", folder / f"{stem}_fes.npz", folder / f"{stem}_fes.csv"]
-        try:   # A picture only if matplotlib happens to be installed.
-            import matplotlib
-            matplotlib.use("Agg")
-            import matplotlib.pyplot as plt
+        written += [folder / f"{stem}.json"] + save_landscape(folder, f"{stem}_fes", d["landscape"], label)
+    return written
 
-            fig, ax = plt.subplots(figsize=(4.5, 4))
-            im = ax.imshow(fes["free_energy_kcal"].T, origin="lower", extent=[-180, 180, -180, 180], vmax=6)
-            ax.set_xlabel("phi (deg)")
-            ax.set_ylabel("psi (deg)")
-            ax.set_title(f"{label}: F (kcal/mol)")
-            fig.colorbar(im)
-            fig.savefig(folder / f"{stem}_fes.png", dpi=150, bbox_inches="tight")
-            plt.close(fig)
-            written.append(folder / f"{stem}_fes.png")
-        except Exception:
-            pass
+
+def save_landscape(folder, stem: str, fes: dict, label: str) -> list:
+    """<stem>.npz, <stem>.csv (phi, psi, F, error, probability per bin) and <stem>.png if matplotlib is there."""
+    from pathlib import Path
+
+    folder = Path(folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    np.savez(folder / f"{stem}.npz", edges_deg=fes["edges_deg"], free_energy_kcal=fes["free_energy_kcal"],
+             error_kcal=fes["error_kcal"], probability=fes["probability"])
+    e = fes["edges_deg"]
+    c = (e[:-1] + e[1:]) / 2
+    rows = ["phi_deg,psi_deg,free_energy_kcal,error_kcal,probability"]
+    for i, x in enumerate(c):
+        for j, y in enumerate(c):
+            f, err, p = fes["free_energy_kcal"][i, j], fes["error_kcal"][i, j], fes["probability"][i, j]
+            rows.append(f"{x:g},{y:g},{'' if np.isnan(f) else f'{f:.3f}'},{'' if np.isnan(err) else f'{err:.3f}'},"
+                        f"{p:.6g}")
+    (folder / f"{stem}.csv").write_text("\n".join(rows) + "\n")
+    written = [folder / f"{stem}.npz", folder / f"{stem}.csv"]
+    try:   # A picture only if matplotlib happens to be installed.
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        fig, ax = plt.subplots(figsize=(4.5, 4))
+        im = ax.imshow(fes["free_energy_kcal"].T, origin="lower", extent=[-180, 180, -180, 180], vmax=6)
+        ax.set_xlabel("phi (deg)")
+        ax.set_ylabel("psi (deg)")
+        ax.set_title(f"{label}: F (kcal/mol)")
+        fig.colorbar(im)
+        fig.savefig(folder / f"{stem}.png", dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        written.append(folder / f"{stem}.png")
+    except Exception:
+        pass
     return written

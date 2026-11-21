@@ -15,7 +15,8 @@ Registered here (kind, regime -> estimator):
 - event, unbiased and seeded  -> FirstEntryEvent      (entered a state and stayed; not valid on biased data,
                                                        where a bias can force any state)
 - transition_rates, unbiased  -> TransitionRates      (rates between states; Poisson errors of the counts)
-- free_energy_surface, unbiased -> FreeEnergySurface  (2D landscape of two angles; errors from replica spread)
+- free_energy_surface, unbiased and biased -> FreeEnergySurface  (2D landscape of two angles; errors from the
+                                                       replica spread; biased data with their reweighting weights)
 
 Default criteria (min events per replica, effective samples) are estimator options that a Requirement can
 override in its params. They are not global thresholds of the agent.
@@ -41,6 +42,7 @@ class AngleData:
     psi: list
     states: StateData
     dt_ns: float
+    weights: list | None = None   # Biased regime: one weight array per replica.
 
 
 @dataclass
@@ -199,15 +201,19 @@ class FreeEnergySurface:
     """A 2D free-energy landscape of two angles. Criterion: the largest error of F in the bins with F <= `cutoff_kcal`
     is at most `max_error_kcal`. Needs at least two replicas (the error comes from their spread)."""
 
-    name, kind, regimes = "landscape.replica_spread", "free_energy_surface", ("unbiased",)
+    name, kind, regimes = "landscape.replica_spread", "free_energy_surface", ("unbiased", "biased")
 
     def assess(self, estimand: str, data: AngleData, params: dict) -> Assessment:
         from .backbone import landscape, worst_landscape_error
 
         max_err = params["max_error_kcal"]
         per = [count_changes(s) for s in data.states.states]
+        if data.weights is not None:     # Reweighted biased data: the floor uses the effective samples.
+            n_eff = sum(effective_samples(w) for w in data.weights)
+        else:
+            n_eff = sum(per) + len(per)
         fes = landscape(data.phi, data.psi, params.get("temperature_k", 300.0), params.get("bins_deg", 15.0),
-                        n_effective=sum(per) + len(per))
+                        n_effective=n_eff, weights=data.weights)
         worst = worst_landscape_error(fes, params.get("cutoff_kcal", 2.0))
         finite = worst if np.isfinite(worst) else None
         populated = int(np.sum(np.isfinite(fes["free_energy_kcal"]) & (fes["free_energy_kcal"] <= params.get("cutoff_kcal", 2.0))))
@@ -217,9 +223,10 @@ class FreeEnergySurface:
                           {"worst_error_kcal": None if finite is None else round(worst, 4)}, checks,
                           {"events_total": sum(per), "events_per_replica": per,
                            "uncertainty_ratio": None if finite is None else round(worst / max_err, 4),
-                           "uncertainty_scaling": -0.5, "projectable": True, "regime": "unbiased"},
+                           "uncertainty_scaling": -0.5, "projectable": True,
+                           "regime": "biased" if data.weights is not None else "unbiased"},
                           note="Errors from the spread between replicas, never below an error floor from the number "
-                               "of state changes.")
+                               "of state changes (or of effective samples for reweighted data).")
 
 
 def default_registry() -> EstimatorRegistry:

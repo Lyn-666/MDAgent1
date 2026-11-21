@@ -1,13 +1,21 @@
-"""Enhanced sampling of side-chain chi1 angles with well-tempered metadynamics.
+"""Enhanced sampling of dihedral angles with well-tempered metadynamics.
 
-Plain MD cannot push a side chain over a high barrier. Metadynamics adds a
-bias potential along chi1 that grows wherever the side chain has been, so the
-side chain is pushed over the barriers. In the well-tempered form, the bias
-grows more slowly where it is already large.
+Plain MD cannot push a side chain or a backbone over a high barrier. Metadynamics adds a
+bias potential along a dihedral that grows wherever the system has been, so it is pushed
+over the barriers. In the well-tempered form, the bias grows more slowly where it is
+already large.
 
-All residues are biased in one simulation. Each chi1 has its own
-one-dimensional bias. All biases live in one OpenMM CustomCVForce, so the
-cost is small.
+What is biased (`kind`):
+- "chi1": the side-chain chi1 of each residue (one dihedral per residue);
+- "backbone": phi and psi of each residue (two dihedrals per residue, each with its own
+  one-dimensional bias, in the order phi1, psi1, phi2, psi2, ...). A sum of one-dimensional
+  biases is a separable bias; reweighting stays exact (the same replay as for several
+  coupled side chains, tested in tests/test_reweight.py). Biased sampling changes the
+  kinetics, so transition rates and dwell times must still come from plain MD.
+
+All dihedrals are biased in one simulation, each with its own one-dimensional bias. All
+biases live in one OpenMM CustomCVForce, so the cost is small. The saved samples
+(replica_<r>_chi.npy; the name is kept for older runs) have one column per biased dihedral.
 
 Each replica starts from the final state of a plain MD replica. It runs in
 chunks. After each chunk it saves the protein trajectory of that chunk, the
@@ -75,6 +83,22 @@ def chi1_quads(topology: openmm.app.Topology, residues: list[ResidueKey]) -> dic
     if missing:
         raise ValueError(f"No chi1 angle for residues {missing}.")
     return out
+
+
+def dihedral_quads(topology: openmm.app.Topology, residues: list[ResidueKey], kind: str = "chi1") -> list[tuple]:
+    """Atom quadruples of the biased dihedrals, in the order of the saved columns (see the module notes)."""
+    if kind == "chi1":
+        quads = chi1_quads(topology, residues)
+        return [quads[k] for k in residues]
+    if kind == "backbone":
+        from .backbone import backbone_quads
+
+        found, skipped = backbone_quads(md.Topology.from_openmm(topology), residues)
+        if skipped:
+            raise ValueError(f"No phi/psi for residues {[k for k, _ in skipped]}.")
+        by_key = {v[0]: v for v in found.values()}
+        return [q for k in residues for q in (by_key[tuple(k)][2], by_key[tuple(k)][3])]
+    raise ValueError(f"unknown kind of enhanced sampling {kind!r}")
 
 
 def deposit(bias: np.ndarray, grid: np.ndarray, x: np.ndarray, s: MetadSettings, kt: float) -> None:
@@ -164,11 +188,14 @@ def run_replica(
     seed: int,
     log: Callable[[str], None] = print,
     until_ns: float | None = None,
+    kind: str = "chi1",
 ) -> None:
-    """Run one replica up to `until_ns` (default: its full length), one chunk at a time."""
+    """Run one replica up to `until_ns` (default: its full length), one chunk at a time.
+
+    kind: "chi1" (side chains) or "backbone" (phi and psi of each residue)."""
     p = _paths(run_dir, replica)
     p["dir"].mkdir(exist_ok=True)
-    quads = chi1_quads(files.topology, residues)
+    quads = dihedral_quads(files.topology, residues, kind)
     progress = json.loads(p["progress"].read_text()) if p["progress"].exists() else {"ns_done": 0.0}
     end = min(s.length_ns, until_ns if until_ns is not None else s.length_ns)
     if progress["ns_done"] >= end - 1e-9:
@@ -181,7 +208,7 @@ def run_replica(
     resuming = progress["ns_done"] > 0
     bias = np.load(p["bias"]) if resuming else None
     chi = list(np.load(p["chi"])) if resuming else []
-    biases = ChiBiases([quads[k] for k in residues], s, md_settings.temperature_k, bias)
+    biases = ChiBiases(quads, s, md_settings.temperature_k, bias)
     sim = make_simulation(files, md_settings, seed, extra_forces=[biases.force])
     sim.loadState(str(p["state"] if resuming else start_state))
     biases.push(sim.context)

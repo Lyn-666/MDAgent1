@@ -183,7 +183,8 @@ def plain_md_next(run_dir, state, reports, decisions, next_ns: float) -> float:
             state.notes["projected_ns"] = {k: round(v, 1) for k, v in needs.items()}
             if state.allowed("stop_early"):
                 for d in going_on:
-                    d.action = "enhanced_sampling" if state.quantity == "chi1_populations" else "stalled"
+                    from .agent import BIASABLE
+                    d.action = "enhanced_sampling" if state.quantity in BIASABLE else "stalled"
                     d.cause = "not_reachable"
                 record(run_dir, state, Action("plain_md", "stop", True,
                                               f"No gain within the limit: needs {items_en} (limit "

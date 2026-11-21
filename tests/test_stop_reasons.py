@@ -42,13 +42,13 @@ def fake_run(tmp_path, monkeypatch):
     flagged = [Decision("VAL111", "enhanced_sampling", "no flip", ("A", 111), cause="stalled")]
     monkeypatch.setattr(agent, "run_loop", lambda *a, **k: flagged)
 
-    def fake_replica(files, run_dir, r, start, residues, s, md, seed, log, until_ns):
+    def fake_replica(files, run_dir, r, start, residues, s, md, seed, log, until_ns, kind="chi1"):
         (run_dir / "enhanced" / f"replica_{r}.json").write_text(json.dumps({"ns_done": until_ns}))
     monkeypatch.setattr(enhanced, "run_replica", fake_replica)
 
     def run(state, se_at, transitions=(40, 40)):
         monkeypatch.setattr(reweight, "analyze",
-                            lambda run_dir, labels, n, s, t, rule: _result(enhanced.ns_done(run_dir, 0),
+                            lambda run_dir, labels, n, s, t, rule, *rest: _result(enhanced.ns_done(run_dir, 0),
                                                                            se_at(enhanced.ns_done(run_dir, 0)),
                                                                            transitions))
         run_all(tmp_path, state, files=object(), log=lambda line: None)

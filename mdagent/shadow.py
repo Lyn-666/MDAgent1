@@ -107,7 +107,7 @@ def task_from_state(run_dir: Path, state, kinds: dict) -> TaskSpec:
         }
         reqs = [Requirement(e, kind, dict(per_kind[kind])) for e, kind in kinds.items()]
     perms = set(goal.permissions) | ({"switch_method"} if es.get("requested") else set())
-    metad = state.quantity == "chi1_populations" and es.get("enabled", True)
+    metad = state.quantity in ("chi1_populations", "backbone_basins") and es.get("enabled", True)
     planned = state.notes.get("first_max_ns", state.loop.max_ns) * n0
     if metad and "switch_method" in perms:
         s = MetadSettings.from_dict(es.get("settings", {}))
