@@ -199,3 +199,42 @@ def test_the_chat_form_turns_a_backbone_request_into_a_run():
 
 def test_kt_constant_is_in_kcal():
     assert KB_KCAL * 300 == pytest.approx(0.596, abs=1e-3)
+
+
+def test_finished_parts_are_read_once_and_cached(tmp_path, monkeypatch):
+    import mdtraj as md
+
+    from mdagent.agent import Goal
+    from mdagent.tools_openmm import backbone_angles
+
+    run_dir, state, _ = make_run(tmp_path, goal=Goal.for_mode("auto", quantity="backbone_basins"))
+    state.target = [("A", n) for n in range(109, 114)]
+    first, _ = backbone_angles(run_dir, state, 3)
+    assert not (run_dir / "backbone" / "cache").exists()          # No part is finished: nothing cached.
+    for r in range(2):
+        for k in range(3):
+            (run_dir / f"replica_{r}_part{k:03d}.state.xml").write_text("done")
+    backbone_angles(run_dir, state, 3)
+    assert len(list((run_dir / "backbone" / "cache").glob("*.npz"))) == 6
+    reads = []
+    real = md.load_dcd
+    monkeypatch.setattr(md, "load_dcd", lambda *a, **k: reads.append(a) or real(*a, **k))
+    again, _ = backbone_angles(run_dir, state, 3)
+    assert reads == []                                             # All from the cache.
+    for label in first:
+        for x, y in zip(first[label][2], again[label][2]):
+            assert np.allclose(x, y)
+
+
+def test_patience_is_decided_from_the_budget_unless_given():
+    from mdagent.agent import LoopSettings, no_change_hopeless
+    from mdagent.diagnose import ResidueReport
+
+    r = ResidueReport("A", 1, "ALA", transitions=[0, 0, 0], occupancies=[], dominant=[])
+    loop = LoopSettings(max_ns=1000.0)                   # Needs 4 changes in each of 3 replicas = 12.
+    assert not no_change_hopeless(r, 100.0, loop)        # 3 x 900 / 100 = 27 changes still possible.
+    assert no_change_hopeless(r, 250.0, loop)            # 3 x 750 / 250 = 9 < 12.
+    assert no_change_hopeless(r, 1000.0, loop)           # Budget used up.
+    assert not no_change_hopeless(r, 4.0, LoopSettings(max_ns=20.0))
+    assert no_change_hopeless(r, 5.0, LoopSettings(max_ns=20.0))
+    assert no_change_hopeless(r, 10.0, LoopSettings(max_ns=1000.0, no_flip_patience_ns=10.0))   # Given by the user.
