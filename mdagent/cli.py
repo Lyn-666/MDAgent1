@@ -384,7 +384,7 @@ def cmd_run(args) -> int:
 
     loop = LoopSettings(
         first_ns=min(args.first_ns, args.max_ns),
-        extend_ns=args.extend_ns,
+        extend_ns=args.extend_ns if args.extend_ns is not None else max(5.0, round(args.max_ns / 20.0)),
         max_ns=args.max_ns,
         no_flip_patience_ns=args.no_flip_patience_ns,
     )
@@ -430,6 +430,9 @@ def cmd_run(args) -> int:
     print("The agent may by itself: " + (", ".join(goal.permissions) or "nothing (it only suggests)") + ".")
     print(f"Plan: {args.replicas} replicas. Round 1 is {loop.first_ns:g} ns per replica. "
           f"Later rounds add {loop.extend_ns:g} ns. Budget: {loop.max_ns:g} ns per replica.")
+    print("An item that never changes state is given up for plain MD "
+          + (f"after {loop.no_flip_patience_ns:g} ns per replica." if loop.no_flip_patience_ns is not None else
+             "when, even at the highest rate the data allow, the rest of the budget would not show enough changes."))
     if args.sampling == "adaptive":
         print(f"Adaptive sampling: from round 2, AdaptivePy ({args.adaptive_policy}) chooses where each "
               f"replica starts. Full-system frames are saved every {args.full_save_ps:g} ps.")
@@ -585,10 +588,14 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--cutoff-angstrom", type=float, default=5.0)
     r.add_argument("--replicas", type=int, default=3)
     r.add_argument("--first-ns", type=float, default=1.0, help="Length of round 1 per replica (ns).")
-    r.add_argument("--extend-ns", type=float, default=5.0, help="Length of each later round per replica (ns).")
+    r.add_argument("--extend-ns", type=float, default=None,
+                   help="Length of each later round per replica (ns). Default: 5, or 1/20 of --max-ns for long "
+                        "budgets, so that there are about 20 decision points.")
     r.add_argument("--max-ns", type=float, default=20.0, help="Budget: total length per replica (ns).")
-    r.add_argument("--no-flip-patience-ns", type=float, default=10.0,
-                   help="Send a residue to enhanced sampling if it has not flipped after this (ns).")
+    r.add_argument("--no-flip-patience-ns", type=float, default=None,
+                   help="Give up on plain MD for an item that has not changed state after this (ns per replica). "
+                        "Default: decide from the budget: stop waiting when, even at the highest rate the data "
+                        "allow (95 %%), the rest of the budget would not show enough changes.")
     r.add_argument("--save-ps", type=float, default=5.0, help="Save a frame every this many ps.")
     r.add_argument("--forcefield", default="charmm36m", choices=["charmm36m", "amber14", "amber19"],
                    help="charmm36m: CHARMM36m + CHARMM TIP3P (default). amber14: ff14SB + TIP3P. "

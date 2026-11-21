@@ -97,24 +97,61 @@ def event_series(run_dir: Path, state, n_parts: int, join: bool = True, n_traj: 
 
 def backbone_angles(run_dir: Path, state, n_parts: int, n_traj: int | None = None, join: bool = True):
     """phi and psi (degrees) of the target residues: ({label: (key, resname, [phi per traj], [psi per traj])},
-    [(key, reason) left out]). Only the atoms of the dihedrals are loaded."""
+    [(key, reason) left out]).
+
+    Only the dihedral atoms are read, and each finished part (its .state.xml exists, so it will not change again)
+    is read once: its angles are kept in backbone/cache/ and reused in later rounds. Long runs then cost one new
+    part per round, not the whole trajectory again.
+    """
+    import json
+
     import mdtraj as md
 
     from .backbone import backbone_quads
-    from .diagnose import load_run
+    from .diagnose import _quiet_c_output
+    from .simulate import part_path
 
     run_dir = Path(run_dir)
-    quads, skipped = backbone_quads(md.load_topology(str(run_dir / "protein.pdb")), state.target)
+    top = md.load_topology(str(run_dir / "protein.pdb"))
+    quads, skipped = backbone_quads(top, state.target)
     if not quads:
         return {}, skipped
+    labels = list(quads)
     atoms = sorted({i for _, _, a, b in quads.values() for i in (*a, *b)})
     pos = {a: k for k, a in enumerate(atoms)}
-    trajs = load_run(run_dir, state.target, n_parts, join=join, atoms=atoms)[:n_traj]
-    out = {}
-    for label, (key, resname, phi_q, psi_q) in quads.items():
-        phis = [np.degrees(md.compute_dihedrals(t, [[pos[i] for i in phi_q]])[:, 0]) for t in trajs]
-        psis = [np.degrees(md.compute_dihedrals(t, [[pos[i] for i in psi_q]])[:, 0]) for t in trajs]
-        out[label] = (key, resname, phis, psis)
+    phi_q = [[pos[i] for i in quads[k][2]] for k in labels]
+    psi_q = [[pos[i] for i in quads[k][3]] for k in labels]
+    key = json.dumps([labels, [quads[k][2:] for k in labels]])
+    cache = run_dir / "backbone" / "cache"
+    replicas = sorted({int(p.name.split("_")[1]) for p in run_dir.glob("replica_*_part000.dcd")})
+    if not replicas:
+        raise FileNotFoundError(f"No trajectories in {run_dir}.")
+
+    def part(i: int, k: int) -> tuple[np.ndarray, np.ndarray]:
+        stored = cache / f"replica_{i}_part{k:03d}.npz"
+        if stored.exists():
+            d = np.load(stored)
+            if str(d["key"]) == key:
+                return d["phi"], d["psi"]
+        with _quiet_c_output():
+            t = md.load_dcd(str(part_path(run_dir, i, k, ".dcd")), top=top, atom_indices=atoms)
+        phi = np.degrees(md.compute_dihedrals(t, phi_q))   # frames x residues
+        psi = np.degrees(md.compute_dihedrals(t, psi_q))
+        if part_path(run_dir, i, k, ".state.xml").exists():   # Finished: it will not change again.
+            cache.mkdir(parents=True, exist_ok=True)
+            np.savez(stored, phi=phi, psi=psi, key=np.array(key))
+        return phi, psi
+
+    trajs = []
+    for i in replicas:
+        pieces = [part(i, k) for k in range(n_parts)]
+        if join:
+            trajs.append((np.concatenate([p[0] for p in pieces]), np.concatenate([p[1] for p in pieces])))
+        else:
+            trajs.extend(pieces)
+    trajs = trajs[:n_traj]
+    out = {label: (quads[label][0], quads[label][1], [t[0][:, j] for t in trajs], [t[1][:, j] for t in trajs])
+           for j, label in enumerate(labels)}
     return out, skipped
 
 

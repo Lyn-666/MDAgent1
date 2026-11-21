@@ -81,11 +81,12 @@ class RunPlan(BaseModel):
         None, description="The most replicas the agent may run when it may add replicas (allow add_replicas). Set it "
                           "to the user's limit when the user lets MDAgent choose the number of replicas.")
     first_ns: Optional[float] = Field(None, description="Length of round 1 per replica in ns. Default 1.")
-    extend_ns: Optional[float] = Field(None, description="Length of each later round in ns. Default 5.")
+    extend_ns: Optional[float] = Field(None, description="Length of each later round in ns. Default: 5, or 1/20 of "
+                                                         "max_ns for long budgets.")
     max_ns: Optional[float] = Field(None, description="Total plain MD budget per replica in ns. Default 20.")
     no_flip_patience_ns: Optional[float] = Field(
-        None, description="Send a side chain to enhanced sampling if it has not flipped after this many ns. "
-                          "Default 10.")
+        None, description="Only if the user names such a time: give up on plain MD for an item that has not changed "
+                          "state after this many ns per replica. Default: decided from the budget.")
     sampling: Optional[Literal["continue", "adaptive"]] = Field(
         None, description="continue (default): each replica continues its own trajectory. "
                           "adaptive: AdaptivePy chooses where each replica restarts.")

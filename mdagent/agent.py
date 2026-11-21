@@ -48,7 +48,9 @@ class LoopSettings:
     first_ns: float = 1.0           # Length of round 1, per replica.
     extend_ns: float = 5.0          # Length of each later round, per replica.
     max_ns: float = 20.0            # Budget: total length per replica.
-    no_flip_patience_ns: float = 10.0  # Give up on plain MD for a residue with no flip after this.
+    # Give up on plain MD for an item with no state change after this many ns per replica. None (the default for
+    # new runs): judge from the budget instead (no_change_hopeless), so no system-specific time is needed.
+    no_flip_patience_ns: float | None = None
     min_flips_per_replica: int = 4
 
 
@@ -168,6 +170,24 @@ class Decision:
                            # "budget_exhausted" (the plain MD budget is used up first).
 
 
+def no_change_hopeless(report: ResidueReport, ns_done: float, loop: LoopSettings) -> bool:
+    """Has an item with no state change at all been watched long enough to give up on plain MD for it?
+
+    With a patience time (older runs, or --no-flip-patience-ns): after that time. Otherwise from the data and the
+    budget: with zero events in exposure T, the 95 % upper bound of the rate is 3 / T ("rule of three"). If even at
+    that rate the rest of the budget would give fewer state changes than the goal needs (min_flips_per_replica in
+    every replica), more plain MD of the same kind is not expected to reach it. The same rule is used by the
+    general decision core (core/reasoner.py).
+    """
+    if loop.no_flip_patience_ns is not None:
+        return ns_done >= loop.no_flip_patience_ns
+    if ns_done <= 0:
+        return False
+    n = max(len(report.transitions), 1)
+    expected_at_most = 3.0 * max(loop.max_ns - ns_done, 0.0) / ns_done   # Same for any number of replicas.
+    return expected_at_most < loop.min_flips_per_replica * n
+
+
 def decide(reports: list[ResidueReport], ns_done: float, loop: LoopSettings,
            may_switch: bool = True, bias_available: bool = True,
            may_stop: bool = False) -> tuple[list[Decision], float]:
@@ -187,13 +207,13 @@ def decide(reports: list[ResidueReport], ns_done: float, loop: LoopSettings,
             decisions.append(Decision(r.label, "skip", r.reason))
         elif r.verdict == "ok":
             decisions.append(Decision(r.label, "done", f"Sampled well: {r.reason}"))
-        elif sum(r.transitions) == 0 and ns_done >= loop.no_flip_patience_ns \
+        elif sum(r.transitions) == 0 and no_change_hopeless(r, ns_done, loop) \
                 and not (may_switch and bias_available) and not may_stop and room > 0:
             decisions.append(Decision(
                 r.label, "extend",
                 f"No flip in {ns_done:g} ns per replica. Plain MD is unlikely to see one, but the user chose "
                 "plain MD, so it goes on until the budget.", stalled=True))
-        elif sum(r.transitions) == 0 and ns_done >= loop.no_flip_patience_ns:
+        elif sum(r.transitions) == 0 and no_change_hopeless(r, ns_done, loop):
             decisions.append(Decision(
                 r.label, need,
                 f"No flip in {ns_done:g} ns per replica. Plain MD is unlikely to see one.", cause="stalled"))

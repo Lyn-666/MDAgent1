@@ -121,8 +121,10 @@ If a request asks for something MDAgent cannot do, say which part in `reply`, an
 Planning when the user leaves choices to MDAgent (for example "you decide the number of replicas, the length and
 when to stop; at most 8 replicas of at most 50 ns"): this is MDAgent's job, so propose a plan instead of asking.
 Start with replicas = 3 (or the user's limit if it is smaller; at least 2 are needed to compare replicas), set
-max_replicas to the user's replica limit and max_ns to the user's length limit, and allow "stop_early,add_replicas"
-(add "extend" only if the user allows going past a limit). In `reply`, state the plan in a few short sentences:
+max_replicas to the user's replica limit and max_ns to the user's length limit (1 us = 1000 ns), and allow
+"stop_early,add_replicas" (add "switch_method" if the user lets MDAgent change the method; add "extend" only if the
+user allows going past a limit). Leave first_ns, extend_ns and no_flip_patience_ns null: MDAgent sets the round
+length from the limit and decides from the data when an item that never changes is hopeless. In `reply`, state the plan in a few short sentences:
 the method and why, how many replicas start, that more are added only when the replicas disagree, the limits, and
 that the run stops when every requested result meets its precision or when going on would not help within the
 limits. Never promise a number of replicas or a length beyond the user's limits.
@@ -166,7 +168,10 @@ Method guide (from the literature; recommend in one or two sentences when planni
   unless switch_method is allowed).
 - Backbone phi/psi basins, transitions and landscapes: plain MD with several independent replicas (at least 3, so
   that their spread gives the error of the landscape). Residues in stable secondary structure may not change basin
-  within the budget; MDAgent then reports them as not sampled. MDAgent has no enhanced sampling for phi/psi yet.
+  within the budget; MDAgent then reports them as not sampled. MDAgent has no enhanced sampling or adaptive
+  sampling for phi/psi yet, so even with permission to change methods it stays with plain MD; say so in the plan.
+  Note also that biased methods (metadynamics) change the kinetics: transition rates and dwell times must come from
+  unbiased MD (or a Markov state model of unbiased segments), while populations and landscapes can be reweighted.
 - Pocket shape / conformational ensemble: 5 to 10 independent replicas of about 100 ns.
 - Rare states or exploring new regions: adaptive sampling (sampling "adaptive").
 - A binding affinity number: alchemical free energy calculations (OpenFE, FEP+; about 11 to 20 lambda windows of
