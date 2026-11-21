@@ -93,6 +93,10 @@ def write(run_dir: Path) -> list[Path]:
                   f"whether these changes are seen: {', '.join(state.get('events', []))}") if events else
                 T("原子间距离处在“近”和“远”两种状态的比例", "populations of the near and far states of atom distances")
                 if quantity == "distance_states" else
+                T("目标残基骨架 φ/ψ 的 Ramachandran basin 比例、basin 之间的转变统计和 φ/ψ 自由能面",
+                  "Ramachandran basin populations of the target residues' backbone phi/psi, transition statistics "
+                  "between basins, and the phi/psi free-energy landscape")
+                if quantity == "backbone_basins" else
                 T("目标区域侧链的 chi1 构象（g+、t、g-）的比例", "populations of the chi1 states (g+, t, g-) of the target side chains"))
         L.append(T(f"- 目标量：{what}。", f"- Quantity: {what}."))
         if goal.get("description"):
@@ -106,6 +110,17 @@ def write(run_dir: Path) -> list[Path]:
         else:
             L.append(T(f"- 要求的精度：每个比例的标准误差不超过 {precision:g}。",
                        f"- Requested precision: standard error of every population at most {precision:g}."))
+        if quantity == "backbone_basins":
+            L.append(T(f"- 转变速率：主要转变的相对误差不超过 {goal.get('rate_rel_error', 0.25):g}；自由能面：低自由能区域里"
+                       f"每格误差不超过 {goal.get('fes_error_kcal', 0.5):g} kcal/mol。",
+                       f"- Transition rates: relative error of the leading transitions at most "
+                       f"{goal.get('rate_rel_error', 0.25):g}; landscape: error of every low free-energy bin at most "
+                       f"{goal.get('fes_error_kcal', 0.5):g} kcal/mol."))
+            from .backbone import BackboneSettings, DEFAULT_BASINS_TEXT
+            bb = BackboneSettings.from_dict(state.get("backbone"))
+            L.append(T(f"- basin 的定义（φ 从,到,ψ 从,到，单位度）：{bb.basins or DEFAULT_BASINS_TEXT}；核心区边缘留 "
+                       f"{bb.margin_deg:g}°。", f"- Basins (phi from,to,psi from,to in degrees): "
+                       f"{bb.basins or DEFAULT_BASINS_TEXT}; core margin {bb.margin_deg:g} deg."))
         perms = goal.get("permissions")
         L.append(T(f"- agent 可以自己做的事：{', '.join(perms) if perms else '无（只提建议）'}。",
                    f"- The agent could by itself: {', '.join(perms) if perms else 'nothing (suggestions only)'}."))
@@ -172,6 +187,35 @@ def write(run_dir: Path) -> list[Path]:
             L.append(f"| {r['label']} | {_fmt(r['populations'], r['standard_error'])} | {src} | "
                      f"{T('是', 'yes') if r['met'] else T('否', 'no')} | {r['verdict']} |")
         L.append("")
+
+        bb_files = sorted((run_dir / "backbone").glob("*.json")) if quantity == "backbone_basins" else []
+        if bb_files:
+            L += [T("## basin 之间的转变和自由能面", "## Transitions between basins and the free-energy landscape"), "",
+                  T("速率的误差按转变次数的泊松误差算（假设在 basin 核心之间的跳跃是马尔可夫的；有相关时会偏小）。"
+                    "平均停留时间 = 在这个 basin 的总时间 / 离开它的次数。没见过的转变，速率记为 0，误差约为一次事件。",
+                    "Rate errors are Poisson errors of the counts (they assume Markovian jumps between basin cores and "
+                    "are too small if visits are correlated). Mean dwell time = time in the basin / number of exits. A "
+                    "transition never "
+                    "seen has rate 0 and an error of about one event."), ""]
+            for path in bb_files:
+                d = _load(path)
+                tr = d.get("transitions", {})
+                L.append(f"**{d.get('residue', path.stem)}**")
+                for a, row in tr.get("rates_per_ns", {}).items():
+                    seen = [f"{a}→{b} {r:.3g} ± {e:.2g} /ns" for b, (r, e) in row.items() if r > 0]
+                    if seen:
+                        L.append("- " + "; ".join(seen))
+                dw = [f"{a} {v[0]:.3g} ± {v[1]:.2g} ns ({v[2]})" for a, v in tr.get("mean_dwell_ns", {}).items() if v]
+                if dw:
+                    L.append(T("- 平均停留时间（离开次数）：", "- Mean dwell time (number of exits): ") + "; ".join(dw))
+                mins = [f"{a} {v[0]:g}" + (f" ± {v[1]:g}" if v[1] is not None else "") + f" kcal/mol ({v[2]:g}°, {v[3]:g}°)"
+                        for a, v in (d.get("basin_minima_kcal") or {}).items() if v]
+                if mins:
+                    L.append(T("- 各 basin 里自由能最低处（φ, ψ）：", "- Lowest free energy in each basin (phi, psi): ")
+                             + "; ".join(mins))
+                L.append(T(f"- 自由能面：{path.with_name(path.stem + '_fes.csv').resolve()}（也有 .npz）",
+                           f"- Landscape: {path.with_name(path.stem + '_fes.csv').resolve()} (also .npz)"))
+                L.append("")
 
         L += [T("## 为什么停下", "## Why it stopped"), ""]
         for phase, o in outcomes:

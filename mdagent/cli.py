@@ -137,7 +137,9 @@ def _goal_from_args(args):
     goal = Goal.for_mode(args.mode, description=args.goal, precision=args.precision,
                          quantity=QUANTITIES[getattr(args, "quantity", "chi1")],
                          max_replicas=getattr(args, "max_replicas", 10), extend_factor=getattr(args, "extend_factor", 2.0),
-                         hold_ps=getattr(args, "hold_ps", 100.0), seen_in=getattr(args, "seen_in", 1))
+                         hold_ps=getattr(args, "hold_ps", 100.0), seen_in=getattr(args, "seen_in", 1),
+                         rate_rel_error=getattr(args, "rate_rel_error", 0.25),
+                         fes_error_kcal=getattr(args, "fes_error_kcal", 0.5))
     if args.allow is not None:
         allowed = [a.strip() for a in args.allow.split(",") if a.strip() and a.strip() != "none"]
         unknown = [a for a in allowed if a not in PERMISSIONS]
@@ -259,7 +261,20 @@ def cmd_run(args) -> int:
     if args.distances and args.quantity == "chi1":
         args.quantity = "distance"
         print("Note: --distances given, so the quantity is distance.")
-    if args.quantity == "chi1" and not (args.residues or args.around_ligand):
+    if args.quantity == "backbone":
+        from .backbone import parse_basins
+        try:
+            parse_basins(args.basins)
+        except ValueError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 2
+        if args.sampling == "adaptive":
+            print("error: adaptive sampling does not support --quantity backbone yet.", file=sys.stderr)
+            return 2
+        if not (0 < args.rate_rel_error < 1) or args.fes_error_kcal <= 0:
+            print("error: --rate-rel-error must be between 0 and 1, and --fes-error-kcal above 0.", file=sys.stderr)
+            return 2
+    if args.quantity in ("chi1", "backbone") and not (args.residues or args.around_ligand):
         print("error: give the target with --residues or --around-ligand.", file=sys.stderr)
         return 2
     if args.quantity == "distance":
@@ -364,6 +379,7 @@ def cmd_run(args) -> int:
         mode=args.mode,
         goal=asdict(_goal_from_args(args)),
         distances=[s.label for s in specs],
+        backbone={"basins": args.basins, "margin_deg": args.basin_margin} if args.quantity == "backbone" else {},
         events=[e.label for e in parse_events(args.observe)] if args.quantity == "event" else [],
         adaptive={"policy": args.adaptive_policy, "n_clusters": args.adaptive_clusters,
                   "full_interval_ps": args.full_save_ps} if args.sampling == "adaptive" else {},
@@ -383,6 +399,9 @@ def cmd_run(args) -> int:
               + (f" ({goal.description})" if goal.description else "") + ".")
     else:
         what = (f"near/far populations of {', '.join(state.distances)}" if state.distances
+                else "Ramachandran basin populations, transition statistics and phi/psi free-energy landscape of "
+                     f"the target residues (rate error at most {goal.rate_rel_error:g}, landscape error at most "
+                     f"{goal.fes_error_kcal:g} kcal/mol)" if state.quantity == "backbone_basins"
                 else "chi1 populations of the target side chains")
         print(f"Goal: {what}, standard error at most {goal.precision:g}"
               + (f" ({goal.description})" if goal.description else "") + ".")
@@ -392,7 +411,10 @@ def cmd_run(args) -> int:
     if args.sampling == "adaptive":
         print(f"Adaptive sampling: from round 2, AdaptivePy ({args.adaptive_policy}) chooses where each "
               f"replica starts. Full-system frames are saved every {args.full_save_ps:g} ps.")
-    if state.enhanced["enabled"]:
+    if state.quantity == "backbone_basins":
+        print("Enhanced sampling of backbone phi/psi is not available yet: if plain MD cannot sample a basin, the "
+              "agent says so and suggests what to do.")
+    elif state.enhanced["enabled"] and state.quantity == "chi1_populations":
         print(f"After plain MD, residues that still need it get enhanced sampling: "
               f"{args.enhanced_replicas} replicas x {args.enhanced_ns:g} ns, at most "
               f"{args.enhanced_max_residues} residues (the slowest ones).")
@@ -517,9 +539,21 @@ def build_parser() -> argparse.ArgumentParser:
                    help="--observe: the new state must last this long (ps) to count as seen (default 100).")
     r.add_argument("--seen-in", type=int, default=1,
                    help="--observe: in how many replicas the change must be seen (default 1).")
-    r.add_argument("--quantity", default="chi1", choices=["chi1", "distance", "event"],
+    r.add_argument("--quantity", default="chi1", choices=["chi1", "distance", "event", "backbone"],
                    help="What you want to know. chi1 (default): the rotamer states of the target side chains. "
-                        "distance: how often atom distances are near or far (give them with --distances).")
+                        "distance: how often atom distances are near or far (give them with --distances). "
+                        "backbone: Ramachandran basin populations, transition statistics and the phi/psi "
+                        "free-energy landscape of the target residues (give them with --residues).")
+    r.add_argument("--basins", default="",
+                   help="--quantity backbone: your own basins, 'name:phi_from,phi_to,psi_from,psi_to; ...' in degrees "
+                        "(a name may repeat). Default: alpha_R, beta (with PPII), alpha_L, other.")
+    r.add_argument("--basin-margin", type=float, default=10.0,
+                   help="--quantity backbone: a frame is in a basin only this many degrees inside it (default 10).")
+    r.add_argument("--rate-rel-error", type=float, default=0.25,
+                   help="--quantity backbone: largest relative error of the leading transition rates (default 0.25).")
+    r.add_argument("--fes-error-kcal", type=float, default=0.5,
+                   help="--quantity backbone: largest error of the phi/psi free energy where it is at most 2 "
+                        "kcal/mol (default 0.5).")
     r.add_argument("--distances", default=None,
                    help="For --quantity distance: atom pairs and cutoffs (nm), separated by ';', for example "
                         "\"A:88:OH-A:111:CG1@0.6;A:99:CA-A:133:CA@1.2\". The chain may be left out.")

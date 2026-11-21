@@ -27,7 +27,7 @@ import numpy as np
 
 from .estimators import StateData
 
-POP, EVENT = "state_populations", "event"
+POP, EVENT, RATES, LANDSCAPE = "state_populations", "event", "transition_rates", "free_energy_surface"
 
 
 # ---------------------------------------------------------------- featurizers
@@ -95,9 +95,43 @@ def event_series(run_dir: Path, state, n_parts: int, join: bool = True, n_traj: 
     return series
 
 
+def backbone_angles(run_dir: Path, state, n_parts: int, n_traj: int | None = None, join: bool = True):
+    """phi and psi (degrees) of the target residues: ({label: (key, resname, [phi per traj], [psi per traj])},
+    [(key, reason) left out]). Only the atoms of the dihedrals are loaded."""
+    import mdtraj as md
+
+    from .backbone import backbone_quads
+    from .diagnose import load_run
+
+    run_dir = Path(run_dir)
+    quads, skipped = backbone_quads(md.load_topology(str(run_dir / "protein.pdb")), state.target)
+    if not quads:
+        return {}, skipped
+    atoms = sorted({i for _, _, a, b in quads.values() for i in (*a, *b)})
+    pos = {a: k for k, a in enumerate(atoms)}
+    trajs = load_run(run_dir, state.target, n_parts, join=join, atoms=atoms)[:n_traj]
+    out = {}
+    for label, (key, resname, phi_q, psi_q) in quads.items():
+        phis = [np.degrees(md.compute_dihedrals(t, [[pos[i] for i in phi_q]])[:, 0]) for t in trajs]
+        psis = [np.degrees(md.compute_dihedrals(t, [[pos[i] for i in psi_q]])[:, 0]) for t in trajs]
+        out[label] = (key, resname, phis, psis)
+    return out, skipped
+
+
+def backbone_estimands(label: str) -> dict[str, str]:
+    """The three estimands of one residue's backbone, with their kinds."""
+    return {f"{label} basins": POP, f"{label} transitions": RATES, f"{label} landscape": LANDSCAPE}
+
+
 def estimand_kinds(run_dir: Path, state) -> dict[str, str]:
     """{estimand: kind} of a run, from its goal. Cheap: reads only protein.pdb."""
     q = state.quantity
+    if q == "backbone_basins":
+        import mdtraj as md
+
+        from .backbone import backbone_quads
+        quads, _ = backbone_quads(md.load_topology(str(Path(run_dir) / "protein.pdb")), state.target)
+        return {e: k for label in quads for e, k in backbone_estimands(label).items()}
     if q == "event_seen":
         from .observables import parse_events
         return {sp.label: EVENT for sp in parse_events(state.events)}
@@ -120,6 +154,23 @@ def featurize(run_dir: Path, state, n_parts: int, n_replicas: int, join: bool = 
     run_dir = Path(run_dir)
     n_traj = n_replicas if join else n_replicas * n_parts
     q = state.quantity
+    if q == "backbone_basins":
+        from .backbone import BackboneSettings, assign_basins, parse_basins
+
+        from .estimators import AngleData
+
+        settings = BackboneSettings.from_dict(state.backbone)
+        basins = parse_basins(settings.basins)
+        names = [b.name for b in basins]
+        angles, _ = backbone_angles(run_dir, state, n_parts, n_traj, join)
+        out = {}
+        for label, (_, _, phis, psis) in angles.items():
+            states = StateData([assign_basins(f, s, basins, settings.margin_deg) for f, s in zip(phis, psis)], names)
+            e = backbone_estimands(label)
+            k_pop, k_rates, k_land = list(e)
+            out[k_pop] = out[k_rates] = states
+            out[k_land] = AngleData(phis, psis, states, state.md.save_interval_ps / 1000.0)
+        return out
     if q == "event_seen":
         specs = parse_events(state.events)
         series = event_series(run_dir, state, n_parts, join, n_traj)

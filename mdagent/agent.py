@@ -75,6 +75,7 @@ class RunState:
     goal: dict = field(default_factory=dict)      # Goal fields. Empty in runs made before goals existed.
     distances: list = field(default_factory=list)  # Distance specs (observables.py) for quantity distance_states.
     events: list = field(default_factory=list)     # Changes to see (observables.EventSpec) for quantity event_seen.
+    backbone: dict = field(default_factory=dict)  # backbone.BackboneSettings fields (quantity backbone_basins)
     adaptive: dict = field(default_factory=dict)  # AdaptiveSettings fields
     starts: dict = field(default_factory=dict)    # Round index -> [[replica, part, frame], ...]
 
@@ -140,7 +141,7 @@ class Goal:
       stop_early     stop before the budget once the goal is met, or once going on would not help
     """
 
-    quantity: str = "chi1_populations"   # or "distance_states", "event_seen" (observables.py)
+    quantity: str = "chi1_populations"   # or "distance_states", "event_seen", "backbone_basins" (observables.py)
     description: str = ""          # The user's own words.
     precision: float = 0.05
     permissions: list = field(default_factory=lambda: list(PERMISSIONS))
@@ -148,6 +149,8 @@ class Goal:
     extend_factor: float = 2.0      # extend may run to this many times the first budget.
     hold_ps: float = 100.0          # event_seen: the new state must last this long to count as seen.
     seen_in: int = 1                # event_seen: in how many replicas the change must be seen.
+    rate_rel_error: float = 0.25    # backbone_basins: largest relative error of the leading transition rates.
+    fes_error_kcal: float = 0.5     # backbone_basins: largest error of the phi/psi free energy where it is low.
 
     @classmethod
     def for_mode(cls, mode: str, **kw) -> "Goal":
@@ -180,7 +183,7 @@ def decide(reports: list[ResidueReport], ns_done: float, loop: LoopSettings,
     room = round(loop.max_ns - ns_done, 6)
     decisions = []
     for r in reports:
-        if r.verdict in ("no_chi1", "fixed_chi1"):
+        if r.verdict in ("no_chi1", "fixed_chi1", "no_phi_psi"):
             decisions.append(Decision(r.label, "skip", r.reason))
         elif r.verdict == "ok":
             decisions.append(Decision(r.label, "done", f"Sampled well: {r.reason}"))
@@ -327,6 +330,8 @@ def diagnose_run(run_dir: Path, state: RunState) -> list[ResidueReport]:
         return _diagnose_distances(run_dir, state)
     if state.quantity == "event_seen":
         return _diagnose_events(run_dir, state)
+    if state.quantity == "backbone_basins":
+        return _diagnose_backbone(run_dir, state)
     fixed = fixed_chi1_residues(run_dir / "protein.pdb")
     if state.sampling == "adaptive":
         # Segments start from different frames on purpose, so judge the pooled flips.
@@ -383,6 +388,26 @@ def _diagnose_distances(run_dir: Path, state: RunState) -> list[ResidueReport]:
     trajs = load_run(run_dir, state.target, len(state.rounds_ns), atoms=atoms)
     return diagnose_distances(trajs, specs, [(where[i], where[j]) for i, j in pairs], state.ns_done,
                               state.loop.min_flips_per_replica, state.the_goal().precision)
+
+
+def _diagnose_backbone(run_dir: Path, state: RunState) -> list[ResidueReport]:
+    """Backbone phi/psi basins of the target residues; also writes the transition statistics and the free-energy
+    landscape of each residue to backbone/ (backbone.py)."""
+    from .backbone import BackboneSettings, basins_text, diagnose_backbone, parse_basins, save_details
+    from .tools_openmm import backbone_angles
+
+    settings = BackboneSettings.from_dict(state.backbone)
+    angles, skipped = backbone_angles(run_dir, state, len(state.rounds_ns))
+    goal = state.the_goal()
+    reports, details = diagnose_backbone(angles, settings, state.ns_done, state.md.save_interval_ps / 1000.0,
+                                         state.md.temperature_k, state.loop.min_flips_per_replica, goal.precision,
+                                         goal.rate_rel_error, goal.fes_error_kcal)
+    save_details(run_dir / "backbone", details, basins_text(parse_basins(settings.basins)))
+    for key, why in skipped:
+        reports.append(ResidueReport(chain=key[0], resseq=key[1], resname="", transitions=[], occupancies=[],
+                                     dominant=[], quantity="backbone", verdict="no_phi_psi",
+                                     reason=f"No phi/psi basins: {why}."))
+    return reports
 
 
 def _diagnose_events(run_dir: Path, state: RunState) -> list[ResidueReport]:

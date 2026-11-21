@@ -113,6 +113,19 @@ A distance between atoms (a pocket opening or closing, a contact forming, a gate
 with `distances`. MDAgent has enhanced sampling only for side chains; for distances it runs plain MD and says
 when that is not enough.
 "Stop when you see X" (a side chain reaching a state, a pocket opening) -> target_kind "change" with `observe`.
+Backbone phi/psi of residues (Ramachandran basin populations, transition statistics between basins, a phi/psi
+free-energy landscape) -> target_kind "backbone" with `residues`. MDAgent gives all three for every residue; set
+rate_rel_error or fes_error_kcal only if the user states such a precision.
+If a request asks for something MDAgent cannot do, say which part in `reply`, and plan only what it can do.
+
+Planning when the user leaves choices to MDAgent (for example "you decide the number of replicas, the length and
+when to stop; at most 8 replicas of at most 50 ns"): this is MDAgent's job, so propose a plan instead of asking.
+Start with replicas = 3 (or the user's limit if it is smaller; at least 2 are needed to compare replicas), set
+max_replicas to the user's replica limit and max_ns to the user's length limit, and allow "stop_early,add_replicas"
+(add "extend" only if the user allows going past a limit). In `reply`, state the plan in a few short sentences:
+the method and why, how many replicas start, that more are added only when the replicas disagree, the limits, and
+that the run stops when every requested result meets its precision or when going on would not help within the
+limits. Never promise a number of replicas or a length beyond the user's limits.
 The user's time and replica numbers are limits. The agent stops early when the goal is reached or going on
 would not help, and only suggests a longer run, more replicas or another method; the user confirms. To add
 replicas to a stopped run, set resume_replicas (the new total).
@@ -149,8 +162,11 @@ sentences.
 
 Method guide (from the literature; recommend in one or two sentences when planning, and say why):
 - Side-chain rotamers in a pocket (default MDAgent task): plain MD with at least 3, better 5 replicas; buried side
-  chains that do not flip in tens of ns need enhanced sampling (mode auto switches by itself). T4L L99A Val111 flips
-  about 0.04 times per ns in plain MD.
+  chains can stay in one rotamer for tens of ns and then need enhanced sampling (suggested; the user confirms,
+  unless switch_method is allowed).
+- Backbone phi/psi basins, transitions and landscapes: plain MD with several independent replicas (at least 3, so
+  that their spread gives the error of the landscape). Residues in stable secondary structure may not change basin
+  within the budget; MDAgent then reports them as not sampled. MDAgent has no enhanced sampling for phi/psi yet.
 - Pocket shape / conformational ensemble: 5 to 10 independent replicas of about 100 ns.
 - Rare states or exploring new regions: adaptive sampling (sampling "adaptive").
 - A binding affinity number: alchemical free energy calculations (OpenFE, FEP+; about 11 to 20 lambda windows of
@@ -569,6 +585,17 @@ class Assistant:
                 from .observables import distance_atoms, parse_distances
 
                 distance_atoms(md.load_topology(str(self.root / a.pdb)), parse_distances(a.plan.distances))
+            if a.plan.target_kind == "backbone" and a.pdb and a.plan.residues:
+                import mdtraj as md
+
+                from .backbone import backbone_quads
+                from .target import Target, parse_residue_spec, resolve_target
+
+                keys = resolve_target(Target(residues=parse_residue_spec(a.plan.residues)), self.root / a.pdb)
+                found, skipped = backbone_quads(md.load_topology(str(self.root / a.pdb)), keys)
+                if not found:
+                    raise ValueError("; ".join(f"{c}:{n}: {why}" for (c, n), why in skipped)
+                                     or "no residue with phi and psi")
             if a.plan.target_kind == "change" and a.pdb:
                 from .cli import _check_events
                 from .observables import parse_events

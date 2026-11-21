@@ -190,7 +190,8 @@ class ResidueReport:
 def judge(report: ResidueReport, min_flips_per_replica: int = 4, precision: float | None = None) -> None:
     total = sum(report.transitions)
     n = len(report.transitions)
-    q = "chi1" if report.quantity == "chi1" else "The distance"
+    q = {"chi1": "chi1", "distance": "The distance", "backbone": "The backbone (phi/psi) basin"}.get(
+        report.quantity, "The state")
     if len(set(report.dominant)) > 1 and (total == 0 or report.replicas_differ is not False):
         # Checked first: replicas can end up in different states with zero flips
         # during production, if they separated during equilibration. With flips, a different
