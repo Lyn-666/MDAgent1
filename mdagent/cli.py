@@ -21,10 +21,32 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import importlib.util
+import os
 import sys
 from pathlib import Path
 
-from .target import Target, parse_residue_spec, resolve_target
+
+def _missing_packages() -> list[str]:
+    """Required packages that this Python cannot import (usually: the mdagent conda environment is not active)."""
+    return [name for name in ("mdtraj", "openmm", "pdbfixer", "pydantic") if importlib.util.find_spec(name) is None]
+
+
+if _missing_packages():   # Say how to fix it, instead of a long traceback.
+    env = os.environ.get("CONDA_DEFAULT_ENV")
+    print(f"MDAgent cannot start: this Python ({sys.executable}) does not have {', '.join(_missing_packages())}.\n"
+          + (f"The active conda environment is '{env}'. " if env else "")
+          + "Activate the MDAgent environment first, then try again:\n"
+            "    conda activate mdagent\n"
+            "If that environment does not exist yet, install it as in README \"快速上手\" "
+            "(conda env create -f environment.yml).\n"
+            f"MDAgent 无法启动：这个 Python 里没有 {', '.join(_missing_packages())}。"
+          + (f"当前的 conda 环境是“{env}”。" if env else "")
+          + "请先运行 conda activate mdagent 再试；如果还没有这个环境，按 README“快速上手”安装。",
+          file=sys.stderr)
+    sys.exit(2)
+
+from .target import Target, parse_residue_spec, resolve_target  # noqa: E402
 
 
 def _target_from_args(args) -> Target:
