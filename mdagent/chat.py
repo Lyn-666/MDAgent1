@@ -110,8 +110,8 @@ Choose one action for the user's last message:
 
 What to measure: side-chain conformations (rotamers) of a region -> target_kind "ligand" or "residues".
 A distance between atoms (a pocket opening or closing, a contact forming, a gate) -> target_kind "distance"
-with `distances`. MDAgent has enhanced sampling only for side chains; for distances it runs plain MD and says
-when that is not enough.
+with `distances`. MDAgent has enhanced sampling for side chains (chi1) and backbone phi/psi; for distances it
+runs plain MD and says when that is not enough.
 "Stop when you see X" (a side chain reaching a state, a pocket opening) -> target_kind "change" with `observe`.
 Backbone phi/psi of residues (Ramachandran basin populations, transition statistics between basins, a phi/psi
 free-energy landscape) -> target_kind "backbone" with `residues`. MDAgent gives all three for every residue; set
@@ -168,10 +168,10 @@ Method guide (from the literature; recommend in one or two sentences when planni
   unless switch_method is allowed).
 - Backbone phi/psi basins, transitions and landscapes: plain MD with several independent replicas (at least 3, so
   that their spread gives the error of the landscape). Residues in stable secondary structure may not change basin
-  within the budget; MDAgent then reports them as not sampled. MDAgent has no enhanced sampling or adaptive
-  sampling for phi/psi yet, so even with permission to change methods it stays with plain MD; say so in the plan.
-  Note also that biased methods (metadynamics) change the kinetics: transition rates and dwell times must come from
-  unbiased MD (or a Markov state model of unbiased segments), while populations and landscapes can be reweighted.
+  within the budget. For those, MDAgent has enhanced sampling: well-tempered metadynamics on phi and psi (one 1D
+  bias per dihedral), reweighted to basin populations and the phi/psi landscape. It switches by itself only with
+  permission switch_method; otherwise it suggests it. Biased sampling changes the kinetics: transition rates and
+  dwell times always come from plain MD, so say in the plan that they need basin changes in plain MD.
 - Pocket shape / conformational ensemble: 5 to 10 independent replicas of about 100 ns.
 - Rare states or exploring new regions: adaptive sampling (sampling "adaptive").
 - A binding affinity number: alchemical free energy calculations (OpenFE, FEP+; about 11 to 20 lambda windows of

@@ -146,9 +146,10 @@ def write(run_dir: Path) -> list[Path]:
         es = state.get("enhanced") or {}
         if (run_dir / "enhanced" / "populations.json").exists():
             pj = _load(run_dir / "enhanced" / "populations.json")
-            L.append(T(f"- 增强采样（chi1 上的 well-tempered metadynamics）{pj.get('n_replicas', '?')} 条重复，"
+            bias_zh, bias_en = (("φ 和 ψ", "phi and psi") if pj.get("kind") == "backbone" else ("chi1", "chi1"))
+            L.append(T(f"- 增强采样（{bias_zh} 上的 well-tempered metadynamics）{pj.get('n_replicas', '?')} 条重复，"
                        f"每条 {pj.get('ns_per_replica', '?')} ns；比例用 Tiwary–Parrinello 方法重新加权。",
-                       f"- Enhanced sampling (well-tempered metadynamics on chi1) with {pj.get('n_replicas', '?')} "
+                       f"- Enhanced sampling (well-tempered metadynamics on {bias_en}) with {pj.get('n_replicas', '?')} "
                        f"replicas of {pj.get('ns_per_replica', '?')} ns; populations reweighted (Tiwary-Parrinello)."))
         L.append("")
 
@@ -213,8 +214,13 @@ def write(run_dir: Path) -> list[Path]:
                 if mins:
                     L.append(T("- 各 basin 里自由能最低处（φ, ψ）：", "- Lowest free energy in each basin (phi, psi): ")
                              + "; ".join(mins))
-                L.append(T(f"- 自由能面：{path.with_name(path.stem + '_fes.csv').resolve()}（也有 .npz）",
-                           f"- Landscape: {path.with_name(path.stem + '_fes.csv').resolve()} (also .npz)"))
+                L.append(T(f"- 自由能面（普通 MD）：{path.with_name(path.stem + '_fes.csv').resolve()}（也有 .npz）",
+                           f"- Landscape (plain MD): {path.with_name(path.stem + '_fes.csv').resolve()} (also .npz)"))
+                rw = path.with_name(path.stem + "_fes_reweighted.csv")
+                if rw.exists():
+                    L.append(T(f"- 自由能面（增强采样，重新加权；比例也以它为准）：{rw.resolve()}（也有 .npz）",
+                               f"- Landscape (enhanced sampling, reweighted; the populations above come from it): "
+                               f"{rw.resolve()} (also .npz)"))
                 L.append("")
 
         L += [T("## 为什么停下", "## Why it stopped"), ""]
@@ -253,9 +259,17 @@ def write(run_dir: Path) -> list[Path]:
                        "- Items judged stalled hardly moved between states; their populations cannot be trusted even "
                        "if the replicas look alike."))
         if any(r["source"] == "enhanced_sampling" for r in results):
-            L.append(T("- 增强采样只偏置了 chi1。和别的慢运动耦合在一起的侧链，可能仍然采样不足。",
-                       "- Enhanced sampling biased chi1 only. Side chains coupled to other slow motions may still be "
-                       "under-sampled."))
+            if quantity == "backbone_basins":
+                L.append(T("- 增强采样只偏置了 φ 和 ψ（每个二面角一个一维偏置势）。和别的慢运动（例如侧链或整体构象）耦合在一起的残基，"
+                           "可能仍然采样不足。偏置会改变动力学，所以转变速率和停留时间只来自普通 MD；basin 比例和自由能面来自重新加权。",
+                           "- Enhanced sampling biased phi and psi only (one one-dimensional bias per dihedral). Residues "
+                           "coupled to other slow motions may still be under-sampled. The bias changes the kinetics, so "
+                           "transition rates and dwell times come from plain MD only; basin populations and the landscape "
+                           "come from reweighting."))
+            else:
+                L.append(T("- 增强采样只偏置了 chi1。和别的慢运动耦合在一起的侧链，可能仍然采样不足。",
+                           "- Enhanced sampling biased chi1 only. Side chains coupled to other slow motions may still be "
+                           "under-sampled."))
         L.append("")
 
         L += [T("## 文件", "## Files"), "", "```", *files,

@@ -9,7 +9,8 @@ Tools wrap the existing simulation code, so files on disk stay exactly as before
 - PlainMDTool ("plain_md", unbiased): rounds of run_segment for every replica; new replicas catch up.
   With sampling "adaptive" it is "adaptive_md" (seeded segments); its advance is still driven by
   agent.run_loop (phase 3 moves it here).
-- MetadTool ("metadynamics", biased): run_replica on chi1; observe rebuilds the bias with reweight.replay
+- MetadTool ("metadynamics", biased): run_replica on chi1, or on phi and psi for backbone goals (rates are not
+  served: a bias changes the kinetics); observe rebuilds the bias with reweight.replay
   and returns per-frame weights (Tiwary-Parrinello), so the reweighted estimator can be used.
 
 Every tool can also show an earlier moment of a finished run: PlainMDTool(parts=k, n_replicas=n) sees only
@@ -326,15 +327,36 @@ class MetadTool:
         es = self.state.enhanced
         return {f"{es['resnames'][f'{c}:{n}']}{n}": (c, n) for c, n in es.get("residues", [])}
 
+    @property
+    def backbone(self) -> bool:
+        return self.state.quantity == "backbone_basins"
+
+    def _residue_of(self, kind: str, estimand: str) -> str | None:
+        """The residue label an estimand belongs to, if this tool can serve that kind of estimand."""
+        if self.backbone:
+            for suffix, k in ((" basins", POP), (" landscape", LANDSCAPE)):   # Not " transitions": biased kinetics.
+                if kind == k and estimand.endswith(suffix):
+                    return estimand[: -len(suffix)]
+            return None
+        return estimand if kind == POP and self.state.quantity == "chi1_populations" else None
+
     def supports(self, kind: str, estimand: str) -> bool:
-        if kind != POP or self.state.quantity != "chi1_populations" or not self.state.enhanced.get("enabled", True):
+        label = self._residue_of(kind, estimand)
+        if label is None or not self.state.enhanced.get("enabled", True):
             return False
         chosen = self.chosen()
         if chosen:
-            return estimand in chosen
+            return label in chosen
         if self._candidates is None:
-            self._candidates = set(chi1_residues(self.run_dir, self.state.target))
-        return estimand in self._candidates
+            if self.backbone:
+                import mdtraj as md
+
+                from .backbone import backbone_quads
+                quads, _ = backbone_quads(md.load_topology(str(self.run_dir / "protein.pdb")), self.state.target)
+                self._candidates = set(quads)
+            else:
+                self._candidates = set(chi1_residues(self.run_dir, self.state.target))
+        return label in self._candidates
 
     def _n(self) -> int:
         n = min(self.settings.n_replicas, self.state.n_replicas)
@@ -370,6 +392,8 @@ class MetadTool:
         labels = list(self.chosen())
         states = {k: [] for k in labels}
         weights = []
+        if self.backbone:
+            return self._observe_backbone(estimands, labels, kt)
         for r in range(self._n()):
             chi, v, c = self._rebuilt(r)
             frames = len(chi) if self.until_ns is None else min(len(chi), round(self.until_ns * 1000 / self.settings.pace_ps))
@@ -381,6 +405,38 @@ class MetadTool:
             for i, k in enumerate(labels):
                 states[k].append(assign_states(np.degrees(chi[start:frames, i])))
         return {e: StateData(states[e], list(STATE_NAMES), weights) for e in estimands}
+
+    def _observe_backbone(self, estimands: list, labels: list, kt: float) -> dict:
+        """Basin states (weighted) and phi/psi (weighted) of each biased residue; columns are phi1, psi1, phi2, ..."""
+        from .backbone import BackboneSettings, assign_basins, parse_basins
+        from .estimators import AngleData
+
+        bb = BackboneSettings.from_dict(self.state.backbone)
+        basins = parse_basins(bb.basins)
+        names = [b.name for b in basins]
+        phi = {k: [] for k in labels}
+        psi = {k: [] for k in labels}
+        weights = []
+        for r in range(self._n()):
+            cols, v, c = self._rebuilt(r)
+            frames = len(cols) if self.until_ns is None else min(len(cols), round(self.until_ns * 1000 / self.settings.pace_ps))
+            if frames < 10:
+                continue
+            start = int(frames * self.rule.skip_fraction)
+            logw = (v[start:frames] - c[start:frames]) / kt
+            weights.append(np.exp(logw - logw.max()))
+            deg = np.degrees(cols[start:frames])
+            for i, k in enumerate(labels):
+                phi[k].append(deg[:, 2 * i])
+                psi[k].append(deg[:, 2 * i + 1])
+        out = {}
+        for e in estimands:
+            label = e.rsplit(" ", 1)[0]
+            states = StateData([assign_basins(f, s, basins, bb.margin_deg) for f, s in zip(phi[label], psi[label])],
+                               names, weights)
+            out[e] = (states if e.endswith(" basins")
+                      else AngleData(phi[label], psi[label], states, self.settings.pace_ps / 1000.0, weights))
+        return out
 
     def advance(self, n_replicas: int, until: float) -> None:
         """Run every enhanced sampling replica to `until` ns (new replicas start from the end of plain MD)."""
@@ -404,4 +460,5 @@ class MetadTool:
         for r in range(n_replicas):
             start = part_path(self.run_dir, r % s.n_replicas, last, ".state.xml")
             run_replica(files, self.run_dir, r, start, residues, self.settings, s.md,
-                        seed=s.base_seed + 50000 + r, log=self.log, until_ns=until)
+                        seed=s.base_seed + 50000 + r, log=self.log, until_ns=until,
+                        kind="backbone" if self.backbone else "chi1")

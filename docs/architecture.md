@@ -227,6 +227,20 @@ first test of whether the architecture is general. What was needed:
   length as the limit, and allow stop_early. This is a planning default, not a decision rule. The stopping
   itself comes from the estimators.
 
+**Backbone enhanced sampling (2026-11-21).** The plan was well-tempered metadynamics on phi and psi, and
+the existing chi1 machinery already supports any number of one-dimensional dihedral biases. So the change
+was small:
+- `enhanced.dihedral_quads(kind)` chooses which dihedrals to bias (one per residue for chi1, two for the
+  backbone).
+- `reweight.analyze(kind="backbone")` assigns basins from the phi and psi columns and adds a reweighted
+  landscape.
+- `assess` gains the landscape criterion.
+- The metadynamics tool serves backbone "basins" and "landscape" estimands but not "transitions", because
+  biased kinetics give no valid rates.
+
+The estimator registry already reflected this, because `transition_rates` is registered only for unbiased
+data. A toy model with known basin populations (0.70/0.25/0.05) is recovered within errors.
+
 **Open design question for phase 3,** shown by the shadow: after a switch, estimands that only the old
 tool serves stay open. Example: a side chain that was not biased. The agent must either run both tools,
 switch back, or report these estimands as resolved by the first method. The current policy reports

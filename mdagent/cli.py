@@ -436,11 +436,11 @@ def cmd_run(args) -> int:
     if args.sampling == "adaptive":
         print(f"Adaptive sampling: from round 2, AdaptivePy ({args.adaptive_policy}) chooses where each "
               f"replica starts. Full-system frames are saved every {args.full_save_ps:g} ps.")
-    if state.quantity == "backbone_basins":
-        print("Enhanced sampling of backbone phi/psi is not available yet: if plain MD cannot sample a basin, the "
-              "agent says so and suggests what to do.")
-    elif state.enhanced["enabled"] and state.quantity == "chi1_populations":
-        print(f"After plain MD, residues that still need it get enhanced sampling: "
+    if state.enhanced["enabled"] and state.quantity in ("chi1_populations", "backbone_basins"):
+        what = "phi and psi" if state.quantity == "backbone_basins" else "chi1"
+        when = ("get it by themselves (switch_method is allowed)" if state.can_switch()
+                else "get it only after you confirm (the agent suggests it in the chat)")
+        print(f"After plain MD, residues that still need enhanced sampling (metadynamics on {what}) {when}: "
               f"{args.enhanced_replicas} replicas x {args.enhanced_ns:g} ns, at most "
               f"{args.enhanced_max_residues} residues (the slowest ones).")
     files = SystemFiles(built.topology, built.positions, built.system)

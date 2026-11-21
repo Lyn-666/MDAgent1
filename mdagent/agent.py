@@ -98,7 +98,7 @@ class RunState:
     def can_switch(self) -> bool:
         """May the agent switch to enhanced sampling by itself? Needs the permission, and a quantity that
         enhanced sampling can push (only chi1 for now)."""
-        return self.allowed("switch_method") and self.quantity == "chi1_populations"
+        return self.allowed("switch_method") and self.quantity in BIASABLE
 
     def allowed(self, action: str) -> bool:
         if action == "switch_method" and self.enhanced.get("requested"):
@@ -118,6 +118,10 @@ class RunState:
 
 
 PERMISSIONS = ("extend", "add_replicas", "switch_method", "stop_early")
+# Quantities with an enhanced sampling method (enhanced.py): what metadynamics biases for each.
+BIASABLE = {"chi1_populations": "chi1", "backbone_basins": "backbone"}
+BIAS_TEXT = {"chi1": ("chi1 上的 metadynamics", "metadynamics on chi1"),
+             "backbone": ("φ 和 ψ 上的 metadynamics", "metadynamics on phi and psi")}
 DEFAULT_PERMISSIONS = {
     # auto: the user's time and replica numbers are limits, and changing the method needs the user's yes
     # (decided 2026-11-20). The agent stops early when the goal is reached or when going on would not
@@ -369,7 +373,7 @@ def diagnose_run(run_dir: Path, state: RunState) -> list[ResidueReport]:
 def _diagnose_and_decide(run_dir: Path, state: RunState):
     reports = diagnose_run(run_dir, state)
     decisions, next_ns = decide(reports, state.ns_done, state.loop, state.allowed("switch_method"),
-                                bias_available=state.quantity == "chi1_populations",
+                                bias_available=state.quantity in BIASABLE,
                                 may_stop=state.allowed("stop_early"))
     next_ns = _apply_policy(run_dir, state, reports, decisions, next_ns)
     _post_plain_md_messages(run_dir, state, decisions, next_ns)
@@ -466,7 +470,7 @@ def _advice(state: RunState, run_dir: Path, decisions: list[Decision]) -> tuple[
         en.append(f"{', '.join(slow)} change state, but too slowly or differently between replicas: I suggest adaptive "
                   f"sampling (restart from frames of rarely visited states), say \"run {name} again with adaptive "
                   f"sampling\"; or raise the limit, for example \"run {name} to … ns\".")
-    if never and state.quantity == "chi1_populations":
+    if never and state.quantity in BIASABLE:
         zh.append(f"{', '.join(never)} 一次都没有变化：自适应采样只能从已经见过的状态出发，帮不上忙。建议用增强采样，"
                   f"可以说“用增强采样继续 {name}”。")
         en.append(f"{', '.join(never)} never changed state: adaptive sampling can only restart from states already "
@@ -531,9 +535,9 @@ def _post_plain_md_messages(run_dir: Path, state: RunState, decisions: list[Deci
     elif state.enhanced.get("enabled", True):
         _once(run_dir, state, "plain_done",
               f"普通 MD 结束，原因是{why_zh}（每条 {state.ns_done:g} ns）。这些侧链普通 MD 采样不到：{', '.join(need)}。"
-              "现在自动改用增强采样（chi1 上的 metadynamics）。",
+              f"现在自动改用增强采样（{BIAS_TEXT[BIASABLE[state.quantity]][0]}）。",
               f"Plain MD finished. Stop reason: {why_en} ({state.ns_done:g} ns per replica). Plain MD cannot sample these side chains: "
-              f"{', '.join(need)}. Switching to enhanced sampling (metadynamics on chi1) now.", "info")
+              f"{', '.join(need)}. Switching to enhanced sampling ({BIAS_TEXT[BIASABLE[state.quantity]][1]}) now.", "info")
 
 
 def run_all(
@@ -559,7 +563,7 @@ def run_all(
     if not state.can_switch():
         log("Enhanced sampling does not start by itself: "
             + ("there is no permission to switch methods (use 'resume --enhanced-sampling' to run it)."
-               if state.quantity == "chi1_populations" else "this quantity has no enhanced sampling method yet."))
+               if state.quantity in BIASABLE else "this quantity has no enhanced sampling method yet."))
         return decisions, []
     if not state.enhanced.get("enabled", True):
         log("Enhanced sampling is switched off for this run. Use 'resume --enhanced-sampling' to run it.")
@@ -592,9 +596,15 @@ def run_all(
     rule.min_ns = min(rule.min_ns, settings.length_ns)  # A short test run may be judged at its own length.
     precision = state.the_goal().precision
     may_stop = state.allowed("stop_early")
-    log(f"\nEnhanced sampling (well-tempered metadynamics on chi1) for {', '.join(labels)}: "
+    kind = BIASABLE[state.quantity]
+    goal = state.the_goal()
+    fes_error = goal.fes_error_kcal if kind == "backbone" else None
+    log(f"\nEnhanced sampling (well-tempered {BIAS_TEXT[kind][1]}) for {', '.join(labels)}: "
         f"{n_rep} replicas, up to {settings.length_ns:g} ns each, starting from the end of plain MD. Goal: every "
-        f"population with a standard error of at most {precision:g}. "
+        f"population with a standard error of at most {precision:g}"
+        + (f", and the reweighted phi/psi landscape with an error of at most {fes_error:g} kcal/mol where it is low "
+           "(transition rates come from plain MD only: the bias changes the kinetics)" if kind == "backbone" else "")
+        + ". "
         + ("It stops as soon as the goal is reached." if may_stop else
            "It runs the full length (no permission to stop early) and says when the goal is reached."))
     last = len(state.rounds_ns) - 1
@@ -604,8 +614,8 @@ def run_all(
     outcome = es.get("outcome") or {}
     if outcome.get("reason") == "target_reached" and may_stop:
         # Resumed after it had stopped with the goal reached: report the saved result again.
-        result = analyze(run_dir, labels, n_rep, settings, state.md.temperature_k, rule)
-        verdicts = assess(result, None, rule, precision) if result else {}
+        result = analyze(run_dir, labels, n_rep, settings, state.md.temperature_k, rule, kind, state.backbone)
+        verdicts = assess(result, None, rule, precision, fes_error) if result else {}
     else:
         while True:
             if done < settings.length_ns - 1e-9:
@@ -614,12 +624,13 @@ def run_all(
                     # A replica added later starts from the end of a plain MD replica, with its own seed.
                     start = part_path(run_dir, r % state.n_replicas, last, ".state.xml")
                     run_replica(files, run_dir, r, start, residues, settings, state.md,
-                                seed=state.base_seed + 50000 + r, log=log, until_ns=target)
+                                seed=state.base_seed + 50000 + r, log=log, until_ns=target, kind=kind)
                 done = target
-            before, result = result, analyze(run_dir, labels, n_rep, settings, state.md.temperature_k, rule)
+            before, result = result, analyze(run_dir, labels, n_rep, settings, state.md.temperature_k, rule, kind,
+                                             state.backbone)
             if result is None:
                 break
-            verdicts = assess(result, before, rule, precision)
+            verdicts = assess(result, before, rule, precision, fes_error)
             save_populations(run_dir, result)
             log("\n" + format_table(result))
             from .shadow import record as shadow_record
