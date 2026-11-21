@@ -28,13 +28,25 @@ MODEL = "claude-opus-5-5"
 class RunPlan(BaseModel):
     """Settings for one `mdagent run`. Leave a field null to keep its default."""
 
-    target_kind: Literal["ligand", "residues", "distance", "change"] = Field(
+    target_kind: Literal["ligand", "residues", "distance", "change", "backbone"] = Field(
         description="'ligand': the target is all protein residues near a ligand in the PDB file. "
                     "'residues': the target is a list of residues. Both study side-chain conformations (chi1). "
                     "'distance': the user wants to know about distances between atoms (a pocket opening, a "
                     "contact, a gate); give them in `distances`. "
                     "'change': the user wants to stop once a given change is seen (a side chain reaches a state, "
-                    "a pocket opens); give it in `observe`.")
+                    "a pocket opens); give it in `observe`. "
+                    "'backbone': the user wants backbone phi/psi results of residues (Ramachandran basins or "
+                    "populations, transitions between basins, a phi/psi free-energy landscape); give the residues "
+                    "in `residues` (or a ligand in `ligand`).")
+    basins: Optional[str] = Field(
+        None, description="Only for 'backbone', and only if the user defines their own basins: "
+                          "'name:phi_from,phi_to,psi_from,psi_to; ...' in degrees. Null: the default basins.")
+    rate_rel_error: Optional[float] = Field(
+        None, description="Only for 'backbone': largest relative error of the leading transition rates, if the "
+                          "user states one (for example 'rates within 20%' -> 0.2). Default 0.25.")
+    fes_error_kcal: Optional[float] = Field(
+        None, description="Only for 'backbone': largest error of the free-energy landscape in kcal/mol, if the user "
+                          "states one. Default 0.5.")
     observe: Optional[str] = Field(
         None, description="Only for target_kind 'change': item=state, separated by ';'. A side chain: "
                           "'A:111=t' (states g+, t, g-). A distance: 'A:88:OH-A:111:CG1@0.6=far' (near or far).")
@@ -64,7 +76,10 @@ class RunPlan(BaseModel):
     cation: Optional[Literal["Na+", "K+"]] = Field(None, description="Default Na+. The anion is Cl-.")
     box_shape: Optional[Literal["cube", "dodecahedron", "octahedron"]] = Field(None, description="Default cube.")
     padding_nm: Optional[float] = Field(None, description="Protein to box face distance in nm. Default 1.0.")
-    replicas: Optional[int] = Field(None, description="Number of plain MD replicas. Default 3.")
+    replicas: Optional[int] = Field(None, description="Number of plain MD replicas to start with. Default 3.")
+    max_replicas: Optional[int] = Field(
+        None, description="The most replicas the agent may run when it may add replicas (allow add_replicas). Set it "
+                          "to the user's limit when the user lets MDAgent choose the number of replicas.")
     first_ns: Optional[float] = Field(None, description="Length of round 1 per replica in ns. Default 1.")
     extend_ns: Optional[float] = Field(None, description="Length of each later round in ns. Default 5.")
     max_ns: Optional[float] = Field(None, description="Total plain MD budget per replica in ns. Default 20.")
@@ -165,7 +180,8 @@ FLAGS = [  # RunPlan field -> command line option
     ("no_flip_patience_ns", "--no-flip-patience-ns"), ("sampling", "--sampling"),
     ("enhanced_ns", "--enhanced-ns"), ("enhanced_replicas", "--enhanced-replicas"),
     ("enhanced_max_residues", "--enhanced-max-residues"), ("equil_ps", "--equil-ps"), ("mode", "--mode"),
-    ("goal", "--goal"), ("precision", "--precision"), ("allow", "--allow"),
+    ("goal", "--goal"), ("precision", "--precision"), ("allow", "--allow"), ("max_replicas", "--max-replicas"),
+    ("basins", "--basins"), ("rate_rel_error", "--rate-rel-error"), ("fes_error_kcal", "--fes-error-kcal"),
     ("chains", "--chains"), ("uniprot", "--uniprot"), ("termini", "--termini"),
 ]
 SWITCHES = [("check_protonation", "--check-protonation"), ("no_enhanced_sampling", "--no-enhanced-sampling"),
@@ -198,6 +214,11 @@ def to_argv(plan: RunPlan, pdb: str | None, out: str, prmtop: str | None = None,
         argv += ["--quantity", "distance", "--distances", plan.distances]
         if plan.residues:
             argv += ["--residues", plan.residues]
+    elif plan.target_kind == "backbone":
+        if not (plan.residues or plan.ligand):
+            raise ValueError("The plan studies the backbone but names no residues.")
+        argv += ["--quantity", "backbone"] + (["--residues", plan.residues] if plan.residues
+                                              else ["--around-ligand", plan.ligand])
     elif plan.target_kind == "ligand":
         if not plan.ligand:
             raise ValueError("The plan targets a ligand but names none.")
@@ -252,6 +273,7 @@ def ask(request: str, pdb: str, out: str, assume_yes: bool = False, planner=None
     target = (f"residues within {plan.cutoff_angstrom or 5:g} Å of {plan.ligand}" if plan.target_kind == "ligand"
               else f"the change {plan.observe}" if plan.target_kind == "change"
               else f"distances {plan.distances}" if plan.target_kind == "distance"
+              else f"backbone phi/psi of residues {plan.residues or plan.ligand}" if plan.target_kind == "backbone"
               else f"residues {plan.residues}")
     print(f"\nTarget: {target}")
     print("Changed from the defaults: " + (", ".join(changed) if changed else "nothing"))

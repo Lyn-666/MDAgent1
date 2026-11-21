@@ -202,6 +202,31 @@ New tests (35, all deterministic, about 7 s):
   metadynamics.
 - 11 new tests (`tests/test_shadow.py`; one is slow and runs real MD on the CPU).
 
+### 3.2 First new observable through the registries: backbone phi/psi (2026-11-21)
+
+A user asked for the Ramachandran basin populations, transition statistics and phi/psi free-energy landscape of
+three residues, with the agent choosing replicas, length and stopping within 8 replicas × 50 ns. This was the
+first test of whether the architecture is general. What was needed:
+
+- **Task-specific code only:**
+  - `backbone.py`: basins as data with a documented default; core-set assignment; rates with Poisson
+    errors; dwell times as time / exits; a 2D landscape with errors from the replica spread.
+  - one featurizer in `tools_openmm.py`.
+  - two estimators in `estimators.py`: `transition_rates` and `free_energy_surface`.
+- **Nothing in `mdagent/core/` changed.** Each residue becomes three estimands with their own criteria:
+  population SE, worst relative error of the leading rates, and worst F error where F ≤ 2 kcal/mol.
+- **Calibration of the errors, checked over 30 seeds:** rate errors cover the truth at about the nominal
+  rate. The first dwell-time estimator (mean of complete visits) was biased short by about 0.5 standard
+  errors, because it leaves out the long visits that are cut off at the trajectory ends. It was replaced by
+  the maximum-likelihood estimate time / exits.
+- **Current run path:** the old policy now judges a backbone residue "ok" only when all three criteria
+  hold.
+- **Planning:** the chat prompt now has a rule. When the user leaves replicas, length and stopping to the
+  agent, the agent proposes a plan within the user's limits and states it: start with 3 replicas (at least
+  2, so that the replica spread can be measured), allow add_replicas up to the user's limit, use the user's
+  length as the limit, and allow stop_early. This is a planning default, not a decision rule. The stopping
+  itself comes from the estimators.
+
 **Open design question for phase 3,** shown by the shadow: after a switch, estimands that only the old
 tool serves stay open. Example: a side chain that was not biased. The agent must either run both tools,
 switch back, or report these estimands as resolved by the first method. The current policy reports

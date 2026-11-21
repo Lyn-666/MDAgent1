@@ -22,6 +22,10 @@ OUTPUTS = [
     ("enhanced/replica_*_chunk*.dcd", "enhanced sampling trajectory of replica i, chunk k"),
     ("enhanced/replica_*_chi.npy", "chi1 of each biased residue (radians), one row per pace"),
     ("enhanced/replica_*_bias.npy", "final bias of each biased residue on the chi1 grid (kJ/mol)"),
+    ("backbone/*_fes.csv", "phi/psi free-energy landscape of a residue: F and its error per bin (kcal/mol)"),
+    ("backbone/*_fes.npz", "the same landscape as numpy arrays (edges_deg, free_energy_kcal, error_kcal, probability)"),
+    ("backbone/*_fes.png", "a picture of the landscape (only if matplotlib is installed)"),
+    ("backbone/*.json", "transition counts, rates and dwell times between basins, and the lowest F in each basin"),
     ("enhanced/populations.json", "reweighted chi1 state populations and free energies of the biased residues"),
 ]
 

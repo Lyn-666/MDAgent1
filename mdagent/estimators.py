@@ -14,6 +14,8 @@ Registered here (kind, regime -> estimator):
 - state_populations, seeded   -> SegmentMSMPopulations (Markov state model of segments; bootstrap errors)
 - event, unbiased and seeded  -> FirstEntryEvent      (entered a state and stayed; not valid on biased data,
                                                        where a bias can force any state)
+- transition_rates, unbiased  -> TransitionRates      (rates between states; Poisson errors of the counts)
+- free_energy_surface, unbiased -> FreeEnergySurface  (2D landscape of two angles; errors from replica spread)
 
 Default criteria (min events per replica, effective samples) are estimator options that a Requirement can
 override in its params. They are not global thresholds of the agent.
@@ -29,6 +31,16 @@ from .core.evidence import Assessment, Check
 from .core.registry import EstimatorRegistry
 from .uncertainty import (block_standard_error, combine_replicas, effective_samples, error_parts,
                           floor_from_samples, floor_from_transitions)
+
+
+@dataclass
+class AngleData:
+    """Two angles per frame (for example backbone phi/psi in degrees), one array each per replica, with the
+    states of the same frames (for the number of independent events) and the time between frames."""
+    phi: list
+    psi: list
+    states: StateData
+    dt_ns: float
 
 
 @dataclass
@@ -155,5 +167,61 @@ class FirstEntryEvent:
                           note="Seeing an event is evidence that it can happen; it gives no rate or probability.")
 
 
+class TransitionRates:
+    """Rates between states. Criterion: the largest relative error of the leading rates (between states with at
+    least `min_population`) is at most `max_rel_error`. The relative error of a rate from N events is 1/sqrt(N)."""
+
+    name, kind, regimes = "rates.poisson_counts", "transition_rates", ("unbiased",)
+
+    def assess(self, estimand: str, data: StateData, params: dict) -> Assessment:
+        from .backbone import transition_statistics, worst_rate_error
+
+        max_rel, min_pop = params["max_rel_error"], params.get("min_population", 0.05)
+        stats = transition_statistics(data.states, data.names, params.get("dt_ns", 1.0))
+        total = sum(t for t in stats["time_ns"])
+        pops = {a: (t / total if total else 0.0) for a, t in zip(data.names, stats["time_ns"])}
+        worst, lead = worst_rate_error(stats, pops, min_pop)
+        per = [count_changes(s) for s in data.states]
+        need = int(np.ceil(1 / max_rel ** 2)) * max(len(lead), 1)
+        finite = worst if np.isfinite(worst) else None
+        checks = [Check("leading_rates_seen", finite is not None, True,
+                        f"leading transitions {lead}" + ("" if finite is not None else "; at least one never seen"))]
+        status = _status(sum(per), checks, finite is not None and worst <= max_rel)
+        return Assessment(estimand, self.name, status, {"rates_per_ns": stats["rates_per_ns"], "leading": lead},
+                          {"worst_relative_error": None if finite is None else round(worst, 4)}, checks,
+                          {"events_total": sum(per), "events_per_replica": per, "events_needed": need,
+                           "uncertainty_ratio": None if finite is None else round(worst / max_rel, 4),
+                           "uncertainty_scaling": -0.5, "projectable": True, "regime": "unbiased"},
+                          note="Poisson errors assume Markovian jumps between state cores.")
+
+
+class FreeEnergySurface:
+    """A 2D free-energy landscape of two angles. Criterion: the largest error of F in the bins with F <= `cutoff_kcal`
+    is at most `max_error_kcal`. Needs at least two replicas (the error comes from their spread)."""
+
+    name, kind, regimes = "landscape.replica_spread", "free_energy_surface", ("unbiased",)
+
+    def assess(self, estimand: str, data: AngleData, params: dict) -> Assessment:
+        from .backbone import landscape, worst_landscape_error
+
+        max_err = params["max_error_kcal"]
+        per = [count_changes(s) for s in data.states.states]
+        fes = landscape(data.phi, data.psi, params.get("temperature_k", 300.0), params.get("bins_deg", 15.0),
+                        n_effective=sum(per) + len(per))
+        worst = worst_landscape_error(fes, params.get("cutoff_kcal", 2.0))
+        finite = worst if np.isfinite(worst) else None
+        populated = int(np.sum(np.isfinite(fes["free_energy_kcal"]) & (fes["free_energy_kcal"] <= params.get("cutoff_kcal", 2.0))))
+        checks = [Check("two_or_more_replicas", len(per) >= 2, True, f"{len(per)} replicas; the error needs their spread")]
+        status = _status(sum(per), checks, finite is not None and worst <= max_err)
+        return Assessment(estimand, self.name, status, {"bins_with_low_free_energy": populated},
+                          {"worst_error_kcal": None if finite is None else round(worst, 4)}, checks,
+                          {"events_total": sum(per), "events_per_replica": per,
+                           "uncertainty_ratio": None if finite is None else round(worst / max_err, 4),
+                           "uncertainty_scaling": -0.5, "projectable": True, "regime": "unbiased"},
+                          note="Errors from the spread between replicas, never below an error floor from the number "
+                               "of state changes.")
+
+
 def default_registry() -> EstimatorRegistry:
-    return EstimatorRegistry([UnbiasedPopulations(), WeightedPopulations(), SegmentMSMPopulations(), FirstEntryEvent()])
+    return EstimatorRegistry([UnbiasedPopulations(), WeightedPopulations(), SegmentMSMPopulations(), FirstEntryEvent(),
+                              TransitionRates(), FreeEnergySurface()])

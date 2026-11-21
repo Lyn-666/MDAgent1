@@ -33,7 +33,8 @@ import numpy as np
 
 from .diagnose import ResidueReport, count_transitions, judge, occupancy, populations_with_errors, rank
 
-QUANTITIES = {"chi1": "chi1_populations", "distance": "distance_states", "event": "event_seen"}
+QUANTITIES = {"chi1": "chi1_populations", "distance": "distance_states", "event": "event_seen",
+              "backbone": "backbone_basins"}   # backbone: phi/psi basins of any residue (backbone.py)
 DISTANCE_STATES = ["near", "far"]
 _ATOM = r"(?:([A-Za-z0-9]):)?(-?\d+):([A-Za-z0-9']+)"
 _SPEC = re.compile(rf"^\s*{_ATOM}\s*-\s*{_ATOM}\s*@\s*([0-9.]+)\s*$")

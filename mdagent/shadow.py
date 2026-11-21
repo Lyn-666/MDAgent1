@@ -95,7 +95,17 @@ def task_from_state(run_dir: Path, state, kinds: dict) -> TaskSpec:
         for sp in parse_events(state.events):
             reqs.append(Requirement(sp.label, "event", {"target": sp.state, "hold_frames": hold, "seen_in": goal.seen_in}))
     else:
-        reqs = [Requirement(e, kind, dict(pop)) for e, kind in kinds.items()]
+        from .backbone import BackboneSettings
+
+        bb = BackboneSettings.from_dict(state.backbone)
+        per_kind = {
+            "state_populations": pop,
+            "transition_rates": {"max_rel_error": goal.rate_rel_error, "min_population": bb.min_population,
+                                 "dt_ns": state.md.save_interval_ps / 1000.0},
+            "free_energy_surface": {"max_error_kcal": goal.fes_error_kcal, "cutoff_kcal": bb.fes_cutoff_kcal,
+                                    "bins_deg": bb.bins_deg, "temperature_k": state.md.temperature_k},
+        }
+        reqs = [Requirement(e, kind, dict(per_kind[kind])) for e, kind in kinds.items()]
     perms = set(goal.permissions) | ({"switch_method"} if es.get("requested") else set())
     metad = state.quantity == "chi1_populations" and es.get("enabled", True)
     planned = state.notes.get("first_max_ns", state.loop.max_ns) * n0
