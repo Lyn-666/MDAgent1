@@ -41,6 +41,7 @@ from .diagnose import ResidueReport, diagnose_trajectories, fixed_chi1_residues,
 from .adaptive import AdaptiveSettings, choose_starts
 from .messages import post
 from .simulate import MDSettings, SystemFiles, load_inputs, part_path, run_segment
+from .uncertainty import Precision, planned_looks
 
 
 @dataclass
@@ -76,8 +77,9 @@ class RunState:
     notes: dict = field(default_factory=dict)     # Which messages were posted already, so each is posted once.
     goal: dict = field(default_factory=dict)      # Goal fields. Empty in runs made before goals existed.
     distances: list = field(default_factory=list)  # Distance specs (observables.py) for quantity distance_states.
+    backbone: list = field(default_factory=list)   # Basin specs (basins.py), e.g. "rama:A:110", "turn:A:52".
     events: list = field(default_factory=list)     # Changes to see (observables.EventSpec) for quantity event_seen.
-    backbone: dict = field(default_factory=dict)  # backbone.BackboneSettings fields (quantity backbone_basins)
+    backbone_settings: dict = field(default_factory=dict)  # backbone.BackboneSettings fields (own basins, margins)
     adaptive: dict = field(default_factory=dict)  # AdaptiveSettings fields
     starts: dict = field(default_factory=dict)    # Round index -> [[replica, part, frame], ...]
 
@@ -94,6 +96,36 @@ class RunState:
     @property
     def quantity(self) -> str:
         return self.the_goal().quantity
+
+    def precision(self) -> "Precision":
+        """The precision the goal asks for, with the number of decision points this budget allows."""
+        g = self.the_goal()
+        if g.allocation == "projection":
+            # The agent may stop at no more than stop_looks looks, so its intervals are calibrated for that many.
+            return Precision(epsilon=g.precision, criterion="confidence", alpha=g.alpha, looks=g.stop_looks)
+        factor = g.extend_factor if "extend" in g.permissions else 1.0
+        return Precision(epsilon=g.precision, criterion=g.criterion, alpha=g.alpha,
+                         looks=planned_looks(self.loop.first_ns, self.loop.extend_ns, self.loop.max_ns, factor))
+
+    def max_ns_per_replica(self) -> float:
+        """Longest a replica may run with projection allocation: the user's max_ns, never more (user's decision,
+        2026-11-20: the time and replica numbers the user sets are limits)."""
+        return self.loop.max_ns
+
+    def budget_ns(self) -> float:
+        """Production ns of all replicas together that the agent may spend in plain MD, never more. Default: the
+        limits the user set, max_ns per replica times the most replicas the agent may run (max_replicas when it
+        may add replicas, otherwise the replicas it starts with)."""
+        g = self.the_goal()
+        if g.budget_ns > 0:
+            return g.budget_ns
+        most = g.max_replicas if self.allowed("add_replicas") else self.n_replicas_at_start()
+        return most * self.loop.max_ns
+
+    def n_replicas_at_start(self) -> int:
+        """Replicas the user asked for (the agent may have added some since)."""
+        n = self.notes.get("replicas_at_start", self.notes.get("first_n_replicas"))
+        return int(n if n is not None else self.n_replicas)
 
     def can_switch(self) -> bool:
         """May the agent switch to enhanced sampling by itself? Needs the permission, and a quantity that
@@ -114,6 +146,16 @@ class RunState:
         d["md"] = MDSettings(**d["md"])
         d["loop"] = LoopSettings(**d["loop"])
         d["target"] = [tuple(k) for k in d["target"]]
+        if isinstance(d.get("backbone"), dict):
+            # Runs from before the two backbone implementations were merged (2026-11-22) kept the basin settings
+            # in "backbone" and measured every target residue: they become rama items of those residues.
+            d["backbone_settings"] = d.pop("backbone")
+            if (d.get("goal") or {}).get("quantity") == "backbone_basins":
+                d["backbone"] = [f"rama:{c}:{n}" if c else f"rama:{n}" for c, n in d["target"]]
+        elif d.get("backbone") and "backbone_settings" not in d:
+            # rama: runs from the other branch before the merge used three centres: keep them, so a resumed run
+            # does not change its basins halfway.
+            d["backbone_settings"] = {"rama": "centres"}
         return cls(**d)
 
 
@@ -138,7 +180,14 @@ class Goal:
 
     quantity: the result the user cares about. Supported now: "chi1_populations" (the state
       populations of the target side chains).
-    precision: the largest allowed standard error of any state population (0 to 1).
+    precision: the tolerance on any state population (0 to 1).
+    allocation: "projection" lets the agent choose replicas, lengths and the stop for the least
+      compute (allocation.py), always inside the user's limits; "rounds" keeps the fixed rounds of
+      earlier versions.
+    criterion: what has to be at most `precision`. "standard_error" (the default, and what
+      every run before this field meant), or "confidence" / "sequence", which widen the
+      interval because the agent judges the same growing data many times before it stops
+      (uncertainty.Precision). The budget comparison (budget.py) shows what each costs.
     permissions: actions the agent may take without asking (default in auto mode: only stop_early;
       the others become suggestions that the user confirms):
       extend         run longer than the planned budget when the goal is not met yet
@@ -150,9 +199,17 @@ class Goal:
     quantity: str = "chi1_populations"   # or "distance_states", "event_seen", "backbone_basins" (observables.py)
     description: str = ""          # The user's own words.
     precision: float = 0.05
+    criterion: str = "standard_error"  # How precision is measured: see uncertainty.Precision.
+    alpha: float = 0.05               # Allowed chance of being outside the interval.
     permissions: list = field(default_factory=lambda: list(PERMISSIONS))
     max_replicas: int = 10          # add_replicas stops here (literature: 5 to 10 replicas).
     extend_factor: float = 2.0      # extend may run to this many times the first budget.
+    # How time is spent (allocation.py). "rounds": every round adds extend_ns to every replica, as before.
+    # "projection": the agent decides how many replicas, how long and when to stop, for the least compute;
+    # it looks at most stop_looks times (after one planning look) and its intervals are calibrated for that.
+    allocation: str = "rounds"
+    budget_ns: float = 0.0          # production ns of all replicas together; 0: replicas x max_ns
+    stop_looks: int = 3
     hold_ps: float = 100.0          # event_seen: the new state must last this long to count as seen.
     seen_in: int = 1                # event_seen: in how many replicas the change must be seen.
     rate_rel_error: float = 0.25    # backbone_basins: largest relative error of the leading transition rates.
@@ -174,27 +231,27 @@ class Decision:
                            # "budget_exhausted" (the plain MD budget is used up first).
 
 
-def no_change_hopeless(report: ResidueReport, ns_done: float, loop: LoopSettings) -> bool:
+def no_change_hopeless(report: ResidueReport, ns_done: float, loop: LoopSettings, precision=None) -> bool:
     """Has an item with no state change at all been watched long enough to give up on plain MD for it?
 
     With a patience time (older runs, or --no-flip-patience-ns): after that time. Otherwise from the data and the
-    budget: with zero events in exposure T, the 95 % upper bound of the rate is 3 / T ("rule of three"). If even at
-    that rate the rest of the budget would give fewer state changes than the goal needs (min_flips_per_replica in
-    every replica), more plain MD of the same kind is not expected to reach it. The same rule is used by the
-    general decision core (core/reasoner.py).
+    budget (uncertainty.never_changing_hopeless): even at the fastest rate that zero changes allow, the rest of the
+    budget would not give the changes the goal needs (uncertainty.changes_needed: enough in every replica, and
+    enough for the precision when it is known). The projection allocation uses the same rule.
     """
+    from .uncertainty import Precision, changes_needed, never_changing_hopeless
+
     if loop.no_flip_patience_ns is not None:
         return ns_done >= loop.no_flip_patience_ns
-    if ns_done <= 0:
-        return False
     n = max(len(report.transitions), 1)
-    expected_at_most = 3.0 * max(loop.max_ns - ns_done, 0.0) / ns_done   # Same for any number of replicas.
-    return expected_at_most < loop.min_flips_per_replica * n
+    p = Precision.of(precision)
+    need = changes_needed(n, loop.min_flips_per_replica, p.epsilon if p else None, p.z if p else 1.0)
+    return never_changing_hopeless(ns_done * n, (loop.max_ns - ns_done) * n, need)
 
 
 def decide(reports: list[ResidueReport], ns_done: float, loop: LoopSettings,
            may_switch: bool = True, bias_available: bool = True,
-           may_stop: bool = False) -> tuple[list[Decision], float]:
+           may_stop: bool = False, precision=None) -> tuple[list[Decision], float]:
     """Return a decision for each item (residue or distance), and the length of the next round (0: stop).
 
     An item with no state change after the patience time is closed for plain MD (more plain MD would not
@@ -211,13 +268,13 @@ def decide(reports: list[ResidueReport], ns_done: float, loop: LoopSettings,
             decisions.append(Decision(r.label, "skip", r.reason))
         elif r.verdict == "ok":
             decisions.append(Decision(r.label, "done", f"Sampled well: {r.reason}"))
-        elif sum(r.transitions) == 0 and no_change_hopeless(r, ns_done, loop) \
+        elif sum(r.transitions) == 0 and no_change_hopeless(r, ns_done, loop, precision) \
                 and not (may_switch and bias_available) and not may_stop and room > 0:
             decisions.append(Decision(
                 r.label, "extend",
                 f"No flip in {ns_done:g} ns per replica. Plain MD is unlikely to see one, but the user chose "
                 "plain MD, so it goes on until the budget.", stalled=True))
-        elif sum(r.transitions) == 0 and no_change_hopeless(r, ns_done, loop):
+        elif sum(r.transitions) == 0 and no_change_hopeless(r, ns_done, loop, precision):
             decisions.append(Decision(
                 r.label, need,
                 f"No flip in {ns_done:g} ns per replica. Plain MD is unlikely to see one.", cause="stalled"))
@@ -249,15 +306,27 @@ def _write_json(path: Path, data) -> None:
 def _record(run_dir: Path, state: RunState, reports, decisions, next_ns: float) -> str:
     lines = [f"Round {len(state.rounds_ns)} finished. "
              f"Total: {state.ns_done:g} ns per replica, {state.n_replicas} replicas."]
-    for d in decisions:
-        if d.action in ("extend", "enhanced_sampling", "stalled"):
-            lines.append(f"  {d.residue}: {d.action}. {d.reason}")
-    n_done = sum(d.action == "done" for d in decisions)
-    if n_done:
-        lines.append(f"  {n_done} item(s) are sampled well.")
-    if next_ns > 0:
-        lines.append(f"Decision: run every replica {next_ns:g} ns longer.")
+    projection = state.the_goal().allocation == "projection"
+    if projection:
+        # What the agent looked at: each item's verdict, largest interval half-width and state changes.
+        z = state.precision().z
+        for r in reports:
+            if r.standard_error:
+                lines.append(f"  {r.label}: {r.verdict}; largest half-width {z * max(r.standard_error.values()):.3f} "
+                             f"(asked {state.the_goal().precision:g}); state changes per replica {r.transitions}.")
     else:
+        for d in decisions:
+            if d.action in ("extend", "enhanced_sampling", "stalled"):
+                lines.append(f"  {d.residue}: {d.action}. {d.reason}")
+        n_done = sum(d.action == "done" for d in decisions)
+        if n_done:
+            lines.append(f"  {n_done} item(s) are sampled well.")
+    acts = [a for a in state.notes.get("actions", []) if a.get("phase") == "plain_md"]
+    if projection and acts and acts[-1].get("ns_per_replica") == state.ns_done:
+        lines.append(f"Agent: {acts[-1]['reason']}")
+    elif next_ns > 0:
+        lines.append(f"Decision: run every replica {next_ns:g} ns longer.")
+    if next_ns <= 0:
         enhanced = [d.residue for d in decisions if d.action == "enhanced_sampling"]
         stuck = [d.residue for d in decisions if d.action == "stalled"]
         lines.append("Decision: stop plain MD. "
@@ -303,6 +372,7 @@ def run_loop(
         part = len(state.rounds_ns)
         state.pending_round_ns = next_ns
         state.save(run_dir)
+        round_started = time.time()
         log(f"\nRound {part + 1}: running {state.n_replicas} replicas for {next_ns:g} ns each.")
         adaptive = state.sampling == "adaptive"
         full_ps = AdaptiveSettings.from_dict(state.adaptive).full_interval_ps if adaptive else None
@@ -326,6 +396,10 @@ def run_loop(
                         start_frame=start, full_interval_ps=full_ps)
         state.rounds_ns.append(next_ns)
         state.pending_round_ns = 0.0
+        # Measured cost of this round, so the cost model can be checked against the clock (cost.py).
+        state.notes.setdefault("rounds", []).append(
+            {"ns": round(next_ns, 6), "n_replicas": state.n_replicas,
+             "seconds": round(time.time() - round_started, 1)})
         state.save(run_dir)
 
         reports, decisions, next_ns = _diagnose_and_decide(run_dir, state)
@@ -347,9 +421,18 @@ def _adaptive_starts(run_dir: Path, state: RunState, part: int, log) -> list[lis
     return state.starts[key]
 
 
+def _decision_loop(state: RunState) -> LoopSettings:
+    """The limits decide() judges against: the same ones the projection allocation uses."""
+    from dataclasses import replace
+
+    if state.the_goal().allocation == "projection":
+        return replace(state.loop, max_ns=state.max_ns_per_replica())
+    return state.loop
+
+
 def diagnose_run(run_dir: Path, state: RunState) -> list[ResidueReport]:
-    """Diagnose the plain MD of a run for its quantity (chi1 or distances). The run and `mdagent diagnose`
-    both use this, so they always judge the same way."""
+    """Diagnose the plain MD of a run for its quantity. The run and `mdagent diagnose` both use this, so
+    they always judge the same way."""
     if state.quantity == "distance_states":
         return _diagnose_distances(run_dir, state)
     if state.quantity == "event_seen":
@@ -363,32 +446,49 @@ def diagnose_run(run_dir: Path, state: RunState) -> list[ResidueReport]:
             load_run(run_dir, state.target, len(state.rounds_ns), join=False), state.target,
             state.ns_done, min_flips_per_replica=state.loop.min_flips_per_replica,
             pooled_total_ns=state.ns_done * state.n_replicas, n_replicas=state.n_replicas, fixed=fixed,
-            precision=state.the_goal().precision)
+            precision=state.precision())
     return diagnose_trajectories(
         load_run(run_dir, state.target, len(state.rounds_ns)), state.target, state.ns_done,
         min_flips_per_replica=state.loop.min_flips_per_replica, fixed=fixed,
-        precision=state.the_goal().precision)
+        precision=state.precision())
 
 
 def _diagnose_and_decide(run_dir: Path, state: RunState):
     reports = diagnose_run(run_dir, state)
-    decisions, next_ns = decide(reports, state.ns_done, state.loop, state.allowed("switch_method"),
+    decisions, next_ns = decide(reports, state.ns_done, _decision_loop(state), state.allowed("switch_method"),
                                 bias_available=state.quantity in BIASABLE,
-                                may_stop=state.allowed("stop_early"))
+                                may_stop=state.allowed("stop_early"), precision=state.precision())
     next_ns = _apply_policy(run_dir, state, reports, decisions, next_ns)
     _post_plain_md_messages(run_dir, state, decisions, next_ns)
     return reports, decisions, next_ns
 
 
 def _apply_policy(run_dir: Path, state: RunState, reports, decisions, next_ns: float) -> float:
-    """Choose the next action (policy.py) once per round; a resumed run keeps the choice it made."""
-    from .policy import plain_md_next
+    """Choose the next action once per round (policy.py for rounds, allocation.py for projection);
+    a resumed run keeps the choice it made."""
+    from .policy import allocation_next, plain_md_next
 
     key = {"ns": state.ns_done, "max_ns": state.loop.max_ns, "n_replicas": state.n_replicas,
            "permissions": sorted(state.the_goal().permissions)}
+    if state.the_goal().allocation == "projection":
+        from .allocation import RULE_VERSION
+
+        key["rule"] = RULE_VERSION   # A newer rule decides again when a run is resumed.
     done = state.notes.get("policy_round")
     if done and done.get("key") == key:
+        if done.get("decisions"):   # Projection: restore what it decided for each item.
+            for d in decisions:
+                if d.residue in done["decisions"]:
+                    d.action, d.cause = done["decisions"][d.residue]
         return done["next_ns"]  # Same round, same budget: keep the choice (no second message, no second replica).
+    if state.the_goal().allocation == "projection":
+        next_ns = allocation_next(run_dir, state, reports, decisions)
+        # Keyed as the state is left after the choice (more replicas), which is what a resumed run sees.
+        state.notes["policy_round"] = {"key": {**key, "max_ns": state.loop.max_ns, "n_replicas": state.n_replicas},
+                                       "next_ns": next_ns,
+                                       "decisions": {d.residue: [d.action, d.cause] for d in decisions}}
+        state.save(run_dir)
+        return next_ns
     next_ns = plain_md_next(run_dir, state, reports, decisions, next_ns)
     key.update(max_ns=state.loop.max_ns, n_replicas=state.n_replicas)  # As the policy left them.
     state.notes["policy_round"] = {"key": key, "next_ns": next_ns}
@@ -411,26 +511,26 @@ def _diagnose_distances(run_dir: Path, state: RunState) -> list[ResidueReport]:
     where = {a: k for k, a in enumerate(atoms)}
     trajs = load_run(run_dir, state.target, len(state.rounds_ns), atoms=atoms)
     return diagnose_distances(trajs, specs, [(where[i], where[j]) for i, j in pairs], state.ns_done,
-                              state.loop.min_flips_per_replica, state.the_goal().precision)
+                              state.loop.min_flips_per_replica, state.precision())
 
 
 def _diagnose_backbone(run_dir: Path, state: RunState) -> list[ResidueReport]:
-    """Backbone phi/psi basins of the target residues; also writes the transition statistics and the free-energy
-    landscape of each residue to backbone/ (backbone.py)."""
-    from .backbone import BackboneSettings, basins_text, diagnose_backbone, parse_basins, save_details
+    """Backbone items (rama:A:110, turn:A:52): basin populations, transition statistics and the free-energy
+    landscape of each, judged together (backbone.py); the details are written to backbone/."""
+    from .backbone import BackboneSettings, diagnose_backbone, save_details
     from .tools_openmm import backbone_angles
 
-    settings = BackboneSettings.from_dict(state.backbone)
-    angles, skipped = backbone_angles(run_dir, state, len(state.rounds_ns))
+    settings = BackboneSettings.from_dict(state.backbone_settings)
+    items, skipped = backbone_angles(run_dir, state, len(state.rounds_ns))
     goal = state.the_goal()
-    reports, details = diagnose_backbone(angles, settings, state.ns_done, state.md.save_interval_ps / 1000.0,
-                                         state.md.temperature_k, state.loop.min_flips_per_replica, goal.precision,
+    reports, details = diagnose_backbone(items, settings, state.ns_done, state.md.save_interval_ps / 1000.0,
+                                         state.md.temperature_k, state.loop.min_flips_per_replica, state.precision(),
                                          goal.rate_rel_error, goal.fes_error_kcal)
-    save_details(run_dir / "backbone", details, basins_text(parse_basins(settings.basins)))
-    for key, why in skipped:
-        reports.append(ResidueReport(chain=key[0], resseq=key[1], resname="", transitions=[], occupancies=[],
+    save_details(run_dir / "backbone", details)
+    for label, why in skipped:
+        reports.append(ResidueReport(chain="", resseq=0, resname="", name=label, transitions=[], occupancies=[],
                                      dominant=[], quantity="backbone", verdict="no_phi_psi",
-                                     reason=f"No phi/psi basins: {why}."))
+                                     reason=f"Not measured: {why}"))
     return reports
 
 
@@ -476,6 +576,12 @@ def _advice(state: RunState, run_dir: Path, decisions: list[Decision]) -> tuple[
         en.append(f"{', '.join(never)} never changed state: adaptive sampling can only restart from states already "
                   f"seen, so it cannot help. I suggest enhanced sampling: say \"continue {name} with enhanced "
                   "sampling\".")
+        if state.quantity == "backbone_basins":
+            zh.append("增强采样能给出构象区比例和自由能面，但会改变动力学：转变速率和停留时间仍然只能来自普通 MD，"
+                      "需要普通 MD 里看到转变（可以提高上限）。")
+            en.append("Enhanced sampling gives the basin populations and the landscape, but it changes the kinetics: "
+                      "transition rates and dwell times still come from plain MD only and need changes seen there "
+                      "(you can raise the limit).")
     elif never:
         zh.append(f"{', '.join(never)} 一次都没有变化，这个量还没有增强采样方法。它也可能只有一个稳定状态。")
         en.append(f"{', '.join(never)} never changed state, and this quantity has no enhanced sampling method yet. "
@@ -486,7 +592,9 @@ def _advice(state: RunState, run_dir: Path, decisions: list[Decision]) -> tuple[
 
 
 def _post_plain_md_messages(run_dir: Path, state: RunState, decisions: list[Decision], next_ns: float) -> None:
-    stalled = [d.residue for d in decisions if d.stalled]
+    # With projection allocation the agent has already explained its choice (policy.allocation_next).
+    projection = state.the_goal().allocation == "projection"
+    stalled = [] if projection else [d.residue for d in decisions if d.stalled]
     advice_zh, advice_en = _advice(state, run_dir, decisions)
     if stalled:
         names = ", ".join(stalled)
@@ -502,17 +610,20 @@ def _post_plain_md_messages(run_dir: Path, state: RunState, decisions: list[Deci
     # Why plain MD stopped. Stalled and not_reachable win over budget: they say that more plain MD would not help.
     reason = ("target_reached" if not need else
               "stalled" if any(d.cause == "stalled" for d in decisions) else
+              "insufficient_evidence" if any(d.cause == "insufficient_evidence" for d in decisions) else
               "not_reachable" if any(d.cause == "not_reachable" for d in decisions) else "budget_exhausted")
     if state.notes.get("plain_md_outcome", {}).get("ns_per_replica") != state.ns_done:
         state.notes["plain_md_outcome"] = {
             "phase": "plain_md", "reason": reason, "ns_per_replica": state.ns_done, "budget_ns": state.loop.max_ns,
             "residues": {d.residue: d.cause or d.action for d in decisions if d.action != "skip"},
+            "decision": (state.notes.get("allocation_decision") or {}).get("decision",
+                                                                           "STOP" if not need else "INSUFFICIENT_EVIDENCE"),
             "time": time.strftime("%Y-%m-%d %H:%M:%S")}
         state.save(run_dir)
     why_zh = {"target_reached": "达到目标", "stalled": "采样停滞", "budget_exhausted": "预算用完",
-              "not_reachable": "上限内达不到"}[reason]
+              "not_reachable": "上限内达不到", "insufficient_evidence": "证据不足"}[reason]
     why_en = {"target_reached": "goal reached", "stalled": "sampling stalled", "budget_exhausted": "budget used up",
-              "not_reachable": "not reachable within the limit"}[reason]
+              "not_reachable": "not reachable within the limit", "insufficient_evidence": "insufficient evidence"}[reason]
     if not need and state.quantity == "event_seen":
         seen = "；".join(d.reason.replace("Sampled well: ", "") for d in decisions if d.action == "done")
         _once(run_dir, state, "plain_done",
@@ -523,10 +634,10 @@ def _post_plain_md_messages(run_dir: Path, state: RunState, decisions: list[Deci
     elif not need:
         _once(run_dir, state, "plain_done",
               f"普通 MD 结束，原因是{why_zh}（每条 {state.ns_done:g} ns）：所有目标都在状态之间来回了足够多次，"
-              f"比例的误差也不超过 {state.the_goal().precision:g}。结果在 {(run_dir / 'status.json').resolve()}。",
+              f"{state.precision().describe(zh=True)}。结果在 {(run_dir / 'status.json').resolve()}。",
               f"Plain MD finished. Stop reason: {why_en} ({state.ns_done:g} ns per replica): every target item "
-              f"crossed between states often enough, and every population error is at most "
-              f"{state.the_goal().precision:g}. The results are in {(run_dir / 'status.json').resolve()}.", "done")
+              f"crossed between states often enough, with {state.precision().describe()}. "
+              f"The results are in {(run_dir / 'status.json').resolve()}.", "done")
     elif not state.can_switch():
         _once(run_dir, state, "plain_done",
               f"普通 MD 结束，原因是{why_zh}（每条 {state.ns_done:g} ns）。这些没有采样充分：{', '.join(need)}。" + advice_zh,
@@ -586,22 +697,32 @@ def run_all(
         residues = [d.key for d in chosen]
         es["residues"] = [list(k) for k in residues]
         es["resnames"] = {f"{d.key[0]}:{d.key[1]}": d.residue.rstrip("0123456789") for d in chosen}
+        if state.quantity == "backbone_basins":
+            es["items"] = [d.residue for d in chosen]   # The item specs (rama:A:110, turn:A:52) to bias.
     settings = MetadSettings.from_dict(es.get("settings", {}))
     es["settings"] = asdict(settings)
     n_rep = min(settings.n_replicas, state.n_replicas)
     state.save(run_dir)
 
-    labels = [f"{es['resnames'][f'{c}:{n}']}{n}" for c, n in residues]
+    if state.quantity == "backbone_basins":
+        from .backbone import sets_of
+
+        labels = list(es["items"])
+        by_label = {s.label: s for s in sets_of(state)}
+        bias_what, item_sets = labels, [by_label[k] for k in labels]
+    else:
+        labels = [f"{es['resnames'][f'{c}:{n}']}{n}" for c, n in residues]
+        bias_what, item_sets = residues, None
     rule = StopRule(**{k: v for k, v in es.get("stop_rule", {}).items() if k in StopRule.__dataclass_fields__})
     rule.min_ns = min(rule.min_ns, settings.length_ns)  # A short test run may be judged at its own length.
-    precision = state.the_goal().precision
+    precision = state.precision()
     may_stop = state.allowed("stop_early")
     kind = BIASABLE[state.quantity]
     goal = state.the_goal()
     fes_error = goal.fes_error_kcal if kind == "backbone" else None
     log(f"\nEnhanced sampling (well-tempered {BIAS_TEXT[kind][1]}) for {', '.join(labels)}: "
         f"{n_rep} replicas, up to {settings.length_ns:g} ns each, starting from the end of plain MD. Goal: every "
-        f"population with a standard error of at most {precision:g}"
+        f"{precision.describe()}"
         + (f", and the reweighted phi/psi landscape with an error of at most {fes_error:g} kcal/mol where it is low "
            "(transition rates come from plain MD only: the bias changes the kinetics)" if kind == "backbone" else "")
         + ". "
@@ -614,7 +735,7 @@ def run_all(
     outcome = es.get("outcome") or {}
     if outcome.get("reason") == "target_reached" and may_stop:
         # Resumed after it had stopped with the goal reached: report the saved result again.
-        result = analyze(run_dir, labels, n_rep, settings, state.md.temperature_k, rule, kind, state.backbone)
+        result = analyze(run_dir, labels, n_rep, settings, state.md.temperature_k, rule, kind, item_sets)
         verdicts = assess(result, None, rule, precision, fes_error) if result else {}
     else:
         while True:
@@ -623,11 +744,11 @@ def run_all(
                 for r in range(n_rep):  # The replicas take turns, so they can be compared after each round.
                     # A replica added later starts from the end of a plain MD replica, with its own seed.
                     start = part_path(run_dir, r % state.n_replicas, last, ".state.xml")
-                    run_replica(files, run_dir, r, start, residues, settings, state.md,
+                    run_replica(files, run_dir, r, start, bias_what, settings, state.md,
                                 seed=state.base_seed + 50000 + r, log=log, until_ns=target, kind=kind)
                 done = target
             before, result = result, analyze(run_dir, labels, n_rep, settings, state.md.temperature_k, rule, kind,
-                                             state.backbone)
+                                             item_sets)
             if result is None:
                 break
             verdicts = assess(result, before, rule, precision, fes_error)
@@ -667,7 +788,7 @@ def run_all(
             if spread and n_rep < state.the_goal().max_replicas and done < 0.5 * settings.length_ns:
                 why = (f"The replicas clearly disagree about {', '.join(spread)}.")
                 if state.allowed("add_replicas"):
-                    es.setdefault("first_n_replicas", n_rep)
+                    es.setdefault("first_n_replicas", n_rep)   # Enhanced sampling replicas the run started with.
                     n_rep += 1
                     settings.n_replicas = n_rep
                     es["settings"] = asdict(settings)
@@ -687,10 +808,10 @@ def run_all(
                            once_key="said_add_enhanced_replicas")
             if reached:
                 _once(run_dir, state, "enhanced_reached",
-                      f"增强采样已经达到你要的精度（每条 {done:g} ns，误差不超过 {precision:g}）。"
+                      f"增强采样已经达到你要的精度（每条 {done:g} ns，{precision.describe(zh=True)}）。"
                       f"运行会按你的设置跑满 {settings.length_ns:g} ns；想提前结束可以说“停止 {run_dir.name}”。",
                       f"Enhanced sampling has reached the precision you asked for ({done:g} ns per replica, errors at "
-                      f"most {precision:g}). The run goes on to {settings.length_ns:g} ns as you set it; say "
+                      f"{precision.describe()}). The run goes on to {settings.length_ns:g} ns as you set it; say "
                       f"\"stop {run_dir.name}\" to end it now.", "info")
             if done >= settings.length_ns - 1e-9:
                 # Budget used up. Run longer only with permission, only up to the limit, and only if some open
@@ -730,7 +851,7 @@ def run_all(
     return decisions, labels
 
 
-STOP_REASONS = ("target_reached", "stalled", "not_reachable", "budget_exhausted", "failed")
+STOP_REASONS = ("target_reached", "stalled", "not_reachable", "budget_exhausted", "insufficient_evidence", "failed")
 
 
 def _enhanced_outcome(verdicts: dict[str, str], done: float, length: float) -> dict:
@@ -745,7 +866,8 @@ def _enhanced_outcome(verdicts: dict[str, str], done: float, length: float) -> d
             "residues": dict(verdicts), "time": time.strftime("%Y-%m-%d %H:%M:%S")}
 
 
-def _post_outcome(run_dir: Path, outcome: dict, verdicts: dict[str, str], folder: Path, precision: float) -> None:
+def _post_outcome(run_dir: Path, outcome: dict, verdicts: dict[str, str], folder: Path,
+                  precision: Precision) -> None:
     reason, ns = outcome.get("reason"), outcome.get("ns_per_replica", 0)
     open_ = {k: v for k, v in verdicts.items() if v != "reached"}
     names = ", ".join(f"{k}（{v}）" for k, v in open_.items())
@@ -755,9 +877,9 @@ def _post_outcome(run_dir: Path, outcome: dict, verdicts: dict[str, str], folder
                 f"{folder}/populations.json and in a table at the end of the log.")
     if reason == "target_reached":
         post(run_dir, f"结果已经可以用了：停下的原因是达到目标。每条跑了 {ns:g} ns，所有侧链的比例误差都不超过 "
-                      f"{precision:g}，各条重复一致，并且都在状态之间来回了足够多次。" + where_zh,
+                      f"{precision.epsilon:g}，各条重复一致，并且都在状态之间来回了足够多次。" + where_zh,
              f"Results are ready. Stop reason: goal reached. After {ns:g} ns per replica every population has an "
-             f"error of at most {precision:g}, the replicas agree, and each crossed between states often enough. "
+             f"error of at most {precision.epsilon:g}, the replicas agree, and each crossed between states often enough. "
              + where_en, "done")
     elif reason == "stalled":
         post(run_dir, f"增强采样停下了，原因是采样停滞（每条 {ns:g} ns）：{names}。stalled 表示偏置势推不动这个侧链，"
@@ -770,9 +892,9 @@ def _post_outcome(run_dir: Path, outcome: dict, verdicts: dict[str, str], folder
              "suggestion")
     elif reason == "budget_exhausted":
         post(run_dir, f"增强采样停下了，原因是预算用完（每条 {ns:g} ns），还没达到目标：{names}。" + where_zh +
-                      f"要达到误差 {precision:g}，可以加长，例如说“把 {run_dir.name} 的增强采样加长到 {2 * ns:g} ns”。",
+                      f"要达到误差 {precision.epsilon:g}，可以加长，例如说“把 {run_dir.name} 的增强采样加长到 {2 * ns:g} ns”。",
              f"Enhanced sampling stopped. Stop reason: budget used up ({ns:g} ns per replica) before the goal: "
-             f"{names_en}. " + where_en + f" To reach an error of {precision:g}, run longer, for example \"run the "
+             f"{names_en}. " + where_en + f" To reach an error of {precision.epsilon:g}, run longer, for example \"run the "
              f"enhanced sampling of {run_dir.name} to {2 * ns:g} ns\".", "suggestion")
 
 

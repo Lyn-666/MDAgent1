@@ -17,6 +17,8 @@ from pathlib import Path
 OUTPUTS = [
     ("report.*.md", "result report: results with errors, stop reasons, actions, limits (Chinese and English)"),
     ("status.json", "latest plain MD diagnosis: populations, errors and verdict of every item"),
+    ("landscape_*.svg", "phi/psi free-energy landscape of a backbone observable (figure)"),
+    ("landscape_*.csv", "phi/psi free-energy landscape of a backbone observable (every 10 degree bin)"),
     ("protein.pdb", "topology for all .dcd files (protein atoms only)"),
     ("replica_*_part*.dcd", "plain MD trajectory of replica i, round k"),
     ("enhanced/replica_*_chunk*.dcd", "enhanced sampling trajectory of replica i, chunk k"),

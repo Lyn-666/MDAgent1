@@ -47,11 +47,18 @@ if _missing_packages():   # Say how to fix it, instead of a long traceback.
     sys.exit(2)
 
 from .target import Target, parse_residue_spec, resolve_target  # noqa: E402
+from .uncertainty import CRITERIA  # noqa: E402
 
 
 def _target_from_args(args) -> Target:
     if args.around_ligand:
         return Target(ligand=args.around_ligand, cutoff_nm=args.cutoff_angstrom / 10.0)
+    if not args.residues and getattr(args, "backbone", None):
+        # A backbone run without a target region: the target is the residues of the basin observables.
+        from .basins import parse_sets
+
+        res = {(s.chain, s.resseq + off) for s in parse_sets(args.backbone) for off, _ in s.dihedrals}
+        return Target(residues=tuple(sorted(res, key=lambda k: (k[0] or "", k[1]))))
     if not args.residues and getattr(args, "observe", None):
         # A run that waits for a change: the target is the residues named in the changes.
         from .observables import parse_events
@@ -65,6 +72,31 @@ def _target_from_args(args) -> Target:
         res = {(c, n) for s in parse_distances(args.distances) for c, n in s.residues()}
         return Target(residues=tuple(sorted(res, key=lambda k: (k[0] or "", k[1]))))
     return Target(residues=parse_residue_spec(args.residues))
+
+
+def _check_backbone(args, structure: str | Path, drop_missing: bool = False) -> list:
+    """Parse --backbone and find every backbone atom it needs. Raises ValueError with a clear message.
+
+    drop_missing: items made from a residue list leave out chain ends (no phi or psi) with a note instead."""
+    import mdtraj as md
+
+    from .basins import dihedral_atoms, parse_sets
+
+    sets = parse_sets(args.backbone, rama=getattr(args, "rama_basins", "boxes"), boxes_text=getattr(args, "basins", ""),
+                      margin_deg=getattr(args, "basin_margin", 10.0))
+    top = md.load_topology(str(structure))
+    kept = []
+    for s in sets:
+        try:
+            dihedral_atoms(top, s)
+            kept.append(s)
+        except ValueError as e:
+            if not drop_missing:
+                raise
+            print(f"Note: {s.label} is left out: {e} (a chain end has no phi or no psi).")
+    if not kept:
+        raise ValueError("no backbone item has all its atoms in the structure.")
+    return kept
 
 
 def _check_distances(args, structure: str | Path) -> list:
@@ -157,6 +189,11 @@ def _goal_from_args(args):
     from .observables import QUANTITIES
 
     goal = Goal.for_mode(args.mode, description=args.goal, precision=args.precision,
+                         criterion=getattr(args, "criterion", "standard_error"),
+                         allocation=getattr(args, "allocation", "rounds"),
+                         budget_ns=getattr(args, "budget_ns", 0.0) or 0.0,
+                         stop_looks=getattr(args, "stop_looks", 3),
+                         alpha=getattr(args, "alpha", 0.05),
                          quantity=QUANTITIES[getattr(args, "quantity", "chi1")],
                          max_replicas=getattr(args, "max_replicas", 10), extend_factor=getattr(args, "extend_factor", 2.0),
                          hold_ps=getattr(args, "hold_ps", 100.0), seen_in=getattr(args, "seen_in", 1),
@@ -170,6 +207,8 @@ def _goal_from_args(args):
         goal.permissions = allowed
     if not 0 < goal.precision < 1:
         raise ValueError("--precision must be between 0 and 1.")
+    if not 0 < goal.alpha < 0.5:
+        raise ValueError("--alpha must be between 0 and 0.5.")
     return goal
 
 
@@ -283,10 +322,18 @@ def cmd_run(args) -> int:
     if args.distances and args.quantity == "chi1":
         args.quantity = "distance"
         print("Note: --distances given, so the quantity is distance.")
+    if args.backbone and args.quantity == "chi1":
+        args.quantity = "backbone"
+        print("Note: --backbone given, so the quantity is backbone basins.")
     if args.quantity == "backbone":
-        from .backbone import parse_basins
+        from .basins import parse_sets
+        if not (args.backbone or args.residues or args.around_ligand):
+            print("error: --quantity backbone needs --backbone (for example \"rama:A:73;turn:A:52\") or the residues "
+                  "with --residues or --around-ligand.", file=sys.stderr)
+            return 2
         try:
-            parse_basins(args.basins)
+            parse_sets(args.backbone or "rama:1", rama=args.rama_basins, boxes_text=args.basins,
+                       margin_deg=args.basin_margin)
         except ValueError as e:
             print(f"error: {e}", file=sys.stderr)
             return 2
@@ -296,7 +343,9 @@ def cmd_run(args) -> int:
         if not (0 < args.rate_rel_error < 1) or args.fes_error_kcal <= 0:
             print("error: --rate-rel-error must be between 0 and 1, and --fes-error-kcal above 0.", file=sys.stderr)
             return 2
-    if args.quantity in ("chi1", "backbone") and not (args.residues or args.around_ligand):
+        if args.pdb and args.backbone:
+            _check_backbone(args, args.pdb)  # Fail before building if an atom is not there.
+    if args.quantity == "chi1" and not (args.residues or args.around_ligand):
         print("error: give the target with --residues or --around-ligand.", file=sys.stderr)
         return 2
     if args.quantity == "distance":
@@ -378,6 +427,12 @@ def cmd_run(args) -> int:
     if check is not None:
         built, setup = _build_from_pdb(args, keys, out, check.remove_residues, check.cap_ends)
     specs = _check_distances(args, out / "protein.pdb") if args.quantity == "distance" else []
+    auto_backbone = args.quantity == "backbone" and not args.backbone
+    if auto_backbone:   # --residues or --around-ligand: every target residue becomes a rama item.
+        from .basins import residue_sets
+        args.backbone = residue_sets(keys)
+    basin_sets = (_check_backbone(args, out / "protein.pdb", drop_missing=auto_backbone)
+                  if args.quantity == "backbone" else [])
     from .observables import parse_events
     if args.quantity == "event":
         _check_events(parse_events(args.observe), out / "protein.pdb")
@@ -401,7 +456,10 @@ def cmd_run(args) -> int:
         mode=args.mode,
         goal=asdict(_goal_from_args(args)),
         distances=[s.label for s in specs],
-        backbone={"basins": args.basins, "margin_deg": args.basin_margin} if args.quantity == "backbone" else {},
+        backbone=[s.label for s in basin_sets],
+        backbone_settings={"basins": args.basins, "margin_deg": args.basin_margin, "rama": args.rama_basins}
+        if args.quantity == "backbone" else {},
+        notes={"replicas_at_start": args.replicas},
         events=[e.label for e in parse_events(args.observe)] if args.quantity == "event" else [],
         adaptive={"policy": args.adaptive_policy, "n_clusters": args.adaptive_clusters,
                   "full_interval_ps": args.full_save_ps} if args.sampling == "adaptive" else {},
@@ -421,15 +479,21 @@ def cmd_run(args) -> int:
               + (f" ({goal.description})" if goal.description else "") + ".")
     else:
         what = (f"near/far populations of {', '.join(state.distances)}" if state.distances
-                else "Ramachandran basin populations, transition statistics and phi/psi free-energy landscape of "
-                     f"the target residues (rate error at most {goal.rate_rel_error:g}, landscape error at most "
-                     f"{goal.fes_error_kcal:g} kcal/mol)" if state.quantity == "backbone_basins"
+                else f"backbone basins of {', '.join(state.backbone)} (populations, transition statistics, dG, "
+                     f"the free-energy landscape; rate error at most {goal.rate_rel_error:g}, landscape error at most "
+                     f"{goal.fes_error_kcal:g} kcal/mol)" if state.backbone
                 else "chi1 populations of the target side chains")
-        print(f"Goal: {what}, standard error at most {goal.precision:g}"
+        print(f"Goal: {what}, {state.precision().describe()}"
               + (f" ({goal.description})" if goal.description else "") + ".")
     print("The agent may by itself: " + (", ".join(goal.permissions) or "nothing (it only suggests)") + ".")
-    print(f"Plan: {args.replicas} replicas. Round 1 is {loop.first_ns:g} ns per replica. "
-          f"Later rounds add {loop.extend_ns:g} ns. Budget: {loop.max_ns:g} ns per replica.")
+    if goal.allocation == "projection":
+        print(f"Plan: the agent decides how many replicas, how long and when to stop, for the least compute. It "
+              f"starts with {args.replicas} replicas of {loop.first_ns:g} ns (a look that only plans), then looks at "
+              f"most {goal.stop_looks} more times. Limits: {state.budget_ns():g} ns of production in total, "
+              f"{loop.max_ns:g} ns per replica, {goal.max_replicas} replicas.")
+    else:
+        print(f"Plan: {args.replicas} replicas. Round 1 is {loop.first_ns:g} ns per replica. "
+              f"Later rounds add {loop.extend_ns:g} ns. Budget: {loop.max_ns:g} ns per replica.")
     print("An item that never changes state is given up for plain MD "
           + (f"after {loop.no_flip_patience_ns:g} ns per replica." if loop.no_flip_patience_ns is not None else
              "when, even at the highest rate the data allow, the rest of the budget would not show enough changes."))
@@ -564,13 +628,34 @@ def build_parser() -> argparse.ArgumentParser:
                    help="--observe: the new state must last this long (ps) to count as seen (default 100).")
     r.add_argument("--seen-in", type=int, default=1,
                    help="--observe: in how many replicas the change must be seen (default 1).")
-    r.add_argument("--quantity", default="chi1", choices=["chi1", "distance", "event", "backbone"],
+    r.add_argument("--backbone", default=None,
+                   help="For --quantity backbone: backbone basins, separated by ';'. rama:A:73 is the phi/psi "
+                        "region of residue 73 (alphaR, beta, alphaL); turn:A:52 is the type of the beta turn whose "
+                        "residue i+1 is 52 (type I or II); rama:A:70-74 expands to every residue. Populations, the "
+                        "transition statistics, the free-energy difference and the landscape are reported, each judged "
+                        "on its own. With --residues instead, every residue becomes a rama item.")
+    r.add_argument("--allocation", default="rounds", choices=["rounds", "projection"],
+                   help="rounds (default): fixed rounds of --extend-ns for every replica. projection: the agent "
+                        "decides how many replicas, how long and when to stop, for the least compute, within "
+                        "--budget-ns, --max-ns per replica and --max-replicas.")
+    r.add_argument("--budget-ns", type=float, default=0.0,
+                   help="With --allocation projection: production ns of all replicas together, never exceeded. "
+                        "Default: --max-replicas x --max-ns if the agent may add replicas, else --replicas x --max-ns.")
+    r.add_argument("--stop-looks", type=int, default=3,
+                   help="With --allocation projection: the agent may stop at no more than this many looks, and its "
+                        "intervals are calibrated for that many (default 3).")
+    r.add_argument("--quantity", default="chi1", choices=["chi1", "distance", "backbone", "event"],
                    help="What you want to know. chi1 (default): the rotamer states of the target side chains. "
                         "distance: how often atom distances are near or far (give them with --distances). "
-                        "backbone: Ramachandran basin populations, transition statistics and the phi/psi "
-                        "free-energy landscape of the target residues (give them with --residues).")
+                        "backbone: backbone basins, with transition statistics and the free-energy landscape (give "
+                        "them with --backbone, or the residues with --residues). event: stop once a change is seen "
+                        "(give it with --observe).")
+    r.add_argument("--rama-basins", default="boxes", choices=["boxes", "centres"],
+                   help="--quantity backbone: how Ramachandran basins are defined. boxes (default): regions that "
+                        "cover the whole map (alpha_R, beta with PPII, alpha_L, other). centres: three centres "
+                        "(alphaR, beta, alphaL) with a 50 degree core, as runs made before 2026-11-22.")
     r.add_argument("--basins", default="",
-                   help="--quantity backbone: your own basins, 'name:phi_from,phi_to,psi_from,psi_to; ...' in degrees "
+                   help="--quantity backbone: your own regions, 'name:phi_from,phi_to,psi_from,psi_to; ...' in degrees "
                         "(a name may repeat). Default: alpha_R, beta (with PPII), alpha_L, other.")
     r.add_argument("--basin-margin", type=float, default=10.0,
                    help="--quantity backbone: a frame is in a basin only this many degrees inside it (default 10).")
@@ -621,7 +706,15 @@ def build_parser() -> argparse.ArgumentParser:
                         "only the method you chose; MDAgent suggests changes in the chat but does not switch.")
     r.add_argument("--goal", default="", help="What you want to know, in your own words (kept in run.json).")
     r.add_argument("--precision", type=float, default=0.05,
-                   help="Largest allowed standard error of any chi1 state population (0 to 1). Default 0.05.")
+                   help="Tolerance on any state population (0 to 1). Default 0.05.")
+    r.add_argument("--criterion", default="standard_error", choices=list(CRITERIA),
+                   help="What has to be at most --precision. standard_error (default): the plain standard error. "
+                        "confidence: the half-width of a 1-alpha interval, with alpha shared over the planned "
+                        "decision points, so that stopping early is not helped by looking many times. sequence: a "
+                        "confidence sequence, valid however often the agent looks (the widest, so the slowest).")
+    r.add_argument("--alpha", type=float, default=0.05,
+                   help="Allowed chance that the true value is outside the interval (default 0.05). Used by "
+                        "--criterion confidence and sequence, and by 'compare'.")
     r.add_argument("--allow", default=None,
                    help="What the agent may do by itself, comma separated: extend, add_replicas, switch_method, "
                         "stop_early; or 'none'. Default: only stop_early in auto mode (time and replicas are "
@@ -690,6 +783,10 @@ def build_parser() -> argparse.ArgumentParser:
                                         "and a longer reference run.")
     cp.add_argument("--run", required=True)
     cp.add_argument("--reference", required=True)
+    cp.add_argument("--tolerance", type=float, default=None,
+                    help="Populations that differ by less than this count as the same answer. Default: the "
+                         "precision the compared run asked for.")
+    cp.add_argument("--alpha", type=float, default=0.05, help="Confidence of the equivalence test (default 0.05).")
     cp.set_defaults(func=cmd_compare)
 
     sh = sub.add_parser("shadow", help="What would the new decision core have done? Replays every decision point "
@@ -698,6 +795,101 @@ def build_parser() -> argparse.ArgumentParser:
     sh.add_argument("--live", action="store_true", help="Compare the live shadow records (decisions.core.jsonl) "
                                                         "instead of replaying.")
     sh.set_defaults(func=cmd_shadow)
+
+    b = sub.add_parser("budget", help="Which way of spending simulation time reaches the asked precision for the "
+                                      "lowest cost? Replays strategies on a finished long run, or on a model.")
+    b.add_argument("--run", default=None, help="A finished plain MD run with several replicas, used as the pool.")
+    b.add_argument("--synthetic", default=None,
+                   help="Instead of a run: a model with known populations, for example '0.3,0.7' or '0.2,0.5,0.3'. "
+                        "Needs no GPU.")
+    b.add_argument("--rate-per-ns", type=float, default=1.0,
+                   help="Model only: how often the item changes state, per ns (default 1).")
+    b.add_argument("--pool-replicas", type=int, default=12, help="Model only: replicas in the pool (default 12).")
+    b.add_argument("--pool-ns", type=float, default=60.0, help="Model only: ns per pool replica (default 60).")
+    b.add_argument("--replicas", type=int, default=3, help="Replicas every strategy starts with (default 3).")
+    b.add_argument("--first-ns", type=float, default=2.0)
+    b.add_argument("--extend-ns", type=float, default=2.0)
+    b.add_argument("--max-ns", type=float, default=20.0, help="Budget per replica (default 20).")
+    b.add_argument("--max-replicas", type=int, default=10)
+    b.add_argument("--fixed-replicas", type=int, default=None,
+                   help="The baseline: the plan a person would fix in advance, without looking at data. "
+                        "Default: the same as --replicas, which is usually generous to the agent, because a "
+                        "real fixed plan has to be safe without looking.")
+    b.add_argument("--fixed-ns", type=float, default=None, help="ns per replica of the baseline plan. Default: "
+                                                                "--max-ns.")
+    b.add_argument("--extend-factor", type=float, default=2.0,
+                   help="How far past the budget the mdagent strategy may run (default 2).")
+    b.add_argument("--precision", type=float, default=0.05, help="Tolerance on any population (default 0.05).")
+    b.add_argument("--criterion", default="standard_error", choices=list(CRITERIA))
+    b.add_argument("--alpha", type=float, default=0.05)
+    b.add_argument("--fixed-grid", default=None,
+                   help="Several fixed plans to compare with, replicas x ns, for example '3x10,5x20,10x40'. "
+                        "Needed for the verdict on Hypothesis A: the baseline is the cheapest of them that reaches "
+                        "the same accuracy as the agent.")
+    b.add_argument("--items", default=None,
+                   help="Replay only these items, for example 'GLU16,ASP32' or '16,32'. Choose them from a separate "
+                        "pilot run, never from the pool's own results.")
+    b.add_argument("--baseline", default=None,
+                   help="The fixed plans people really use, from the literature, for example '1x100,3x100' (they must "
+                        "also be in --fixed-grid). Hypothesis A is judged against these. Default: the largest grid plan.")
+    b.add_argument("--holdout", type=int, default=0,
+                   help="Reserve this many pool replicas as the reference, used by no strategy (for a run as pool; "
+                        "a model has a known truth). Recommended: about 40%% of the pool.")
+    b.add_argument("--target-rate", type=float, default=0.9,
+                   help="Hypothesis A: the share of repeats whose answer must be within the tolerance (default 0.9).")
+    b.add_argument("--min-flips", type=int, default=4, help="Flips per replica before a result counts (default 4).")
+    b.add_argument("--no-flip-patience-ns", type=float, default=10.0)
+    b.add_argument("--repeats", type=int, default=1,
+                   help="Repeat the whole comparison with different replicas (default 1). Use 10 or more before "
+                        "believing a saving.")
+    b.add_argument("--seed", type=int, default=0)
+    b.add_argument("--equilibration-ns", type=float, default=None,
+                   help="Cost of starting one replica. Default: the equilibration of the run, or 0.6 ns.")
+    b.add_argument("--parallel", type=int, default=1, help="How many replicas run at the same time (default 1).")
+    b.add_argument("--ns-per-day", type=float, default=0.0, help="Measured throughput, to print GPU-hours.")
+    b.add_argument("--out", default=None, help="Where to write budget.json and budget.md. Default: the run folder, "
+                                               "or runs/budget for a model.")
+    b.add_argument("--name", default="budget")
+    b.set_defaults(func=cmd_budget)
+
+    ea = sub.add_parser("experiment-a", help="Experiment A: how many replicas, how long, and when to stop. "
+                                             "Replays fixed plans, Sequential-CI and the agent on a pool run.")
+    ea.add_argument("--run", default=None, help="The pool: a finished plain MD run with many replicas.")
+    ea.add_argument("--observables", default=None,
+                    help="Backbone basins to judge, for example 'turn:A:52' or 'rama:A:73;rama:A:74' "
+                         "(a range like rama:A:2-75 expands).")
+    ea.add_argument("--model", default=None,
+                    help="Instead of a run: model items with known populations, 'populations@rate per ns', "
+                         "separated by ';', for example '0.7,0.3@8'. Needs no GPU.")
+    ea.add_argument("--model-replicas", type=int, default=16)
+    ea.add_argument("--model-ns", type=float, default=100.0)
+    ea.add_argument("--select", action="store_true",
+                    help="Pilot mode: only print (and with --out write) the items that plain MD can answer.")
+    ea.add_argument("--at-most", type=int, default=5, help="With --select: keep at most this many items.")
+    ea.add_argument("--trials", type=int, default=50)
+    ea.add_argument("--holdout", type=int, default=6)
+    ea.add_argument("--seed", type=int, default=0)
+    ea.add_argument("--replicas", type=int, default=4, help="The agent starts with this many replicas.")
+    ea.add_argument("--sequential", default="4,8", help="Replica counts of the Sequential-CI arms.")
+    ea.add_argument("--families", default="1,3,4,5,8", help="Replica counts of the fixed plans.")
+    ea.add_argument("--chunk-ns", type=float, default=5.0)
+    ea.add_argument("--max-ns", type=float, default=100.0)
+    ea.add_argument("--budget-ns", type=float, default=800.0)
+    ea.add_argument("--max-replicas", type=int, default=8)
+    ea.add_argument("--agent-looks", type=int, default=3)
+    ea.add_argument("--burn-in-ns", type=float, default=0.0)
+    ea.add_argument("--population", type=float, default=0.05, help="Tolerance on populations (default 0.05).")
+    ea.add_argument("--dg-kt", type=float, default=0.5)
+    ea.add_argument("--rate-rel", type=float, default=0.2)
+    ea.add_argument("--landscape-js", type=float, default=0.05)
+    ea.add_argument("--alpha", type=float, default=0.05)
+    ea.add_argument("--reliability", type=float, default=0.9)
+    ea.add_argument("--false-stop-max", type=float, default=0.1)
+    ea.add_argument("--parallel", type=int, default=1)
+    ea.add_argument("--ns-per-day", type=float, default=0.0)
+    ea.add_argument("--out", default=None)
+    ea.add_argument("--name", default="experiment_A")
+    ea.set_defaults(func=cmd_experiment_a)
 
     st = sub.add_parser("start", help="Start here: choose the language, the language model (Claude or ChatGPT) "
                                       "and where to talk (web page or terminal).")
@@ -768,7 +960,7 @@ def cmd_report(args) -> int:
 def cmd_compare(args) -> int:
     from .report import compare
 
-    table, agree = compare(Path(args.run), Path(args.reference))
+    table, agree = compare(Path(args.run), Path(args.reference), args.tolerance, args.alpha)
     print(table)
     return 0 if agree else 1
 
@@ -798,6 +990,119 @@ def cmd_shadow(args) -> int:
             status = 1
         print()
     return status
+
+
+def cmd_budget(args) -> int:
+    from .budget import Plan, compare_strategies, format_table, markov_pool, pool_from_run, write
+    from .cost import CostModel
+    from .uncertainty import Precision
+
+    if not args.run and not args.synthetic:
+        print("Give either --run (a finished long run to replay) or --synthetic (a model with known populations).")
+        return 2
+    equil = args.equilibration_ns
+    if args.synthetic:
+        from .budget import markov_items
+
+        items = []
+        for chunk in [c for c in args.synthetic.split(";") if c.strip()]:
+            pops_text, _, rate = chunk.partition("@")
+            pops = [float(x) for x in pops_text.split(",") if x.strip()]
+            if len(pops) < 2:
+                raise ValueError("--synthetic needs at least two populations per item, for example '0.3,0.7'. "
+                                 "Several items: '0.3,0.7@5;0.6,0.4@1' (populations@rate per ns).")
+            items.append((pops, float(rate) if rate else args.rate_per_ns))
+        pool = (markov_pool(items[0][0], items[0][1], args.pool_replicas, args.pool_ns, seed=args.seed)
+                if len(items) == 1 else
+                markov_items(items, args.pool_replicas, args.pool_ns, seed=args.seed))
+        out_dir = Path(args.out or "runs/budget")
+    else:
+        pool = pool_from_run(args.run)
+        out_dir = Path(args.out or args.run)
+    if args.items:
+        pool = pool.select([x for x in args.items.split(",") if x.strip()])
+        if equil is None:
+            import json as _json
+
+            md = _json.loads((Path(args.run) / "run.json").read_text()).get("md", {})
+            equil = md.get("equilibration_ps", 600.0) / 1000.0
+    plan = Plan(replicas=args.replicas, first_ns=args.first_ns, extend_ns=args.extend_ns, max_ns=args.max_ns,
+                max_replicas=args.max_replicas, extend_factor=args.extend_factor,
+                min_flips_per_replica=args.min_flips, no_flip_patience_ns=args.no_flip_patience_ns,
+                fixed_replicas=args.fixed_replicas, fixed_ns=args.fixed_ns)
+    precision = Precision(epsilon=args.precision, criterion=args.criterion, alpha=args.alpha, looks=plan.looks())
+    model = CostModel(equilibration_ns=0.6 if equil is None else equil, n_parallel=args.parallel,
+                      ns_per_day=args.ns_per_day)
+    print(f"Pool: {pool.source}")
+    print(f"{pool.n_replicas} replicas of {pool.ns_per_replica:g} ns, items: {', '.join(pool.labels)}.")
+    if pool.n_replicas <= max(args.replicas, args.fixed_replicas or 0):
+        print(f"Warning: the pool has {pool.n_replicas} replicas, so no replica is left over as an independent "
+              "reference. Run the pool with more replicas, or start the strategies with fewer.")
+    from .budget import grid_name, parse_grid
+
+    out = compare_strategies(pool, plan, precision, model, repeats=args.repeats, seed=args.seed,
+                             fixed_grid=parse_grid(args.fixed_grid), holdout=args.holdout,
+                             target_rate=args.target_rate,
+                             baselines=[grid_name(n, ns) for n, ns in parse_grid(args.baseline)] or None)
+    print()
+    print(format_table(out))
+    for name, h in out.hypothesis.items():
+        print(f"\nHypothesis A, {name}: {h['verdict']}. {h['why']}")
+    if args.ns_per_day > 0:
+        print()
+        for name, v in out.summary.items():
+            print(f"{name:<14}{v['compute_ns_median'] / args.ns_per_day * 24:.1f} GPU-hours (median)")
+    for path in write(out, out_dir, args.name):
+        print(f"\nWritten: {path.resolve()}")
+    return 0
+
+
+def cmd_experiment_a(args) -> int:
+    from .experiment_a import Design, Targets, model_pool, pool_from_run, run, select_items, write_outputs
+
+    def ints(text):
+        return tuple(int(x) for x in text.split(",") if x.strip())
+
+    if args.model:
+        items = []
+        for chunk in [c for c in args.model.split(";") if c.strip()]:
+            pops, _, rate = chunk.partition("@")
+            items.append(([float(x) for x in pops.split(",")], float(rate or 5)))
+        pool = model_pool(items, args.model_replicas, args.model_ns, seed=args.seed)
+        out_dir = Path(args.out or "runs/experiment_A_model")
+    elif args.run and args.observables:
+        pool = pool_from_run(args.run, args.observables)
+        out_dir = Path(args.out or args.run)
+    else:
+        print("Give --run with --observables (a pool run), or --model (no GPU).")
+        return 2
+    if args.select:
+        chosen, counts = select_items(pool, at_most=args.at_most)
+        for k, c in counts.items():
+            print(f"{k:<14} transitions per replica {c}" + ("  <- chosen" if k in chosen else ""))
+        print("\nChosen: " + (";".join(chosen) or "none"))
+        if args.out:
+            Path(args.out).write_text(";".join(chosen) + "\n")
+            print(f"Written: {Path(args.out).resolve()}")
+        return 0 if chosen else 1
+    design = Design(replicas=args.replicas, sequential=ints(args.sequential), families=ints(args.families),
+                    chunk_ns=args.chunk_ns, max_ns=args.max_ns, budget_ns=args.budget_ns,
+                    max_replicas=args.max_replicas, agent_looks=args.agent_looks, burn_in_ns=args.burn_in_ns)
+    targets = Targets(population=args.population, dg_kt=args.dg_kt, rate_rel=args.rate_rel,
+                      landscape_js=args.landscape_js, alpha=args.alpha, reliability=args.reliability,
+                      false_stop_max=args.false_stop_max)
+    print(f"Pool: {pool.source}; {pool.n_replicas} replicas of {pool.ns_per_replica:g} ns; items {', '.join(pool.labels)}.")
+    out = run(pool, design, targets, trials=args.trials, holdout=args.holdout, seed=args.seed,
+              n_parallel=args.parallel, ns_per_day=args.ns_per_day)
+    v = out["verdict"]
+    print(f"\nVerdict: {v['result']}" + (f" ({'; '.join(v['failed'])})" if v["failed"] else ""))
+    for arm, s in out["summary"].items():
+        if arm != "fixed":
+            print(f"  {arm:<16} success {s['success_rate']:.0%}  false stops {s['false_stop_rate']:.0%}  "
+                  f"compute {s['compute_ns_median']:.0f} ns  ({s['replicas_median']:g} x {s['ns_per_replica_median']:.0f} ns)")
+    for path in write_outputs(out, out_dir, args.name):
+        print(f"Written: {path.resolve()}")
+    return 0
 
 
 def cmd_start(args) -> int:

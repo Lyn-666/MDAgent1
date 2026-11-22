@@ -15,6 +15,7 @@ import numpy as np
 import pytest
 
 from mdagent.backbone import assign_basins, parse_basins
+from mdagent.basins import BasinSet
 from mdagent.enhanced import KB_KJ, MetadSettings, deposit
 from mdagent.reweight import StopRule, analyze, assess
 
@@ -23,6 +24,7 @@ from test_shadow import make_run  # noqa: E402
 
 DATA = Path(__file__).resolve().parent / "data"
 KT = KB_KJ * 300.0
+RAMA5 = BasinSet.parse("rama:A:5")
 WELLS = {"alpha_R": ((-65.0, -40.0), 0.70), "beta": ((-120.0, 135.0), 0.25), "alpha_L": ((60.0, 45.0), 0.05)}
 
 
@@ -69,7 +71,7 @@ def test_reweighting_recovers_basin_populations_and_the_landscape(tmp_path, toy_
     (tmp_path / "enhanced").mkdir()
     for r, data in enumerate(runs):
         np.save(tmp_path / "enhanced" / f"replica_{r}_chi.npy", data)
-    result = analyze(tmp_path, ["ALA5"], 2, s, 300.0, StopRule(), kind="backbone")
+    result = analyze(tmp_path, ["ALA5"], 2, s, 300.0, StopRule(), kind="backbone", backbone=[RAMA5])
     res = result["residues"][0]
     assert result["kind"] == "backbone" and result["states"] == ["alpha_R", "beta", "alpha_L", "other"]
     for name, (_, true) in WELLS.items():
@@ -96,7 +98,7 @@ def test_stopping_needs_the_landscape_precision_too(tmp_path, toy_runs):
     (tmp_path / "enhanced").mkdir()
     for r, data in enumerate(runs):
         np.save(tmp_path / "enhanced" / f"replica_{r}_chi.npy", data)
-    result = analyze(tmp_path, ["ALA5"], 2, s, 300.0, StopRule(min_ns=1.0), kind="backbone")
+    result = analyze(tmp_path, ["ALA5"], 2, s, 300.0, StopRule(min_ns=1.0), kind="backbone", backbone=[RAMA5])
     loose = assess(result, None, StopRule(min_ns=1.0), 0.2, fes_error_kcal=50.0)
     strict = assess(result, None, StopRule(min_ns=1.0), 0.2, fes_error_kcal=1e-6)
     assert loose == {"ALA5": "reached"} and strict == {"ALA5": "not_yet"}
@@ -108,12 +110,13 @@ def test_phi_and_psi_quads_in_column_order():
     from mdagent.enhanced import dihedral_quads
 
     top = app.PDBFile(str(DATA / "fragment_108-114.pdb")).topology
-    quads = dihedral_quads(top, [("A", 110), ("A", 111)], "backbone")
+    quads = dihedral_quads(top, ["rama:A:110", "turn:A:110"], "backbone")
     assert len(quads) == 4
     names = [[a.name for a in top.atoms() if a.index in q] for q in quads]
     assert sorted(names[0]) == sorted(["C", "N", "CA", "C"]) and sorted(names[1]) == sorted(["N", "CA", "C", "N"])
+    assert quads[2] == quads[1] and quads[3] != quads[0]   # turn:A:110: psi of 110, then phi of 111.
     with pytest.raises(ValueError):
-        dihedral_quads(top, [("A", 108)], "backbone")    # The first residue has no phi.
+        dihedral_quads(top, ["rama:A:108"], "backbone")    # The first residue has no phi.
 
 
 def _backbone_run(tmp_path, toy_runs, requested=True):
@@ -122,6 +125,7 @@ def _backbone_run(tmp_path, toy_runs, requested=True):
     s, runs = toy_runs
     run_dir, state, _ = make_run(tmp_path, goal=Goal.for_mode("auto", quantity="backbone_basins", precision=0.1))
     state.target = [("A", 111)]
+    state.backbone = ["rama:A:111"]
     state.enhanced = {"enabled": True, "requested": requested,
                       "settings": {**asdict(s), "length_ns": 6.0, "chunk_ns": 2.0, "n_replicas": 2},
                       "stop_rule": {"min_ns": 2.0}}
@@ -135,7 +139,7 @@ def test_the_agent_switches_a_stuck_backbone_residue_to_phi_psi_metadynamics(tmp
     from mdagent.agent import Decision, RunState
 
     run_dir, state, runs = _backbone_run(tmp_path, toy_runs)
-    monkeypatch.setattr(agent, "run_loop", lambda *a, **k: [Decision("VAL111", "enhanced_sampling", "stuck", ("A", 111),
+    monkeypatch.setattr(agent, "run_loop", lambda *a, **k: [Decision("rama:A:111", "enhanced_sampling", "stuck", ("A", 111),
                                                                       cause="stalled")])
     kinds = []
 
@@ -148,11 +152,11 @@ def test_the_agent_switches_a_stuck_backbone_residue_to_phi_psi_metadynamics(tmp
     monkeypatch.setattr(enhanced, "run_replica", fake_replica)
     logs = []
     _, labels = agent.run_all(run_dir, state, files=object(), log=logs.append)
-    assert labels == ["VAL111"] and set(kinds) == {"backbone"}
+    assert labels == ["rama:A:111"] and set(kinds) == {"backbone"}
     assert any("metadynamics on phi and psi" in line for line in logs)
     pops = json.loads((run_dir / "enhanced" / "populations.json").read_text())
     assert pops["kind"] == "backbone" and "landscapes" not in pops
-    assert (run_dir / "backbone" / "VAL111_fes_reweighted.csv").exists()
+    assert (run_dir / "backbone" / "rama_A_111_fes_reweighted.csv").exists()
     saved = RunState.load(run_dir)
     assert saved.enhanced["outcome"]["reason"] in ("target_reached", "budget_exhausted", "stalled")
 
@@ -160,12 +164,13 @@ def test_the_agent_switches_a_stuck_backbone_residue_to_phi_psi_metadynamics(tmp
     from mdagent.tools_openmm import MetadTool
 
     tool = MetadTool(run_dir, saved)
-    assert tool.supports("state_populations", "VAL111 basins") and tool.supports("free_energy_surface", "VAL111 landscape")
-    assert not tool.supports("transition_rates", "VAL111 transitions")
-    data = tool.observe(["VAL111 basins", "VAL111 landscape"])
+    assert tool.supports("state_populations", "rama:A:111 basins")
+    assert tool.supports("free_energy_surface", "rama:A:111 landscape")
+    assert not tool.supports("transition_rates", "rama:A:111 transitions")
+    data = tool.observe(["rama:A:111 basins", "rama:A:111 landscape"])
     from mdagent.estimators import FreeEnergySurface, WeightedPopulations
-    a = WeightedPopulations().assess("VAL111 basins", data["VAL111 basins"], {"max_se": 0.1})
-    f = FreeEnergySurface().assess("VAL111 landscape", data["VAL111 landscape"], {"max_error_kcal": 5.0})
+    a = WeightedPopulations().assess("b", data["rama:A:111 basins"], {"max_se": 0.1})
+    f = FreeEnergySurface().assess("l", data["rama:A:111 landscape"], {"max_error_kcal": 5.0})
     assert abs(a.estimate["alpha_R"] - 0.70) < 0.1 and f.signals["regime"] == "biased"
 
 
@@ -191,7 +196,7 @@ def test_phi_psi_metadynamics_runs_in_openmm(tmp_path):
     state = RunState(pdb="x", target_description="t", target=[("A", n) for n in range(109, 114)], n_replicas=2,
                      base_seed=1, md=MDSettings(equilibration_ps=1.0, save_interval_ps=0.5, platform="CPU"),
                      loop=LoopSettings(first_ns=0.002, max_ns=0.002), setup=asdict(opts),
-                     goal=asdict(Goal.for_mode("auto", quantity="backbone_basins")),
+                     goal=asdict(Goal.for_mode("auto", quantity="backbone_basins")), backbone=["rama:A:109-113"],
                      enhanced={"enabled": True, "requested": True,
                                "settings": dict(length_ns=0.002, n_replicas=2, pace_ps=0.1, chunk_ns=0.001,
                                                 height_kj=2.0, save_interval_ps=0.5)})

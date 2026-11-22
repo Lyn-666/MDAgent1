@@ -255,31 +255,35 @@ def worst_landscape_error(fes: dict, cutoff_kcal: float = 2.0) -> float:
     return float(np.nanmax(e[mask]))
 
 
-def basin_minima(fes: dict, basins: list[Basin], margin_deg: float = 10.0) -> dict:
-    """Lowest F inside each basin core, with its phi/psi and error: {basin: [F, error, phi, psi]} or None."""
+def basin_minima(fes: dict, spec) -> dict:
+    """Lowest F inside each basin core of a basin set (basins.BasinSet), with its two angles and error:
+    {basin: [F, error, angle1, angle2]} or None for a basin with no visited bin."""
+    from .basins import core
+
     edges = fes["edges_deg"]
     centers = (edges[:-1] + edges[1:]) / 2
-    phi_c, psi_c = np.meshgrid(centers, centers, indexing="ij")
-    core = core_index(phi_c.ravel(), psi_c.ravel(), basins, margin_deg)
+    a_c, b_c = np.meshgrid(centers, centers, indexing="ij")
+    which = core(np.column_stack([a_c.ravel(), b_c.ravel()]), spec)
     f, e = fes["free_energy_kcal"].ravel(), fes["error_kcal"].ravel()
     out = {}
-    for i, b in enumerate(basins):
-        sel = np.nonzero((core == i) & np.isfinite(f))[0]
+    for i, name in enumerate(spec.names):
+        sel = np.nonzero((which == i) & np.isfinite(f))[0]
         if not len(sel):
-            out[b.name] = None
+            out[name] = None
             continue
         k = sel[np.argmin(f[sel])]
-        out[b.name] = [round(float(f[k]), 2), round(float(e[k]), 2) if np.isfinite(e[k]) else None,
-                       float(phi_c.ravel()[k]), float(psi_c.ravel()[k])]
+        out[name] = [round(float(f[k]), 2), round(float(e[k]), 2) if np.isfinite(e[k]) else None,
+                     float(a_c.ravel()[k]), float(b_c.ravel()[k])]
     return out
 
 
-# ---------------------------------------------------------------- one residue, judged
+# ---------------------------------------------------------------- one item, judged
 
 @dataclass
 class BackboneSettings:
-    basins: str = ""                 # Empty: DEFAULT_BASINS_TEXT.
+    basins: str = ""                 # Own regions for rama items; empty: DEFAULT_BASINS_TEXT.
     margin_deg: float = 10.0
+    rama: str = "boxes"              # How rama basins are defined: "boxes" (regions, default) or "centres".
     bins_deg: float = 15.0
     min_population: float = 0.05     # Basins at least this populated count as leading for the rate criterion.
     fes_cutoff_kcal: float = 2.0     # The landscape criterion applies where F <= this.
@@ -291,50 +295,76 @@ class BackboneSettings:
         return cls(**{k: v for k, v in (d or {}).items() if k in names})
 
 
-def diagnose_backbone(angles: dict, settings: BackboneSettings, ns_per_replica: float, dt_ns: float,
-                      temperature_k: float, min_flips_per_replica: int = 4, precision: float | None = None,
+def sets_of(state) -> list:
+    """The basin sets (basins.BasinSet) of a run, defined as its settings say."""
+    from .basins import parse_sets
+
+    bb = BackboneSettings.from_dict(state.backbone_settings)
+    return parse_sets(state.backbone, rama=bb.rama, boxes_text=bb.basins, margin_deg=bb.margin_deg)
+
+
+def diagnose_backbone(items: dict, settings: BackboneSettings, ns_per_replica: float, dt_ns: float,
+                      temperature_k: float, min_flips_per_replica: int = 4, precision=None,
                       rate_rel_error: float | None = None, fes_error_kcal: float | None = None):
-    """One report per residue. `angles`: {label: (key, resname, [phi per replica], [psi per replica])} in degrees.
+    """One report per backbone item. `items`: {label: (basins.BasinSet, [angles per replica])}, each angle array
+    (frames, 2) in degrees, in the order of the set's dihedrals (phi, psi for rama; psi(i+1), phi(i+2) for turn).
 
     Returns (reports, details) with details[label] = {"transitions": ..., "landscape": ..., "minima": ...}.
     The verdict is "ok" only when the populations, the leading rates and the landscape all meet their criteria.
+    `precision` may be a number (standard error) or an uncertainty.Precision; with a Precision the rate and
+    landscape criteria use the same interval width (z), so a run that looks only a few times stays calibrated.
     """
+    from .basins import assign, summarize
     from .diagnose import ResidueReport, count_transitions, judge, occupancy, populations_with_errors, rank
+    from .uncertainty import Precision
 
-    basins = parse_basins(settings.basins)
-    names = [b.name for b in basins]
+    p = Precision.of(precision)
+    z = p.z if p is not None else 1.0
     reports, details = [], {}
-    for label, (key, resname, phis, psis) in angles.items():
-        states = [assign_basins(f, s, basins, settings.margin_deg) for f, s in zip(phis, psis)]
+    for label, (spec, values) in items.items():
+        values = [np.asarray(v, dtype=float).reshape(len(v), -1) for v in values]
+        names = spec.names
+        states = [assign(v, spec) for v in values]
         occ = [occupancy(s, names) for s in states]
-        rep = ResidueReport(chain=key[0], resseq=key[1], resname=resname, quantity="backbone",
+        rep = ResidueReport(chain=spec.chain or "", resseq=spec.resseq, resname="", name=label, quantity="backbone",
                             transitions=[count_transitions(s) for s in states], occupancies=occ,
                             dominant=[max(o, key=o.get) for o in occ], ns_per_replica=ns_per_replica)
         (rep.populations, rep.standard_error, rep.replicas_differ,
          rep.error_from_replicas) = populations_with_errors(states, names)
         judge(rep, min_flips_per_replica, precision)
+        est = summarize(states, values, names, dt_ns)      # Free-energy difference, main rates, split-half check.
+        rep.error_within, rep.error_between = est["within"], est["between"]
         stats = transition_statistics(states, names, dt_ns)
         rate_err, lead = worst_rate_error(stats, rep.populations, settings.min_population)
-        fes = landscape(phis, psis, temperature_k, settings.bins_deg,
+        fes = landscape([v[:, 0] for v in values], [v[:, 1] for v in values], temperature_k, settings.bins_deg,
                         n_effective=stats["total_transitions"] + len(states))
         fes_err = worst_landscape_error(fes, settings.fes_cutoff_kcal)
-        rep.extra = {"basins": names, "rate_rel_error": None if math.isinf(rate_err) else round(rate_err, 3),
-                     "leading_transitions": lead, "fes_max_error_kcal": None if math.isinf(fes_err) else round(fes_err, 3),
+        rep.extra = {"basins": names, "angles": [f"{a} of residue {spec.resseq + off}" for off, a in spec.dihedrals],
+                     "dg_kt": est["dg_kt"], "dg_se": est["dg_se"], "rates": est["rates"],
+                     "split_js": est.get("split_js"),
+                     "rate_rel_error": None if math.isinf(rate_err) else round(rate_err, 3),
+                     "leading_transitions": lead,
+                     "fes_max_error_kcal": None if math.isinf(fes_err) else round(fes_err, 3),
                      "rates_per_ns": stats["rates_per_ns"], "mean_dwell_ns": stats["mean_dwell_ns"]}
-        if rep.verdict == "ok" and rate_rel_error is not None and rate_err > rate_rel_error:
+        if rep.verdict == "ok" and rate_rel_error is not None and z * rate_err > rate_rel_error:
             rep.verdict = "imprecise"
             rep.reason += (f" The leading transition rates ({', '.join(lead)}) have a relative error up to "
-                           f"{rate_err:.2f}, more than the requested {rate_rel_error:g}.")
-        elif rep.verdict == "ok" and fes_error_kcal is not None and fes_err > fes_error_kcal:
+                           f"{z * rate_err:.2f}" + (f" ({z:.2f} standard errors)" if z != 1 else "")
+                           + f", more than the requested {rate_rel_error:g}.")
+        elif rep.verdict == "ok" and fes_error_kcal is not None and z * fes_err > fes_error_kcal:
             rep.verdict = "imprecise"
-            rep.reason += (f" The phi/psi free-energy landscape has an error up to {fes_err:.2f} kcal/mol where "
+            rep.reason += (f" The free-energy landscape has an error up to {z * fes_err:.2f} kcal/mol where "
                            f"F <= {settings.fes_cutoff_kcal:g}, more than the requested {fes_error_kcal:g}.")
-        details[label] = {"transitions": stats, "landscape": fes, "minima": basin_minima(fes, basins, settings.margin_deg)}
+        details[label] = {"transitions": stats, "landscape": fes, "minima": basin_minima(fes, spec),
+                          "basins": (basins_text(spec.boxes) if spec.boxes else
+                                     "; ".join(f"{k}: centre {c}, core {spec.core_deg:g} deg"
+                                               for k, c in spec.centres.items())),
+                          "axes": rep.extra["angles"]}
         reports.append(rep)
     return rank(reports), details
 
 
-def save_details(folder, details: dict, basins_used: str) -> list:
+def save_details(folder, details: dict, basins_used: str = "") -> list:
     """Write backbone/<label>.json (populations come from status.json), <label>_fes.npz and <label>_fes.csv."""
     import json
     from pathlib import Path
@@ -345,7 +375,8 @@ def save_details(folder, details: dict, basins_used: str) -> list:
     for label, d in details.items():
         stem = label.replace(":", "_")
         (folder / f"{stem}.json").write_text(json.dumps(
-            {"residue": label, "basins": basins_used, "transitions": d["transitions"], "basin_minima_kcal": d["minima"],
+            {"residue": label, "basins": d.get("basins", basins_used), "axes": d.get("axes"),
+             "transitions": d["transitions"], "basin_minima_kcal": d["minima"],
              "landscape_file": f"{stem}_fes.npz"}, indent=1))
         written += [folder / f"{stem}.json"] + save_landscape(folder, f"{stem}_fes", d["landscape"], label)
     return written

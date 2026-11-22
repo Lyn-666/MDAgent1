@@ -103,7 +103,8 @@ def test_landscape_recovers_the_basin_free_energy_difference():
 def _angles(n_rep=4, n=20000, p01=0.01, p10=0.03, seed=3):
     rng = np.random.default_rng(seed)
     runs = [series(rng, n, p01, p10) for _ in range(n_rep)]
-    return {"ALA5": (("A", 5), "ALA", [r[1] for r in runs], [r[2] for r in runs])}
+    from mdagent.basins import BasinSet
+    return {"ALA5": (BasinSet.parse("rama:A:5"), [np.column_stack([r[1], r[2]]) for r in runs])}
 
 
 def test_verdict_needs_populations_rates_and_landscape_together():
@@ -111,7 +112,8 @@ def test_verdict_needs_populations_rates_and_landscape_together():
     ok, details = diagnose_backbone(a, BackboneSettings(), 20.0, DT, 300.0, precision=0.05, rate_rel_error=0.3,
                                     fes_error_kcal=0.6)
     assert ok[0].verdict == "ok", ok[0].reason
-    assert set(details["ALA5"]) == {"transitions", "landscape", "minima"}
+    assert {"transitions", "landscape", "minima", "basins", "axes"} <= set(details["ALA5"])
+    assert ok[0].extra["dg_kt"] == pytest.approx(math.log(3), abs=0.15)   # From basins.summarize: ln(0.75 / 0.25).
     assert details["ALA5"]["minima"]["alpha_R"][0] == pytest.approx(0.0, abs=0.01)
     strict_rate = diagnose_backbone(a, BackboneSettings(), 20.0, DT, 300.0, precision=0.05, rate_rel_error=0.01)[0][0]
     assert strict_rate.verdict == "imprecise" and "transition rates" in strict_rate.reason
@@ -128,7 +130,8 @@ def test_a_residue_that_never_changes_basin_is_not_converged():
 
 
 def test_core_estimators_for_rates_and_landscape():
-    a = _angles()["ALA5"]
+    spec, values = _angles()["ALA5"]
+    a = (None, None, [v[:, 0] for v in values], [v[:, 1] for v in values])
     basins = parse_basins(None)
     states = StateData([assign_basins(f, s, basins) for f, s in zip(a[2], a[3])], [b.name for b in basins])
     r = TransitionRates().assess("ALA5 transitions", states, {"max_rel_error": 0.3, "dt_ns": DT})
@@ -159,22 +162,23 @@ def test_a_backbone_run_is_diagnosed_reported_and_shadowed(tmp_path):
 
     run_dir, state, _ = make_run(tmp_path, goal=Goal.for_mode("auto", quantity="backbone_basins", precision=0.1))
     state.target = [("A", n) for n in range(108, 115)]
-    state.backbone = {"margin_deg": 10.0}
+    state.backbone = ["rama:A:108-114"]
+    state.backbone_settings = {"margin_deg": 10.0}
     state.save(run_dir)
     reports = diagnose_run(run_dir, state)
     verdicts = {r.label: r.verdict for r in reports}
-    assert verdicts["VAL111"] == "no_flip"           # The fake run moves side chains only.
-    assert sum(v == "no_phi_psi" for v in verdicts.values()) == 2
+    assert verdicts["rama:A:111"] == "no_flip"           # The fake run moves side chains only.
+    assert sum(v == "no_phi_psi" for v in verdicts.values()) == 2   # 108 has no phi, 114 no psi.
     files = {str(p) for p in output_files(run_dir)}
-    assert {"backbone/VAL111.json", "backbone/VAL111_fes.csv", "backbone/VAL111_fes.npz"} <= files
+    assert {"backbone/rama_A_111.json", "backbone/rama_A_111_fes.csv", "backbone/rama_A_111_fes.npz"} <= files
 
     kinds = PlainMDTool(run_dir, state).kinds()
-    assert kinds["VAL111 basins"] == "state_populations" and kinds["VAL111 transitions"] == "transition_rates"
-    assert kinds["VAL111 landscape"] == "free_energy_surface" and len(kinds) == 15
+    assert kinds["rama:A:111 basins"] == "state_populations" and kinds["rama:A:111 transitions"] == "transition_rates"
+    assert kinds["rama:A:111 landscape"] == "free_energy_surface" and len(kinds) == 15
     rec = shadow.record(run_dir, state, "plain_md", log=lambda line: None)
     assert rec is not None
     by = {a["estimand"]: a for a in rec["assessments"]}
-    assert by["VAL111 landscape"]["estimator"] == "landscape.replica_spread"
+    assert by["rama:A:111 landscape"]["estimator"] == "landscape.replica_spread"
     assert all(a["status"] == "indeterminate" for a in by.values())   # No basin change: never "met".
 
     from mdagent.agent import _record, decide
@@ -182,7 +186,31 @@ def test_a_backbone_run_is_diagnosed_reported_and_shadowed(tmp_path):
     _record(run_dir, RunState.load(run_dir), reports, decisions, 0.0)
     zh, en = report.write(run_dir)
     text = en.read_text()
-    assert "Ramachandran basin populations" in text and "Transitions between basins" in text
+    assert "backbone basins (rama:A:108-114)" in text and "Transitions between basins" in text
+
+
+def test_older_backbone_runs_of_both_branches_keep_their_meaning(tmp_path):
+    import json
+
+    from mdagent.agent import Goal, RunState, diagnose_run
+
+    run_dir, state, _ = make_run(tmp_path, goal=Goal.for_mode("auto", quantity="backbone_basins"))
+    raw = json.loads((run_dir / "run.json").read_text())
+    # This branch before the merge: "backbone" held the basin settings, every target residue was measured.
+    mine = {**raw, "target": [["A", 110], ["A", 111]], "backbone": {"margin_deg": 12.0}}
+    mine.pop("backbone_settings")
+    (run_dir / "run.json").write_text(json.dumps(mine))
+    s = RunState.load(run_dir)
+    assert s.backbone == ["rama:A:110", "rama:A:111"] and s.backbone_settings == {"margin_deg": 12.0}
+    assert {r.label for r in diagnose_run(run_dir, s)} == {"rama:A:110", "rama:A:111"}
+    # The other branch before the merge: a list of items and no settings: its rama basins were three centres.
+    theirs = {**raw, "backbone": ["rama:A:111"]}
+    theirs.pop("backbone_settings")
+    (run_dir / "run.json").write_text(json.dumps(theirs))
+    s = RunState.load(run_dir)
+    assert s.backbone_settings == {"rama": "centres"}
+    rep = [r for r in diagnose_run(run_dir, s) if r.label == "rama:A:111"][0]
+    assert list(rep.populations) == ["alphaR", "beta", "alphaL"]
 
 
 def test_the_chat_form_turns_a_backbone_request_into_a_run():
@@ -208,8 +236,9 @@ def test_finished_parts_are_read_once_and_cached(tmp_path, monkeypatch):
     from mdagent.tools_openmm import backbone_angles
 
     run_dir, state, _ = make_run(tmp_path, goal=Goal.for_mode("auto", quantity="backbone_basins"))
-    state.target = [("A", n) for n in range(109, 114)]
+    state.backbone = ["rama:A:109-113", "turn:A:110"]
     first, _ = backbone_angles(run_dir, state, 3)
+    assert list(first) == ["rama:A:109", "rama:A:110", "rama:A:111", "rama:A:112", "rama:A:113", "turn:A:110"]
     assert not (run_dir / "backbone" / "cache").exists()          # No part is finished: nothing cached.
     for r in range(2):
         for k in range(3):
@@ -222,7 +251,7 @@ def test_finished_parts_are_read_once_and_cached(tmp_path, monkeypatch):
     again, _ = backbone_angles(run_dir, state, 3)
     assert reads == []                                             # All from the cache.
     for label in first:
-        for x, y in zip(first[label][2], again[label][2]):
+        for x, y in zip(first[label][1], again[label][1]):
             assert np.allclose(x, y)
 
 

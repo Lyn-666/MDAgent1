@@ -44,8 +44,9 @@ EPS = 1e-6
 
 def first_replicas(state) -> int:
     """How many plain MD replicas the user asked for (the agent may have added some since)."""
-    if "first_n_replicas" in state.notes:
-        return int(state.notes["first_n_replicas"])
+    for key in ("replicas_at_start", "first_n_replicas"):   # first_n_replicas: runs from before the merge.
+        if key in state.notes:
+            return int(state.notes[key])
     adds = [a for a in state.notes.get("actions", []) if a["phase"] == "plain_md" and a["action"] == "add_replicas"
             and a["executed"]]
     if not adds:
@@ -97,7 +98,7 @@ def task_from_state(run_dir: Path, state, kinds: dict) -> TaskSpec:
     else:
         from .backbone import BackboneSettings
 
-        bb = BackboneSettings.from_dict(state.backbone)
+        bb = BackboneSettings.from_dict(state.backbone_settings)
         per_kind = {
             "state_populations": pop,
             "transition_rates": {"max_rel_error": goal.rate_rel_error, "min_population": bb.min_population,

@@ -246,6 +246,44 @@ tool serves stay open. Example: a side chain that was not biased. The agent must
 switch back, or report these estimands as resolved by the first method. The current policy reports
 them from plain MD.
 
+### 3.3 Merge with the other development line (2026-11-22)
+
+A second session had developed `claude/admiring-noether-6mlzki` from the same base. Its additions:
+
+- a research goal of accuracy-constrained budget optimization;
+- `allocation.py`: the agent chooses replicas, lengths and the stop, with Bonferroni-calibrated looks;
+- `cost.py`;
+- `budget.py` and `experiment_a.py`: replay benchmarks against fixed plans and Sequential-CI, with an
+  independent reference. These implement much of the evaluation plan in section 5.
+- `uncertainty.Precision`: standard error, confidence and confidence-sequence criteria;
+- `basins.py`: `rama:` and `turn:` items.
+
+It was merged into this line. The user decided three points:
+
+1. Ramachandran basins default to regions that cover the whole map. The three centres stay available as
+   `--rama-basins centres`. Runs started before the merge keep the definition they began with.
+2. When the user leaves replicas, length and stopping to the agent, the run uses projection allocation.
+3. Projection runs use the look-calibrated confidence interval; rounds runs keep the standard error.
+
+One backbone engine remains:
+
+- `basins.BasinSet` defines the items and their basins.
+- `backbone.diagnose_backbone` computes populations, all-pair rates and dwell times, the landscape with
+  errors, and the criteria.
+- `basins.summarize` adds the free-energy difference and the split-half check, shared with Experiment A.
+
+The give-up rule for an item that never changes state is one function,
+`uncertainty.never_changing_hopeless`, used by both run modes and mirrored in `core/reasoner.py`. The
+changes needed come from adequacy and, when known, from the precision. It has no fixed waiting time; the
+other line had a 20 ns floor.
+
+Problems found and fixed during the merge:
+
+- A ubiquitin-specific statement had been hard-coded in user advice. It was removed.
+- Projection allocation had left out items handed to enhanced sampling even when enhanced sampling was off.
+- The new `transition_rates` and `free_energy_surface` estimators keep their own criteria. The new core is
+  still in shadow mode.
+
 ## 4. Minimal prioritized implementation plan
 
 Each phase is small and can be checked on its own. Phases 2 and 3 change no scientific result until the

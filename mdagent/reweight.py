@@ -106,12 +106,18 @@ def analyze(run_dir: Path, labels: list[str], n_replicas: int, s: MetadSettings,
     """
     kt = KB_KJ * temperature_k
     names = list(STATE_NAMES)
+    item_names = [names] * len(labels)
     if kind == "backbone":
-        from .backbone import BackboneSettings, assign_basins, parse_basins
+        from .backbone import BackboneSettings
+        from .basins import assign
 
-        bb = BackboneSettings.from_dict(backbone)
-        basins = parse_basins(bb.basins)
-        names = [b.name for b in basins]
+        # `backbone`: the basin sets (basins.BasinSet) of the biased items, in the order of `labels`.
+        sets = list(backbone or [])
+        if len(sets) != len(labels):
+            raise ValueError("backbone reweighting needs one basin set per biased item")
+        item_names = [list(s.names) for s in sets]
+        names = item_names[0] if len({tuple(n) for n in item_names}) == 1 else None   # None: items differ.
+        bb = BackboneSettings()
     per_rep, n_eff, ns, angles = [], [], [], []
     for r in range(n_replicas):
         path = Path(run_dir) / "enhanced" / f"replica_{r}_chi.npy"
@@ -128,18 +134,18 @@ def analyze(run_dir: Path, labels: list[str], n_replicas: int, s: MetadSettings,
         ns.append(len(chi) * s.pace_ps / 1000.0)
         deg = np.degrees(chi[start:])
         if kind == "backbone":
-            states = [assign_basins(deg[:, 2 * i], deg[:, 2 * i + 1], basins, bb.margin_deg) for i in range(len(labels))]
+            states = [assign(deg[:, 2 * i: 2 * i + 2], sets[i]) for i in range(len(labels))]
             angles.append((deg, w))
         else:
             states = [assign_states(deg[:, i]) for i in range(len(labels))]
-        per_rep.append([_replica(st, w, names) for st in states])
+        per_rep.append([_replica(st, w, item_names[i]) for i, st in enumerate(states)])
     if not per_rep:
         return None
     residues = []
     for i, label in enumerate(labels):
         reps = [p[i] for p in per_rep]
         pops, errs, disagree, worst, from_replicas = {}, {}, False, -1.0, False
-        for k in names:
+        for k in item_names[i]:
             values, errors = [r["populations"][k] for r in reps], [r["errors"][k] for r in reps]
             mean, err, dis = combine_replicas(values, errors)
             err = max(err, floor_from_samples(mean, sum(n_eff)))  # Never 0 for a state that was hardly seen.
@@ -150,7 +156,7 @@ def analyze(run_dir: Path, labels: list[str], n_replicas: int, s: MetadSettings,
         fe = free_energies_kcal(pops, kt)
         top = max(pops, key=pops.get)
         fe_err = {k: (round(kt / KJ_PER_KCAL * math.sqrt((errs[k] / pops[k]) ** 2 + (errs[top] / pops[top]) ** 2), 2)
-                      if pops[k] > 0 and k != top else (0.0 if k == top else None)) for k in names}
+                      if pops[k] > 0 and k != top else (0.0 if k == top else None)) for k in item_names[i]}
         residues.append({
             "residue": label,
             "populations": {k: round(v, 3) for k, v in pops.items()},
@@ -180,7 +186,7 @@ def analyze(run_dir: Path, labels: list[str], n_replicas: int, s: MetadSettings,
     return out
 
 
-def assess(result: dict, previous: dict | None, rule: StopRule, precision: float,
+def assess(result: dict, previous: dict | None, rule: StopRule, precision,
            fes_error_kcal: float | None = None) -> dict[str, str]:
     """A verdict for each residue:
 
@@ -195,6 +201,9 @@ def assess(result: dict, previous: dict | None, rule: StopRule, precision: float
     that precise where F is low.
     The change since the previous check is only a diagnosis (see change_since_last), never a reason to stop.
     """
+    from .uncertainty import Precision
+
+    p = Precision.of(precision) or Precision()
     prev = {r["residue"]: r["populations"] for r in (previous or {}).get("residues", [])}
     out = {}
     for r in result["residues"]:
@@ -205,10 +214,10 @@ def assess(result: dict, previous: dict | None, rule: StopRule, precision: float
             out[r["residue"]] = "stalled"
         elif result["weights_degenerate"]:
             out[r["residue"]] = "unreliable"
-        elif (r["max_standard_error"] <= precision and not r["replicas_disagree"]
+        elif (p.met(r["standard_error"], r["populations"]) and not r["replicas_disagree"]
               and result["ns_per_replica"] >= rule.min_ns - 1e-9
               and (fes_error_kcal is None or "fes_max_error_kcal" not in r
-                   or (r["fes_max_error_kcal"] is not None and r["fes_max_error_kcal"] <= fes_error_kcal))):
+                   or (r["fes_max_error_kcal"] is not None and p.z * r["fes_max_error_kcal"] <= fes_error_kcal))):
             out[r["residue"]] = "reached"
         else:
             out[r["residue"]] = "not_yet"
@@ -217,19 +226,21 @@ def assess(result: dict, previous: dict | None, rule: StopRule, precision: float
 
 
 def format_table(result: dict) -> str:
-    names = result.get("states", STATE_NAMES)
+    names = result.get("states", STATE_NAMES)   # None: the items have different states (rama and turn).
     what = "backbone basin" if result.get("kind") == "backbone" else "chi1"
     lines = [f"Reweighted {what} populations after {result['ns_per_replica']:g} ns per replica "
              f"({result['n_replicas']} replicas; {result['method']}).",
              f"Effective samples per replica: {result['effective_samples']}"
              + (" (too few: the weights are degenerate)" if result["weights_degenerate"] else "") + ".",
-             f"{'residue':<10}" + "".join(f"{k:>12}" for k in names) + f"   {'transitions':<14}{'verdict':<12}"]
+             f"{'item':<12}" + ("".join(f"{k:>12}" for k in names) if names else f"{'populations':<48}")
+             + f"   {'transitions':<14}{'verdict':<12}"]
     for r in result["residues"]:
         p, e = r["populations"], r["standard_error"]
-        cells = "".join(f"{p[k]:>6.2f}±{e[k]:<5.2f}" for k in names)
+        cells = ("".join(f"{p[k]:>6.2f}±{e[k]:<5.2f}" for k in names) if names else
+                 f"{' '.join(f'{k} {p[k]:.2f}±{e[k]:.2f}' for k in p):<48}")
         trans = ",".join(map(str, r["transitions_per_replica"]))
         flag = " replicas disagree" if r["replicas_disagree"] else ""
-        lines.append(f"{r['residue']:<10}{cells}   {trans:<14}{r.get('verdict', ''):<12}{flag}")
+        lines.append(f"{r['residue']:<12}{cells}   {trans:<14}{r.get('verdict', ''):<12}{flag}")
     return "\n".join(lines)
 
 

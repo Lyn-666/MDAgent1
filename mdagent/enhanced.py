@@ -7,8 +7,9 @@ already large.
 
 What is biased (`kind`):
 - "chi1": the side-chain chi1 of each residue (one dihedral per residue);
-- "backbone": phi and psi of each residue (two dihedrals per residue, each with its own
-  one-dimensional bias, in the order phi1, psi1, phi2, psi2, ...). A sum of one-dimensional
+- "backbone": the two dihedrals of each backbone item (rama:A:110: phi and psi of residue 110;
+  turn:A:52: psi of 52 and phi of 53), each with its own one-dimensional bias, in the order of
+  the items. A sum of one-dimensional
   biases is a separable bias; reweighting stays exact (the same replay as for several
   coupled side chains, tested in tests/test_reweight.py). Biased sampling changes the
   kinetics, so transition rates and dwell times must still come from plain MD.
@@ -91,13 +92,11 @@ def dihedral_quads(topology: openmm.app.Topology, residues: list[ResidueKey], ki
         quads = chi1_quads(topology, residues)
         return [quads[k] for k in residues]
     if kind == "backbone":
-        from .backbone import backbone_quads
+        # `residues` are backbone item specs here (rama:A:110, turn:A:52): two dihedrals each, in their order.
+        from .basins import BasinSet, dihedral_atoms
 
-        found, skipped = backbone_quads(md.Topology.from_openmm(topology), residues)
-        if skipped:
-            raise ValueError(f"No phi/psi for residues {[k for k, _ in skipped]}.")
-        by_key = {v[0]: v for v in found.values()}
-        return [q for k in residues for q in (by_key[tuple(k)][2], by_key[tuple(k)][3])]
+        top = md.Topology.from_openmm(topology)
+        return [tuple(q) for spec in residues for q in dihedral_atoms(top, BasinSet.parse(spec))]
     raise ValueError(f"unknown kind of enhanced sampling {kind!r}")
 
 

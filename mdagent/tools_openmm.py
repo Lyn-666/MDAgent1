@@ -97,8 +97,8 @@ def event_series(run_dir: Path, state, n_parts: int, join: bool = True, n_traj: 
 
 
 def backbone_angles(run_dir: Path, state, n_parts: int, n_traj: int | None = None, join: bool = True):
-    """phi and psi (degrees) of the target residues: ({label: (key, resname, [phi per traj], [psi per traj])},
-    [(key, reason) left out]).
+    """The two dihedral angles (degrees) of every backbone item (rama:..., turn:...) of the run:
+    ({label: (basins.BasinSet, [(frames, 2) array per traj])}, [(label, reason) left out]).
 
     Only the dihedral atoms are read, and each finished part (its .state.xml exists, so it will not change again)
     is read once: its angles are kept in backbone/cache/ and reused in later rounds. Long runs then cost one new
@@ -108,52 +108,74 @@ def backbone_angles(run_dir: Path, state, n_parts: int, n_traj: int | None = Non
 
     import mdtraj as md
 
-    from .backbone import backbone_quads
+    from .backbone import sets_of
+    from .basins import dihedral_atoms
     from .diagnose import _quiet_c_output
     from .simulate import part_path
 
     run_dir = Path(run_dir)
     top = md.load_topology(str(run_dir / "protein.pdb"))
-    quads, skipped = backbone_quads(top, state.target)
-    if not quads:
+    sets, quads, skipped = {}, {}, []
+    for spec in sets_of(state):
+        try:
+            quads[spec.label] = dihedral_atoms(top, spec)
+            sets[spec.label] = spec
+        except ValueError as e:      # A chain end: the dihedral needs a neighbor that is not there.
+            skipped.append((spec.label, str(e)))
+    if not sets:
         return {}, skipped
-    labels = list(quads)
-    atoms = sorted({i for _, _, a, b in quads.values() for i in (*a, *b)})
+    labels = list(sets)
+    atoms = sorted({i for q in quads.values() for quad in q for i in quad})
     pos = {a: k for k, a in enumerate(atoms)}
-    phi_q = [[pos[i] for i in quads[k][2]] for k in labels]
-    psi_q = [[pos[i] for i in quads[k][3]] for k in labels]
-    key = json.dumps([labels, [quads[k][2:] for k in labels]])
+    local = [[pos[i] for i in quad] for k in labels for quad in quads[k]]   # Two columns per item.
+    key = json.dumps([labels, [quads[k] for k in labels]])
     cache = run_dir / "backbone" / "cache"
     replicas = sorted({int(p.name.split("_")[1]) for p in run_dir.glob("replica_*_part000.dcd")})
     if not replicas:
         raise FileNotFoundError(f"No trajectories in {run_dir}.")
 
-    def part(i: int, k: int) -> tuple[np.ndarray, np.ndarray]:
+    def part(i: int, k: int) -> np.ndarray:
         stored = cache / f"replica_{i}_part{k:03d}.npz"
         if stored.exists():
             d = np.load(stored)
-            if str(d["key"]) == key:
-                return d["phi"], d["psi"]
+            if "values" in d and str(d["key"]) == key:
+                return d["values"]
         with _quiet_c_output():
             t = md.load_dcd(str(part_path(run_dir, i, k, ".dcd")), top=top, atom_indices=atoms)
-        phi = np.degrees(md.compute_dihedrals(t, phi_q))   # frames x residues
-        psi = np.degrees(md.compute_dihedrals(t, psi_q))
+        values = np.degrees(md.compute_dihedrals(t, local))   # frames x (2 per item)
         if part_path(run_dir, i, k, ".state.xml").exists():   # Finished: it will not change again.
             cache.mkdir(parents=True, exist_ok=True)
-            np.savez(stored, phi=phi, psi=psi, key=np.array(key))
-        return phi, psi
+            np.savez(stored, values=values, key=np.array(key))
+        return values
 
     trajs = []
     for i in replicas:
         pieces = [part(i, k) for k in range(n_parts)]
         if join:
-            trajs.append((np.concatenate([p[0] for p in pieces]), np.concatenate([p[1] for p in pieces])))
+            trajs.append(np.concatenate(pieces))
         else:
             trajs.extend(pieces)
     trajs = trajs[:n_traj]
-    out = {label: (quads[label][0], quads[label][1], [t[0][:, j] for t in trajs], [t[1][:, j] for t in trajs])
-           for j, label in enumerate(labels)}
+    out = {label: (sets[label], [t[:, 2 * j: 2 * j + 2] for t in trajs]) for j, label in enumerate(labels)}
     return out, skipped
+
+
+def backbone_labels(run_dir: Path, state) -> list[str]:
+    """Labels of the backbone items whose atoms are all in the structure. Cheap: reads only protein.pdb."""
+    import mdtraj as md
+
+    from .backbone import sets_of
+    from .basins import dihedral_atoms
+
+    top = md.load_topology(str(Path(run_dir) / "protein.pdb"))
+    out = []
+    for spec in sets_of(state):
+        try:
+            dihedral_atoms(top, spec)
+            out.append(spec.label)
+        except ValueError:
+            pass
+    return out
 
 
 def backbone_estimands(label: str) -> dict[str, str]:
@@ -165,11 +187,7 @@ def estimand_kinds(run_dir: Path, state) -> dict[str, str]:
     """{estimand: kind} of a run, from its goal. Cheap: reads only protein.pdb."""
     q = state.quantity
     if q == "backbone_basins":
-        import mdtraj as md
-
-        from .backbone import backbone_quads
-        quads, _ = backbone_quads(md.load_topology(str(Path(run_dir) / "protein.pdb")), state.target)
-        return {e: k for label in quads for e, k in backbone_estimands(label).items()}
+        return {e: k for label in backbone_labels(run_dir, state) for e, k in backbone_estimands(label).items()}
     if q == "event_seen":
         from .observables import parse_events
         return {sp.label: EVENT for sp in parse_events(state.events)}
@@ -193,21 +211,17 @@ def featurize(run_dir: Path, state, n_parts: int, n_replicas: int, join: bool = 
     n_traj = n_replicas if join else n_replicas * n_parts
     q = state.quantity
     if q == "backbone_basins":
-        from .backbone import BackboneSettings, assign_basins, parse_basins
-
+        from .basins import assign
         from .estimators import AngleData
 
-        settings = BackboneSettings.from_dict(state.backbone)
-        basins = parse_basins(settings.basins)
-        names = [b.name for b in basins]
-        angles, _ = backbone_angles(run_dir, state, n_parts, n_traj, join)
+        items, _ = backbone_angles(run_dir, state, n_parts, n_traj, join)
         out = {}
-        for label, (_, _, phis, psis) in angles.items():
-            states = StateData([assign_basins(f, s, basins, settings.margin_deg) for f, s in zip(phis, psis)], names)
-            e = backbone_estimands(label)
-            k_pop, k_rates, k_land = list(e)
+        for label, (spec, values) in items.items():
+            states = StateData([assign(v, spec) for v in values], list(spec.names))
+            k_pop, k_rates, k_land = list(backbone_estimands(label))
             out[k_pop] = out[k_rates] = states
-            out[k_land] = AngleData(phis, psis, states, state.md.save_interval_ps / 1000.0)
+            out[k_land] = AngleData([v[:, 0] for v in values], [v[:, 1] for v in values], states,
+                                    state.md.save_interval_ps / 1000.0)
         return out
     if q == "event_seen":
         specs = parse_events(state.events)
@@ -322,9 +336,12 @@ class MetadTool:
         self._candidates = None
         self._replay: dict = {}    # replica -> (number of samples, v, c), rebuilt when the file grows
 
-    def chosen(self) -> dict[str, tuple]:
-        """{label: (chain, number)} of the biased residues; empty before enhanced sampling started."""
+    def chosen(self) -> dict:
+        """{label: what is biased} of the biased items; empty before enhanced sampling started. Backbone items are
+        their spec labels (rama:A:110); side chains are residue labels (VAL111) with (chain, number)."""
         es = self.state.enhanced
+        if self.backbone:
+            return {label: label for label in es.get("items", [])}
         return {f"{es['resnames'][f'{c}:{n}']}{n}": (c, n) for c, n in es.get("residues", [])}
 
     @property
@@ -349,11 +366,7 @@ class MetadTool:
             return label in chosen
         if self._candidates is None:
             if self.backbone:
-                import mdtraj as md
-
-                from .backbone import backbone_quads
-                quads, _ = backbone_quads(md.load_topology(str(self.run_dir / "protein.pdb")), self.state.target)
-                self._candidates = set(quads)
+                self._candidates = set(backbone_labels(self.run_dir, self.state))
             else:
                 self._candidates = set(chi1_residues(self.run_dir, self.state.target))
         return label in self._candidates
@@ -407,15 +420,14 @@ class MetadTool:
         return {e: StateData(states[e], list(STATE_NAMES), weights) for e in estimands}
 
     def _observe_backbone(self, estimands: list, labels: list, kt: float) -> dict:
-        """Basin states (weighted) and phi/psi (weighted) of each biased residue; columns are phi1, psi1, phi2, ..."""
-        from .backbone import BackboneSettings, assign_basins, parse_basins
+        """Basin states (weighted) and the two angles (weighted) of each biased item; two columns per item."""
+        from .backbone import sets_of
+        from .basins import assign
         from .estimators import AngleData
 
-        bb = BackboneSettings.from_dict(self.state.backbone)
-        basins = parse_basins(bb.basins)
-        names = [b.name for b in basins]
-        phi = {k: [] for k in labels}
-        psi = {k: [] for k in labels}
+        specs = {s.label: s for s in sets_of(self.state)}
+        a = {k: [] for k in labels}
+        b = {k: [] for k in labels}
         weights = []
         for r in range(self._n()):
             cols, v, c = self._rebuilt(r)
@@ -427,15 +439,16 @@ class MetadTool:
             weights.append(np.exp(logw - logw.max()))
             deg = np.degrees(cols[start:frames])
             for i, k in enumerate(labels):
-                phi[k].append(deg[:, 2 * i])
-                psi[k].append(deg[:, 2 * i + 1])
+                a[k].append(deg[:, 2 * i])
+                b[k].append(deg[:, 2 * i + 1])
         out = {}
         for e in estimands:
             label = e.rsplit(" ", 1)[0]
-            states = StateData([assign_basins(f, s, basins, bb.margin_deg) for f, s in zip(phi[label], psi[label])],
-                               names, weights)
+            spec = specs[label]
+            states = StateData([assign(np.column_stack([x, y]), spec) for x, y in zip(a[label], b[label])],
+                               list(spec.names), weights)
             out[e] = (states if e.endswith(" basins")
-                      else AngleData(phi[label], psi[label], states, self.settings.pace_ps / 1000.0, weights))
+                      else AngleData(a[label], b[label], states, self.settings.pace_ps / 1000.0, weights))
         return out
 
     def advance(self, n_replicas: int, until: float) -> None:
@@ -448,15 +461,15 @@ class MetadTool:
         if self.until_ns is not None or self.n_replicas is not None:
             raise RuntimeError("a view of an earlier moment cannot run simulations")
         es, s = self.state.enhanced, self.state
-        if not es.get("residues"):
-            raise ValueError("choose the residues to bias first (enhanced['residues'])")
+        if not es.get("items" if self.backbone else "residues"):
+            raise ValueError("choose what to bias first (enhanced['residues'] or, for backbone, enhanced['items'])")
         self.settings.n_replicas = n_replicas
         self.settings.length_ns = max(self.settings.length_ns, until)
         es["settings"] = asdict(self.settings)
         s.save(self.run_dir)
         files = self.files = self.files or load_inputs(self.run_dir)
         last = len(s.rounds_ns) - 1
-        residues = [tuple(k) for k in es["residues"]]
+        residues = (list(es["items"]) if self.backbone else [tuple(k) for k in es["residues"]])
         for r in range(n_replicas):
             start = part_path(self.run_dir, r % s.n_replicas, last, ".state.xml")
             run_replica(files, self.run_dir, r, start, residues, self.settings, s.md,

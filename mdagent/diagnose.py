@@ -42,7 +42,7 @@ import mdtraj as md
 import numpy as np
 
 from .target import ResidueKey
-from .uncertainty import block_standard_error, combine_replicas, error_parts, floor_from_transitions
+from .uncertainty import Precision, block_standard_error, combine_replicas, error_parts, floor_from_transitions
 
 STATE_CENTERS_DEG = {"g+": 60.0, "t": 180.0, "g-": -60.0}
 STATE_NAMES = list(STATE_CENTERS_DEG)
@@ -114,6 +114,18 @@ def occupancy(states: np.ndarray, names: list[str] = STATE_NAMES) -> dict[str, f
     return {name: float(np.mean(s == i)) for i, name in enumerate(names)}
 
 
+def error_split(states: list[np.ndarray], names: list[str]) -> tuple[float, float]:
+    """(inside, between) error parts of the state whose population is least certain."""
+    best = (-1.0, 0.0, 0.0)
+    for i, _ in enumerate(names):
+        hits = [(s_[s_ >= 0] == i).astype(float) for s_ in states]
+        values = [float(h.mean()) if h.size else 0.0 for h in hits]
+        within, between = error_parts(values, [block_standard_error(h) for h in hits])
+        if max(within, between) > best[0]:
+            best = (max(within, between), within, between)
+    return best[1], best[2]
+
+
 def populations_with_errors(states: list[np.ndarray], names: list[str]) -> tuple[dict, dict, bool, bool]:
     """Mean population of each state over replicas, its error (time correlation and replica spread),
     whether two replicas differ beyond their errors, and whether the largest error comes mainly from
@@ -147,11 +159,14 @@ class ResidueReport:
     reason: str = ""
     populations: dict | None = None   # Mean over replicas.
     standard_error: dict | None = None  # Of each population, allowing for time correlation.
+    halfwidth: dict | None = None  # Half-width of the interval the goal asks for (uncertainty.Precision).
     name: str = ""            # Label of an item that is not a residue (for example a distance).
     quantity: str = "chi1"    # What has the states: "chi1" or "distance" (observables.py).
     extra: dict | None = None  # Other numbers worth showing, for example the mean distance.
     replicas_differ: bool | None = None  # Replica populations differ beyond their errors (None: not computed).
     error_from_replicas: bool = False    # The largest error comes mainly from the spread between replicas.
+    error_within: float | None = None    # Worst state: error part inside the replicas (allocation.py).
+    error_between: float | None = None   # Worst state: spread between the replicas.
 
     @property
     def label(self) -> str:
@@ -187,7 +202,9 @@ class ResidueReport:
         return f"{prefix}{t:.1f} ns" if t >= 0.1 else f"{prefix}{t * 1000:.0f} ps"
 
 
-def judge(report: ResidueReport, min_flips_per_replica: int = 4, precision: float | None = None) -> None:
+def judge(report: ResidueReport, min_flips_per_replica: int = 4, precision=None) -> None:
+    """Give the item a verdict. `precision` is a Precision, a plain standard error, or None."""
+    p = Precision.of(precision)
     total = sum(report.transitions)
     n = len(report.transitions)
     q = {"chi1": "chi1", "distance": "The distance", "backbone": "The backbone (phi/psi) basin"}.get(
@@ -208,11 +225,18 @@ def judge(report: ResidueReport, min_flips_per_replica: int = 4, precision: floa
         report.verdict = "rare_flips"
         report.reason = (f"{q} state changes per replica: {report.transitions}. "
                          f"Fewer than {min_flips_per_replica} in at least one replica.")
-    elif precision is not None and report.standard_error and max(report.standard_error.values()) > precision:
+    elif p is not None and report.standard_error and not p.met(report.standard_error, report.populations):
+        report.halfwidth = {k: round(v, 3) for k, v in
+                            p.halfwidths(report.standard_error, report.populations).items()}
         report.verdict = "imprecise"
         report.reason = (f"{q} state changes per replica: {report.transitions}, but the largest population error is "
-                         f"{max(report.standard_error.values()):.3f}, more than the requested {precision:g}.")
+                         f"{p.worst(report.standard_error, report.populations):.3f}"
+                         + (f" ({p.criterion})" if p.criterion != "standard_error" else "")
+                         + f", more than the requested {p.epsilon:g}.")
     else:
+        if p is not None and report.standard_error:
+            report.halfwidth = {k: round(v, 3) for k, v in
+                                p.halfwidths(report.standard_error, report.populations).items()}
         report.verdict = "ok"
         report.reason = f"{q} state changes per replica: {report.transitions}."
 
@@ -297,6 +321,7 @@ def diagnose_trajectories(
         if pooled_total_ns is None:
             (rep.populations, rep.standard_error, rep.replicas_differ,
              rep.error_from_replicas) = populations_with_errors(states, STATE_NAMES)
+            rep.error_within, rep.error_between = error_split(states, STATE_NAMES)
             judge(rep, min_flips_per_replica, precision)
         else:
             judge_pooled(rep, min_flips_per_replica * (n_replicas or len(trajs)))

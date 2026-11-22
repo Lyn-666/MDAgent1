@@ -136,3 +136,39 @@ def test_run_messages_reach_the_conversation_once(project):
     # A new terminal session starts a new conversation, so the old conversation keeps the message.
     assert not any("Results are ready." in line for line in out)
     assert a.sync(chat, "en")[0]["text"] == "[dev] Results are ready."
+
+
+def test_long_replies_can_be_read_in_a_pager_and_commands_work_at_the_question(project):
+    """/last shows the last reply in a pager (tmux turns the mouse wheel into arrow keys); a command typed at
+    the y/N question is done, and the question comes again instead of counting as no."""
+    plan = RunPlan(target_kind="ligand", ligand="BNZ", questions=[], summary="s", forcefield="amber14",
+                   accept_problems=True, max_ns=0.3)
+    long_reply = "\n".join(f"line {i}" for i in range(200))
+
+    def call(backend, system, prompt, model):
+        return ChatAction(action="plan_run", reply=long_reply, run_name="dev", pdb="examples/181L.pdb", plan=plan)
+
+    a = Assistant(root=project, backend="claude", runs=Runs(project), call=call, ui="terminal")
+    started, paged = [], []
+    a.runs.launch = lambda name, argv, **kw: started.append(name) or 123
+    out = []
+    run_terminal(a, "en", read=_scripted(["/last", "run 181L", "/runs", "/last", "y", "/quit"]),
+                 out=out.append, pager=paged.append)
+    text = "\n".join(out)
+    assert "No reply to show yet." in text                    # /last before any reply
+    assert paged and "line 199" in paged[0]                     # the whole reply, in the pager
+    assert started == ["dev"]                                   # /runs and /last did not decline the card
+    assert "Nothing was done." not in text
+
+
+def test_the_report_can_be_read_in_the_chat(project):
+    a = Assistant(root=project, backend="claude", runs=Runs(project), call=None, ui="terminal")
+    run = a.runs.dir / "r1"
+    run.mkdir(parents=True)
+    (run / "run.json").write_text("{}")
+    out, paged = [], []
+    run_terminal(a, "zh", read=_scripted(["/report", "/quit"]), out=out.append, pager=paged.append)
+    assert "还没有结果报告" in "\n".join(out)
+    (run / "report.zh.md").write_text("# 结果报告\n结论", encoding="utf-8")
+    run_terminal(a, "zh", read=_scripted(["/report r1", "/quit"]), out=out.append, pager=paged.append)
+    assert paged and "结论" in paged[0]

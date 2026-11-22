@@ -110,27 +110,33 @@ Choose one action for the user's last message:
 
 What to measure: side-chain conformations (rotamers) of a region -> target_kind "ligand" or "residues".
 A distance between atoms (a pocket opening or closing, a contact forming, a gate) -> target_kind "distance"
-with `distances`. MDAgent has enhanced sampling for side chains (chi1) and backbone phi/psi; for distances it
-runs plain MD and says when that is not enough.
+with `distances`. Backbone conformations (Ramachandran / phi-psi basin populations, transition statistics between
+basins, a phi/psi free-energy landscape, the type of a beta turn) -> target_kind "backbone" with `backbone`
+("rama:A:73", "turn:A:52"; only residues given: `residues`, each becomes a rama item). MDAgent gives populations,
+transition statistics, the free-energy difference and the landscape for every item; set rate_rel_error or
+fes_error_kcal only if the user states such a precision. MDAgent has enhanced sampling for side chains (chi1) and
+backbone items (metadynamics on their two dihedrals); for distances it runs plain MD and says when that is not
+enough.
+
 "Stop when you see X" (a side chain reaching a state, a pocket opening) -> target_kind "change" with `observe`.
-Backbone phi/psi of residues (Ramachandran basin populations, transition statistics between basins, a phi/psi
-free-energy landscape) -> target_kind "backbone" with `residues`. MDAgent gives all three for every residue; set
-rate_rel_error or fes_error_kcal only if the user states such a precision.
 If a request asks for something MDAgent cannot do, say which part in `reply`, and plan only what it can do.
 
+The user's time and replica numbers are limits, never exceeded. The agent stops early when the goal is reached
+or going on would not help, and only suggests a longer run, more replicas or another method; the user confirms.
+To add replicas to a stopped run, set resume_replicas (the new total).
+
 Planning when the user leaves choices to MDAgent (for example "you decide the number of replicas, the length and
-when to stop; at most 8 replicas of at most 50 ns"): this is MDAgent's job, so propose a plan instead of asking.
-Start with replicas = 3 (or the user's limit if it is smaller; at least 2 are needed to compare replicas), set
-max_replicas to the user's replica limit and max_ns to the user's length limit (1 us = 1000 ns), and allow
-"stop_early,add_replicas" (add "switch_method" if the user lets MDAgent change the method; add "extend" only if the
-user allows going past a limit). Leave first_ns, extend_ns and no_flip_patience_ns null: MDAgent sets the round
-length from the limit and decides from the data when an item that never changes is hopeless. In `reply`, state the plan in a few short sentences:
-the method and why, how many replicas start, that more are added only when the replicas disagree, the limits, and
-that the run stops when every requested result meets its precision or when going on would not help within the
-limits. Never promise a number of replicas or a length beyond the user's limits.
-The user's time and replica numbers are limits. The agent stops early when the goal is reached or going on
-would not help, and only suggests a longer run, more replicas or another method; the user confirms. To add
-replicas to a stopped run, set resume_replicas (the new total).
+when to stop; at most 8 replicas of at most 1 us", or "minimise the cost for this accuracy"): this is MDAgent's
+job, so propose a plan instead of asking. Set allocation "projection": MDAgent then decides how many replicas,
+how long and when to stop, for the least compute, and looks at most a few times so that its intervals stay
+calibrated. Set max_replicas to the user's replica limit, max_ns to the user's length limit (1 us = 1000 ns),
+budget_ns only if the user gives a total, replicas to a start of 3 (or the user's limit if it is smaller; at least
+2 are needed to compare replicas), and allow "stop_early,add_replicas" (add "switch_method" if the user lets
+MDAgent change the method; add "extend" only if the user allows going past a limit). Leave first_ns, extend_ns
+and no_flip_patience_ns null. In `reply`, state the plan in a few short sentences: the method and why, that
+MDAgent chooses replicas and length within the limits and stops when every requested result meets its precision
+(or says that the limits cannot answer it), and the limits. Never promise a number of replicas or a length beyond
+the user's limits.
 
 Save folder: if the user says where to save the results (a folder path), put it in save_dir exactly as written.
 The card shows the full path before anything starts.
@@ -590,17 +596,27 @@ class Assistant:
                 from .observables import distance_atoms, parse_distances
 
                 distance_atoms(md.load_topology(str(self.root / a.pdb)), parse_distances(a.plan.distances))
-            if a.plan.target_kind == "backbone" and a.pdb and a.plan.residues:
+            if a.plan.target_kind == "backbone" and a.pdb:
                 import mdtraj as md
 
-                from .backbone import backbone_quads
+                from .basins import dihedral_atoms, parse_sets, residue_sets
                 from .target import Target, parse_residue_spec, resolve_target
 
-                keys = resolve_target(Target(residues=parse_residue_spec(a.plan.residues)), self.root / a.pdb)
-                found, skipped = backbone_quads(md.load_topology(str(self.root / a.pdb)), keys)
-                if not found:
-                    raise ValueError("; ".join(f"{c}:{n}: {why}" for (c, n), why in skipped)
-                                     or "no residue with phi and psi")
+                top = md.load_topology(str(self.root / a.pdb))
+                if a.plan.backbone:
+                    for s in parse_sets(a.plan.backbone):
+                        dihedral_atoms(top, s)   # The user named these items: every atom must be there.
+                elif a.plan.residues:
+                    keys = resolve_target(Target(residues=parse_residue_spec(a.plan.residues)), self.root / a.pdb)
+                    found, why = [], []
+                    for s in parse_sets(residue_sets(keys)):
+                        try:
+                            dihedral_atoms(top, s)
+                            found.append(s)
+                        except ValueError as e:
+                            why.append(str(e))
+                    if not found:
+                        raise ValueError("; ".join(why) or "no residue with phi and psi")
             if a.plan.target_kind == "change" and a.pdb:
                 from .cli import _check_events
                 from .observables import parse_events
@@ -616,6 +632,10 @@ class Assistant:
                 check_text = check.report()
                 if not check.clean and not a.plan.accept_problems:
                     raise CheckProblems(check_text)
+                if a.plan.termini and a.plan.termini != "auto":   # as the command line says it (cli._structure_check)
+                    check_text += (f"\n  note: chain ends: --termini {a.plan.termini} replaces the suggestion above."
+                                   + {"charged": " Both ends stay charged (NH3+, COO-).",
+                                      "capped": " Both ends get neutral ACE/NME caps."}.get(a.plan.termini, ""))
             changed = [f"{n} = {getattr(a.plan, n)}" for n, _ in FLAGS + SWITCHES
                        if getattr(a.plan, n) not in (None, False)]
             save_to = self._save_folder(a.save_dir, name, lang)
