@@ -310,7 +310,8 @@ def allocation_next(run_dir, state, reports, decisions) -> float:
         alloc["counting"] = 2
     limits = Limits(max_replicas=goal.max_replicas if state.allowed("add_replicas") else n,
                     max_ns=state.max_ns_per_replica(), budget_ns=state.budget_ns(), chunk_ns=state.loop.extend_ns,
-                    patience_ns=state.loop.no_flip_patience_ns, stop_looks=goal.stop_looks,
+                    patience_ns=state.loop.no_flip_patience_ns or 0.0,   # None (default): the budget rule only.
+                    stop_looks=goal.stop_looks,
                     min_transitions=state.loop.min_flips_per_replica)
     look = alloc["looks"] + 1
     step = next_step(items, n, ns, look, alloc["tests"], precision.z, goal.precision, limits,
@@ -324,9 +325,10 @@ def allocation_next(run_dir, state, reports, decisions) -> float:
         from .allocation import stuck_projection
 
         rate, need, data = stuck_projection(n, ns, precision.z, goal.precision)
+        rest = max(limits.budget_ns - n * ns, 0.0)
         why_zh = (f"{', '.join(stuck)} 在所有重复加起来 {n * ns:g} ns 里一次都没有变化。按这个结果，变化最快也只能约每 "
-                  f"{1 / rate:.0f} ns 一次（95% 置信上限）；要达到你要的精度，大约需要 {need:.0f} 次变化，也就是至少 "
-                  f"{data:.0f} ns，超过了预算 {limits.budget_ns:g} ns。再跑普通 MD 也得不到可靠的比例")
+                  f"{1 / rate:.3g} ns 一次（95% 置信上限）；要达到你要的精度，大约需要 {need:.0f} 次变化，也就是还要至少 "
+                  f"{data:.3g} ns，超过了预算 {limits.budget_ns:g} ns 里剩下的 {rest:.3g} ns。再跑普通 MD 也得不到可靠的比例")
     # Items plain MD cannot answer are set aside on their own: told once, marked for the report, while the
     # other items go on to their precision.
     for d in live:

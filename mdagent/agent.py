@@ -331,8 +331,10 @@ def _record(run_dir: Path, state: RunState, reports, decisions, next_ns: float) 
         stuck = [d.residue for d in decisions if d.action == "stalled"]
         lines.append("Decision: stop plain MD. "
                      + (f"Enhanced sampling is needed for: {', '.join(enhanced)}. " if enhanced else "")
-                     + (f"Not sampled well, and this quantity has no enhanced sampling method yet: "
-                        f"{', '.join(stuck)}." if stuck else "")
+                     + ((f"Plain MD cannot sample these; enhanced sampling for them needs permission switch_method "
+                         f"(or is switched off): {', '.join(stuck)}." if state.quantity in BIASABLE else
+                         f"Not sampled well, and this quantity has no enhanced sampling method yet: "
+                         f"{', '.join(stuck)}.") if stuck else "")
                      + ("All target items are sampled well." if not enhanced and not stuck else ""))
     text = "\n".join(lines)
     with open(run_dir / "decisions.log", "a") as f:

@@ -147,7 +147,7 @@ def _next_step(items: list, n: int, ns: float, look: int, tests_before: int, z: 
     max_n, max_ns = limits.max_replicas, limits.max_ns
     spent = n * ns
     aside = {}
-    if ns >= limits.patience_ns:
+    if ns >= (limits.patience_ns or 0.0):
         # An item that never changed state is set aside only when even the fastest rate consistent with that
         # cannot give enough changes within the rest of the budget (uncertainty.never_changing_hopeless, the same
         # rule as the rounds mode). More budget: more patience.
@@ -176,9 +176,11 @@ def _next_step(items: list, n: int, ns: float, look: int, tests_before: int, z: 
         stuck = [k for k, v in aside.items() if v == "stuck"]
         if stuck:
             rate, need, data = stuck_projection(n, ns, z, tolerance)
+            rest = max(limits.budget_ns - n * ns, 0.0)
             why = (f"{', '.join(stuck)} never changed state in {n * ns:g} ns of all replicas together; even at the "
-                   f"fastest rate that allows (one change per {1 / rate:.0f} ns), the precision needs about {need:.0f} "
-                   f"changes, that is {data:.0f} ns, more than the budget of {limits.budget_ns:g} ns")
+                   f"fastest rate that allows (one change per {1 / rate:.3g} ns), the precision needs about {need:.0f} "
+                   f"changes, that is {data:.3g} ns more, more than the {rest:.3g} ns left of the budget of "
+                   f"{limits.budget_ns:g} ns")
         else:
             why = "the projected cost is far beyond the budget"
         return Step(INSUFFICIENT, n, ns, f"{why}; plain MD cannot answer within the limits", planning,

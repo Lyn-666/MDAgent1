@@ -243,7 +243,7 @@ def test_an_unchanged_item_is_given_up_only_when_even_the_fastest_rate_misses_th
     assert s.action == CONTINUE and not s.set_aside            # 48 ns: ~330 ns needed at best, budget 800
     s = next_step([still], 3, 64.0, look=6, tests_before=0, z=2.39, tolerance=0.05, limits=big)
     assert s.action == INSUFFICIENT and s.set_aside == {"rama:A:9": "stuck"}   # 192 ns: ~1300 ns needed
-    assert "one change per 64 ns" in s.reason and "more than the budget of 800 ns" in s.reason
+    assert "one change per 64 ns" in s.reason and "left of the budget of 800 ns" in s.reason
 
 
 def test_a_finished_run_decides_again_under_a_newer_rule(tmp_path):
@@ -277,3 +277,20 @@ def test_the_give_up_rule_is_shared_and_needs_no_fixed_waiting_time():
     tight = Precision(epsilon=0.05, criterion="confidence", looks=3)
     assert not no_change_hopeless(r, 20.0, loop)          # 3 x 80 / 20 = 12 changes still possible: wait.
     assert no_change_hopeless(r, 20.0, loop, tight)        # The calibrated interval needs about 21: give up.
+
+
+def test_projection_works_with_the_default_patience(tmp_path):
+    """--no-flip-patience-ns is unset by default since 2026-11-21 (None); projection must not trip over it."""
+    from mdagent.agent import Decision, Goal, LoopSettings, RunState
+    from mdagent.diagnose import ResidueReport
+    from mdagent.policy import allocation_next
+    from mdagent.simulate import MDSettings
+
+    state = RunState(pdb="x", target_description="t", target=[("A", 5)], n_replicas=2, base_seed=1,
+                     md=MDSettings(), loop=LoopSettings(first_ns=1.0, max_ns=10.0), rounds_ns=[1.0],
+                     goal=asdict(Goal(quantity="backbone_basins", allocation="projection")), backbone=["rama:A:5"])
+    assert state.loop.no_flip_patience_ns is None
+    state.save(tmp_path)
+    rep = ResidueReport("A", 5, "", transitions=[0, 0], occupancies=[], dominant=[], name="rama:A:5",
+                        quantity="backbone", standard_error={"alpha_R": 0.2})
+    assert allocation_next(tmp_path, state, [rep], [Decision("rama:A:5", "extend", "")]) > 0
