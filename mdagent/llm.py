@@ -55,8 +55,10 @@ class RunPlan(BaseModel):
         None, description="Only for 'backbone': largest error of the free-energy landscape in kcal/mol, if the user "
                           "states one. Default 0.5.")
     allocation: Optional[Literal["rounds", "projection"]] = Field(
-        None, description="'projection' when the user lets MDAgent decide how many replicas, how long and when to "
-                          "stop, or asks to minimise the simulation cost for a required accuracy. Default rounds.")
+        None, description="Leave null (default): MDAgent plans how many replicas, how long and when to stop "
+                          "(projection) unless the user names the method, asks for adaptive sampling or watches for a "
+                          "change (then rounds). Set 'rounds' only if the user asks for a fixed plan, for example "
+                          "'run exactly 3 replicas of 10 ns'.")
     budget_ns: Optional[float] = Field(
         None, description="Only if the user gives a total budget: production ns of all replicas together.")
     max_replicas: Optional[int] = Field(
@@ -95,7 +97,9 @@ class RunPlan(BaseModel):
     first_ns: Optional[float] = Field(None, description="Length of round 1 per replica in ns. Default 1.")
     extend_ns: Optional[float] = Field(None, description="Length of each later round in ns. Default: 5, or 1/20 of "
                                                          "max_ns for long budgets.")
-    max_ns: Optional[float] = Field(None, description="Total plain MD budget per replica in ns. Default 20.")
+    max_ns: Optional[float] = Field(None, description="Limit on the plain MD length per replica in ns. Only if the "
+                                                      "user gives one (1 us = 1000 ns). Default: 2000 when MDAgent "
+                                                      "plans, 20 for a fixed plan.")
     no_flip_patience_ns: Optional[float] = Field(
         None, description="Only if the user names such a time: give up on plain MD for an item that has not changed "
                           "state after this many ns per replica. Default: decided from the budget.")
@@ -153,9 +157,13 @@ precise enough: side-chain conformations (chi1), distances between atoms, or bac
 basins, transitions between them, the phi/psi free-energy landscape, beta-turn types). For side chains that
 plain MD cannot sample it runs enhanced sampling.
 
-If the user lets MDAgent decide how many replicas, how long and when to stop, or asks to minimise the cost for a
-required accuracy, set allocation "projection". If the user also restricts the method to standard (unbiased,
-plain) MD, keep mode null and set allow "extend,add_replicas,stop_early" (no switch to enhanced sampling).
+By default MDAgent plans how many replicas, how long and when to stop, for the least compute, within at most 10
+replicas of at most 2 us, and stops as soon as the results are precise enough: leave allocation, replicas,
+max_ns, max_replicas and allow null unless the user gives them. If the user restricts the method to standard
+(unbiased, plain) MD, keep mode null and leave allow null (it may then stop early and add replicas within the
+limit, never switch method). Put "extend" in allow only if the user allows going past a limit. Use allocation
+"rounds" with mode "guided" only when the user asks for a fixed plan with exact numbers ("exactly 3 replicas of
+10 ns").
 
 Rules:
 - Fill in only what the user asked for. Leave every other field null, so it keeps its default.

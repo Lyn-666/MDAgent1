@@ -218,6 +218,9 @@ def test_an_uncertain_spread_is_measured_with_more_replicas_not_given_up():
     s = next_step([item], 3, 80.0, look=2, tests_before=0, z=2.39, tolerance=0.05, limits=lim)
     assert s.action == CONTINUE and s.kind == "explore_replicas" and s.replicas == 8 and s.ns == 85.0
     assert s.replicas * s.ns <= lim.budget_ns
+    big = Limits(max_replicas=10, max_ns=2000.0, budget_ns=20000.0, chunk_ns=100.0, t_dist=True)
+    s = next_step([item], 3, 80.0, look=2, tests_before=0, z=2.39, tolerance=0.05, limits=big)
+    assert s.kind == "explore_replicas" and s.ns == pytest.approx(88.0)   # a tenth, not a 100 ns round
     hopeless = ItemState("x", {"a": 0.12}, 0.05, 0.12, [40, 40, 40], False)
     s = next_step([hopeless], 3, 80.0, look=2, tests_before=0, z=2.39, tolerance=0.05, limits=lim)
     assert s.action == INSUFFICIENT
@@ -310,3 +313,31 @@ def test_the_live_loop_adds_replicas_to_measure_an_uncertain_spread(tmp_path):
     assert state.n_replicas == 8 and more == pytest.approx(5.0)
     said = [json.loads(line) for line in (tmp_path / "messages.jsonl").read_text().splitlines()]
     assert any("先加重复把它测准" in m.get("zh", "") for m in said)
+
+
+
+def test_by_default_the_agent_plans_within_ten_replicas_of_two_microseconds():
+    """The user's decision (2026-11-23): the agent plans by default; limits 10 replicas x 2 us; it stops when done.
+    A fixed plan stays the default where the agent should not plan: guided mode, adaptive sampling, events."""
+    from argparse import Namespace
+
+    from mdagent.cli import _goal_from_args, burn_in_default, resolve_defaults
+
+    def args(**kw):
+        base = dict(allocation=None, max_ns=None, mode="auto", sampling="continue", quantity="chi1", allow=None,
+                    goal="", precision=0.05, max_replicas=10, burn_in=None)
+        base.update(kw)
+        return Namespace(**base)
+    a = args()
+    resolve_defaults(a)
+    goal = _goal_from_args(a)
+    assert a.allocation == "projection" and a.max_ns == 2000.0 and a.max_replicas == 10
+    assert goal.allocation == "projection" and sorted(goal.permissions) == ["add_replicas", "stop_early"]
+    assert burn_in_default(a) == "auto"
+    for kw in (dict(mode="guided"), dict(sampling="adaptive"), dict(quantity="event")):
+        b = args(**kw)
+        resolve_defaults(b)
+        assert b.allocation == "rounds" and b.max_ns == 20.0, kw
+    c = args(max_ns=500.0, allow="stop_early")
+    resolve_defaults(c)
+    assert c.max_ns == 500.0 and _goal_from_args(c).permissions == ["stop_early"]   # the user's words win

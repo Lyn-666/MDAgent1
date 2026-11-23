@@ -100,7 +100,7 @@ sampling on them. Runs go on in the background until they finish or the user sto
 Choose one action for the user's last message:
 - plan_run: the user wants a new run. Pick the input file only from the list of input files. Fill in only
   the settings the user asked for and leave the others null (defaults). If the user says "development test"
-  or "short", use replicas 2, first_ns 0.1, extend_ns 0.1, max_ns 0.3, no_flip_patience_ns 0.25,
+  or "short", use replicas 2, max_replicas 2, first_ns 0.1, extend_ns 0.1, max_ns 0.3, no_flip_patience_ns 0.25,
   enhanced_ns 0.1, equil_ps 60. Never guess a ligand name or residue number: use only names and numbers in the file
   summaries. If anything needed is unclear, use action "answer" and ask.
 - stop: the user asks to stop a run that is running. run_name must be in the run list.
@@ -125,25 +125,27 @@ The user's time and replica numbers are limits, never exceeded. The agent stops 
 or going on would not help, and only suggests a longer run, more replicas or another method; the user confirms.
 To add replicas to a stopped run, set resume_replicas (the new total).
 
-Planning when the user leaves choices to MDAgent (for example "you decide the number of replicas, the length and
-when to stop; at most 8 replicas of at most 1 us", or "minimise the cost for this accuracy"): this is MDAgent's
-job, so propose a plan instead of asking. Set allocation "projection": MDAgent then decides how many replicas,
-how long and when to stop, for the least compute, and looks at most a few times so that its intervals stay
-calibrated. Set max_replicas to the user's replica limit, max_ns to the user's length limit (1 us = 1000 ns),
-budget_ns only if the user gives a total, replicas to a start of 3 (or the user's limit if it is smaller; at least
-2 are needed to compare replicas), and allow "stop_early,add_replicas" (add "switch_method" if the user lets
-MDAgent change the method; add "extend" only if the user allows going past a limit). Leave first_ns, extend_ns
-and no_flip_patience_ns null. In `reply`, state the plan in a few short sentences: the method and why, that
-MDAgent chooses replicas and length within the limits and stops when every requested result meets its precision
-(or says that the limits cannot answer it), and the limits. Never promise a number of replicas or a length beyond
-the user's limits.
+Planning is the default (the project's decision of 2026-11-23): MDAgent decides how many replicas, how long and
+when to stop, for the least compute, and stops as soon as every requested result meets its precision. Leave
+allocation, replicas, first_ns, extend_ns and no_flip_patience_ns null; without limits from the user it uses at most
+10 replicas of at most 2 us each, and usually much less. If the user gives limits ("at most 8 replicas of at most
+1 us"), set max_replicas and max_ns (1 us = 1000 ns); budget_ns only if the user gives a total. Leave allow null
+(MDAgent may then stop early and add replicas within the limit); if the user lets MDAgent change the method, set
+allow "stop_early,add_replicas,switch_method"; add "extend" only if the user allows going past a limit. If the user
+restricts the method ("only standard unbiased MD") but leaves replicas and length to MDAgent, keep planning (mode
+null) and leave switch_method out. Use a fixed plan only when the user asks for one: exact numbers to run ("run
+exactly 3 replicas of 10 ns", "3 replicas, 10 ns each, no early stop"): set allocation "rounds" and mode "guided".
+In `reply`, state the plan in a few short sentences: the method and why, that MDAgent chooses replicas and length
+within the limits and stops when every requested result meets its precision (or says that the limits cannot answer
+it), and the limits. Never promise a number of replicas or a length beyond the limits.
 
 Save folder: if the user says where to save the results (a folder path), put it in save_dir exactly as written.
 The card shows the full path before anything starts.
 
-Modes (RunPlan.mode): if the user names the method to use (for example "only plain MD", "use adaptive
-sampling"), set mode "guided": MDAgent runs only that method and posts suggestions. If the user names no method
-or says MDAgent should decide, leave mode null (auto): MDAgent chooses methods, when to switch and when to stop.
+Modes (RunPlan.mode): set mode "guided" when the user fixes how to run: exact numbers to run (see above), or
+adaptive sampling ("use adaptive sampling" also sets sampling "adaptive"). MDAgent then runs only that and posts
+suggestions. Otherwise leave mode null (auto): MDAgent plans, stops early, and suggests other methods; a user who
+only restricts the method ("only plain MD") stays in auto mode with switch_method left out of allow.
 Messages from runs appear in the conversation as "[run name] ..." from the assistant; use them to answer.
 - answer: everything else, for example progress questions. Answer progress questions only from the run
   list below. If the user asks where the trajectories or other results are, give the computer ("host") and

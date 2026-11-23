@@ -1,5 +1,7 @@
 # MDAgent1：开发者和研究说明
 
+**2026-11-23 起的默认值（用户的决定）：** `mdagent run` 默认 `--allocation projection`（agent 自己决定几条、多长、何时停），上限 `--max-replicas 10`、`--max-ns 2000`（2 µs），权限 `stop_early,add_replicas`，`--burn-in auto`。只有 `--mode guided`、`--sampling adaptive` 或 `--quantity event` 时默认才是按轮的固定方案（3 条、每条最多 20 ns）。下文写的“默认 `rounds`、每条最多 20 ns”指的是这种固定方案。开发者脚本（`scripts/*.sh`）都显式写了 `--allocation rounds`。
+
 这份文件是 2026-11-23 之前的完整 README，保留给开发者和论文使用：所有选项、算法细节、预算对照（`budget`）、实验 A、第 5 步验证、通用决策核心。面向用户的说明在仓库首页的 [README](../README.md)。
 
 

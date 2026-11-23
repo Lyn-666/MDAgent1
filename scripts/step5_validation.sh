@@ -35,10 +35,10 @@ SYSTEM=${1:-1UBQ}
 case "$SYSTEM" in
   1UBQ)
     [ -e structures/1UBQ.pdb ] || python -m mdagent fetch 1UBQ
-    COMMON="--pdb structures/1UBQ.pdb --uniprot P0CG48 --termini charged --replicas 3"
+    COMMON="--pdb structures/1UBQ.pdb --uniprot P0CG48 --termini charged --replicas 3 --allocation rounds"
     FAST="A:16,A:32,A:63"; SLOW="A:26"; DIST_FAST="A:11:NZ-A:34:CD@0.45"; DIST_SLOW="A:27:NZ-A:52:CG@0.45" ;;
   181L)
-    COMMON="--pdb examples/181L.pdb --accept-problems --replicas 3"
+    COMMON="--pdb examples/181L.pdb --accept-problems --replicas 3 --allocation rounds"
     FAST="A:80,A:135,A:162"; SLOW="A:111"; DIST_FAST="A:162:NZ-A:159:CG@0.45"; DIST_SLOW="A:145:CZ-A:11:CD@0.5" ;;
   *) echo "Unknown protein $SYSTEM. Choose 1UBQ or 181L."; exit 2 ;;
 esac

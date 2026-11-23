@@ -41,7 +41,7 @@ DISJOINT=${DISJOINT:-0}           # 1: trials use groups of replicas that share 
 PILOT=runs/expA_pilot
 POOL=runs/expA_pool
 EASY=runs/expA_easy.txt
-COMMON="--pdb structures/1UBQ.pdb --uniprot P0CG48 --termini charged --residues A:1-76 --allow none"
+COMMON="--pdb structures/1UBQ.pdb --uniprot P0CG48 --termini charged --residues A:1-76 --allow none --allocation rounds"
 
 [ -e structures/1UBQ.pdb ] || python -m mdagent fetch 1UBQ
 

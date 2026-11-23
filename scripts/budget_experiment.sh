@@ -52,7 +52,7 @@ if [ -e "$POOL/run.json" ]; then
 else
   # --allow none: the pool makes no decisions of its own. It is data, not a strategy.
   echo "$(date '+%F %T') running the pool: $POOL_REPLICAS replicas x $POOL_NS ns."
-  python -m mdagent run $COMMON --residues "$RESIDUES" --replicas "$POOL_REPLICAS" \
+  python -m mdagent run $COMMON --allocation rounds --residues "$RESIDUES" --replicas "$POOL_REPLICAS" \
       --first-ns "$POOL_NS" --max-ns "$POOL_NS" --allow none --out "$POOL" > "$POOL.log" 2>&1 \
     || { echo "the pool ended with an error, see $POOL.log"; exit 1; }
 fi

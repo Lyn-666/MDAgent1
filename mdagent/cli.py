@@ -183,6 +183,26 @@ def _write_report(run_dir: Path) -> None:
          "and the open questions.", "done")
 
 
+PLANNED_MAX_NS = 2000.0   # default limit per replica when the agent plans (the user's decision, 2026-11-23: 2 us)
+FIXED_MAX_NS = 20.0       # default limit per replica for a fixed plan (guided mode, adaptive sampling, events)
+
+
+def resolve_defaults(args) -> None:
+    """Fill the defaults that depend on how the run is planned (the user's decision, 2026-11-23).
+
+    By default the agent plans (--allocation projection): it chooses how many replicas, how long and when to stop,
+    within 10 replicas of at most 2 us, and stops as soon as every result is precise enough. A fixed plan in rounds
+    is the default only where the agent should not plan: the user named the method (--mode guided), adaptive
+    sampling (segments restart from chosen frames), or a change to watch for (--quantity event).
+    """
+    if getattr(args, "allocation", None) is None:
+        planned = (getattr(args, "mode", "auto") == "auto" and getattr(args, "sampling", "continue") == "continue"
+                   and getattr(args, "quantity", "chi1") != "event")
+        args.allocation = "projection" if planned else "rounds"
+    if getattr(args, "max_ns", None) is None:
+        args.max_ns = PLANNED_MAX_NS if args.allocation == "projection" else FIXED_MAX_NS
+
+
 def burn_in_default(args) -> str:
     """--burn-in if given; otherwise "auto" for projection allocation (review revision, 2026-11-23), else "none"."""
     return getattr(args, "burn_in", None) or ("auto" if getattr(args, "allocation", "rounds") == "projection"
@@ -205,6 +225,10 @@ def _goal_from_args(args):
                          hold_ps=getattr(args, "hold_ps", 100.0), seen_in=getattr(args, "seen_in", 1),
                          rate_rel_error=getattr(args, "rate_rel_error", 0.25),
                          fes_error_kcal=getattr(args, "fes_error_kcal", 0.5))
+    if args.allow is None and goal.allocation == "projection" and args.mode == "auto":
+        # The agent plans within the limits: adding replicas up to --max-replicas is part of the plan, not a step
+        # past a limit. Running past the limits (extend) and another method (switch_method) still need a yes.
+        goal.permissions = ["stop_early", "add_replicas"]
     if args.allow is not None:
         allowed = [a.strip() for a in args.allow.split(",") if a.strip() and a.strip() != "none"]
         unknown = [a for a in allowed if a not in PERMISSIONS]
@@ -301,6 +325,7 @@ def cmd_run(args) -> int:
 
     from .build import FORCEFIELDS
 
+    resolve_defaults(args)
     out = Path(args.out)
     print(f"Run folder: {out.resolve()} (on computer '{_host()}')")
     if (out / "run.json").exists():
@@ -641,10 +666,11 @@ def build_parser() -> argparse.ArgumentParser:
                         "residue i+1 is 52 (type I or II); rama:A:70-74 expands to every residue. Populations, the "
                         "transition statistics, the free-energy difference and the landscape are reported, each judged "
                         "on its own. With --residues instead, every residue becomes a rama item.")
-    r.add_argument("--allocation", default="rounds", choices=["rounds", "projection"],
-                   help="rounds (default): fixed rounds of --extend-ns for every replica. projection: the agent "
-                        "decides how many replicas, how long and when to stop, for the least compute, within "
-                        "--budget-ns, --max-ns per replica and --max-replicas.")
+    r.add_argument("--allocation", default=None, choices=["rounds", "projection"],
+                   help="projection: the agent decides how many replicas, how long and when to stop, for the least "
+                        "compute, within --budget-ns, --max-ns per replica and --max-replicas. rounds: fixed rounds "
+                        "of --extend-ns for every replica. Default: projection in auto mode; rounds in guided mode, "
+                        "with --sampling adaptive and with --quantity event.")
     r.add_argument("--budget-ns", type=float, default=0.0,
                    help="With --allocation projection: production ns of all replicas together, never exceeded. "
                         "Default: --max-replicas x --max-ns if the agent may add replicas, else --replicas x --max-ns.")
@@ -683,7 +709,9 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--extend-ns", type=float, default=None,
                    help="Length of each later round per replica (ns). Default: 5, or 1/20 of --max-ns for long "
                         "budgets, so that there are about 20 decision points.")
-    r.add_argument("--max-ns", type=float, default=20.0, help="Budget: total length per replica (ns).")
+    r.add_argument("--max-ns", type=float, default=None,
+                   help="Limit: total length per replica (ns). Default 2000 (2 us) when the agent plans "
+                        "(--allocation projection), 20 for a fixed plan in rounds.")
     r.add_argument("--burn-in", default=None, choices=["auto", "none"],
                    help="auto: leave out each replica's first, non-equilibrated part before judging (automated "
                         "equilibration detection, Chodera 2016; the part is still counted as cost). none: keep "
@@ -728,8 +756,9 @@ def build_parser() -> argparse.ArgumentParser:
                         "--criterion confidence and sequence, and by 'compare'.")
     r.add_argument("--allow", default=None,
                    help="What the agent may do by itself, comma separated: extend, add_replicas, switch_method, "
-                        "stop_early; or 'none'. Default: only stop_early in auto mode (time and replicas are "
-                        "limits; the agent suggests the rest), none in guided mode.")
+                        "stop_early; or 'none'. Default: stop_early and add_replicas (within --max-replicas) when "
+                        "the agent plans; only stop_early in auto mode with rounds; none in guided mode. Time and "
+                        "replicas are limits; the agent suggests the rest.")
     r.add_argument("--max-replicas", type=int, default=10,
                    help="With permission add_replicas, the agent adds replicas up to this number (default 10).")
     r.add_argument("--extend-factor", type=float, default=2.0,

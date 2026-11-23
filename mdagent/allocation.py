@@ -263,7 +263,9 @@ def _next_step(items: list, n: int, ns: float, look: int, tests_before: int, z: 
         # suggestive already calls for replicas). New replicas catch up to the current length, and every replica
         # runs one chunk more (the live loop runs new replicas only within a round of positive length); the
         # budget holds. Not possible at the length limit.
-        longer = min(max_ns, ns + limits.chunk_ns)
+        # One small step (at most a tenth of the current length): enough for the new replicas to run in the live loop,
+        # without paying a full round on every replica (with a 2 us limit a round is 100 ns).
+        longer = min(max_ns, ns + min(limits.chunk_ns, max(0.1 * ns, 1e-3)))
         explore = min(max_n, int((limits.budget_ns + 1e-9) // max(longer, 1e-9)))
         if hopeless and hope is not None and explore > n and longer > ns + 1e-9:
             return Step(CONTINUE, explore, round(longer, 6),
