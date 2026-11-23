@@ -265,6 +265,7 @@ STEP_ZH = {
     "too_few_changes": "状态变化还太少，误差还不可信，先跑长一些",
     "projected": "按投影，这是达到精度花费最少的分配",
     "explore_replicas": "重复之间的差别只靠几条重复估计，还测不准；先加重复把它测准，再决定要跑多长",
+    "others_done": "其他项目都已足够精确，只剩一次都没变化的项目；普通 MD 再等下去可能要很久，所以停下",
 }
 
 
@@ -337,7 +338,8 @@ def allocation_next(run_dir, state, reports, decisions) -> float:
     for d in live:
         if d.residue in step.set_aside:
             d.action, d.cause = "stalled", ("stalled" if step.set_aside[d.residue] == "stuck" else "insufficient_evidence")
-    others_go_on = any(d.residue not in step.set_aside for d in live)
+    # "The other items go on" is true only while plain MD goes on; when it ends, the stop message says it all.
+    others_go_on = step.action == CONTINUE and any(d.residue not in step.set_aside for d in live)
     for label in [k for k in list(state.notes) if k.startswith("said_set_aside_")]:
         if label[len("said_set_aside_"):] not in step.set_aside:
             state.notes.pop(label)   # It moved again: tell anew if it is ever set aside again.
@@ -358,6 +360,19 @@ def allocation_next(run_dir, state, reports, decisions) -> float:
                   "would need far more than the budget to reach the precision")
                + ", so it gets INSUFFICIENT_EVIDENCE on its own. The other items go on as planned.",
                "suggestion", once_key=f"said_set_aside_{label}")
+    if step.action != CONTINUE:
+        # Plain MD ends: items it never saw change go on to enhanced sampling when the agent may switch (run_all
+        # starts it); otherwise they stay "stalled" and the end message proposes enhanced sampling.
+        to_es = state.can_switch() and state.enhanced.get("enabled", True)
+        for d in live:
+            if step.set_aside.get(d.residue) == "stuck" and to_es:
+                d.action, d.cause = "enhanced_sampling", "stalled"
+    if step.kind == "others_done":
+        stuck = [k for k, v in step.set_aside.items() if v == "stuck"]
+        es = state.can_switch() and state.enhanced.get("enabled", True)
+        why_zh = (f"{why_zh}。一次都没变化的项目：{', '.join(stuck)}（所有重复加起来 {n * ns:g} ns）。"
+                  + ("接下来对它们改用增强采样" if es else
+                     "建议对它们改用增强采样：在对话里说“用增强采样继续”即可（侧链和主链构象可以用）"))
     if step.action == STOP:
         room = round(state.loop.max_ns - ns, 6)
         if not state.allowed("stop_early") and room > 0:

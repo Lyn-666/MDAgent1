@@ -145,7 +145,8 @@ def allocate(items: list, n: int, ns: float, z: float, tolerance: float, max_n: 
 # 6 (2026-11-23): a spread between replicas that is only suggestive (chi-square at 0.8) already calls for replicas;
 #   give up only when even the optimistic spread (95 % lower bound) cannot reach the precision, and otherwise add
 #   replicas to measure the spread.
-RULE_VERSION = 6
+# 7 (2026-11-23): when everything that changed state is precise enough, items that never changed stop plain MD.
+RULE_VERSION = 7
 
 
 def stuck_projection(n: int, ns: float, z: float, tolerance: float) -> tuple[float, float, float]:
@@ -233,6 +234,19 @@ def _next_step(items: list, n: int, ns: float, look: int, tests_before: int, z: 
             why = "the projected cost is far beyond the budget"
         return Step(INSUFFICIENT, n, ns, f"{why}; plain MD cannot answer within the limits", planning,
                     "stuck" if "stuck" in aside.values() else "hopeless", aside)
+    # Everything that changed state is done; only items that never changed state are left (the user's decision,
+    # 2026-11-23). With a large budget the never-changing rule would wait long (about 3 / 21 of the budget), and
+    # the whole run with it. Stop plain MD now: those items get INSUFFICIENT_EVIDENCE on their own and enhanced
+    # sampling is proposed for them (or runs, with permission switch_method).
+    never = [i for i in active if sum(i.transitions) == 0]
+    rest = [i for i in active if sum(i.transitions) > 0]
+    if not planning and never and rest and all(i.converged for i in rest):
+        for i in never:
+            aside[i.label] = "stuck"
+        return Step(STOP, n, ns, "every item that changed state is precise enough; "
+                    f"{', '.join(i.label for i in never)} never changed state in {n * ns:g} ns of all replicas "
+                    "together, so plain MD stops instead of waiting for them; enhanced sampling can sample them",
+                    planning, "others_done", aside)
     if not planning and all(i.converged for i in active):
         return Step(STOP, n, ns, "every item that plain MD can answer is precise enough and adequately sampled"
                     + left_out, planning, "converged", aside)

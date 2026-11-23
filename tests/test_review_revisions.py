@@ -341,3 +341,58 @@ def test_by_default_the_agent_plans_within_ten_replicas_of_two_microseconds():
     c = args(max_ns=500.0, allow="stop_early")
     resolve_defaults(c)
     assert c.max_ns == 500.0 and _goal_from_args(c).permissions == ["stop_early"]   # the user's words win
+
+
+def test_when_the_rest_is_done_never_changing_items_do_not_keep_plain_md_going():
+    """The user's decision (2026-11-23): with a large budget a never-changing item would keep the run waiting (about
+    3/21 of the budget). When everything that changed state is precise enough, plain MD stops instead."""
+    from mdagent.allocation import STOP, ItemState, Limits, next_step
+
+    lim = Limits(max_replicas=10, max_ns=2000.0, budget_ns=20000.0, chunk_ns=100.0)
+    done = ItemState("rama:A:9", {"a": 0.01}, 0.01, 0.01, [30, 30, 30], True)
+    stuck = ItemState("turn:A:52", {"a": 0.0}, 0.0, 0.0, [0, 0, 0], False)
+    s = next_step([done, stuck], 3, 20.0, look=2, tests_before=0, z=2.39, tolerance=0.05, limits=lim)
+    assert s.action == STOP and s.kind == "others_done" and s.set_aside == {"turn:A:52": "stuck"}
+    # Not at the planning look, and not while something that changes still needs more data.
+    s = next_step([done, stuck], 3, 1.0, look=1, tests_before=0, z=2.39, tolerance=0.05, limits=lim)
+    assert s.action != STOP
+    busy = ItemState("rama:A:9", {"a": 0.05}, 0.05, 0.02, [30, 30, 30], False)
+    s = next_step([busy, stuck], 3, 20.0, look=2, tests_before=0, z=2.39, tolerance=0.05, limits=lim)
+    assert s.action != STOP
+
+
+def test_the_live_run_hands_never_changing_items_to_enhanced_sampling_when_allowed(tmp_path):
+    import json
+    from dataclasses import asdict
+
+    from mdagent.agent import Decision, Goal, LoopSettings, RunState
+    from mdagent.diagnose import ResidueReport
+    from mdagent.policy import allocation_next
+    from mdagent.simulate import MDSettings
+
+    def run(permissions, folder):
+        goal = Goal(quantity="backbone_basins", allocation="projection", criterion="confidence", precision=0.05,
+                    max_replicas=10, permissions=permissions)
+        state = RunState(pdb="x", target_description="t", target=[("A", 9), ("A", 52)], n_replicas=3, base_seed=1,
+                         md=MDSettings(), loop=LoopSettings(first_ns=1.0, extend_ns=100.0, max_ns=2000.0),
+                         rounds_ns=[20.0], goal=asdict(goal), backbone=["rama:A:9", "turn:A:52"],
+                         notes={"allocation": {"looks": 1, "tests": 0, "counting": 2}})
+        folder.mkdir()
+        state.save(folder)
+        done = ResidueReport("A", 9, "", transitions=[30, 30, 30], occupancies=[], dominant=["alpha_R"] * 3,
+                             name="rama:A:9", quantity="backbone", verdict="ok",
+                             standard_error={"alpha_R": 0.01}, error_within=0.01, error_between=0.01)
+        stuck = ResidueReport("A", 52, "", transitions=[0, 0, 0], occupancies=[], dominant=["betaI"] * 3,
+                              name="turn:A:52", quantity="backbone", verdict="no_flip",
+                              standard_error={"betaI": 0.0}, error_within=0.0, error_between=0.0)
+        decisions = [Decision("rama:A:9", "done", ""), Decision("turn:A:52", "extend", "")]
+        more = allocation_next(folder, state, [done, stuck], decisions)
+        said = [json.loads(x) for x in (folder / "messages.jsonl").read_text().splitlines()]
+        return more, decisions[1], said
+    more, d, said = run(["stop_early", "add_replicas", "switch_method"], tmp_path / "a")
+    assert more == 0.0 and d.action == "enhanced_sampling" and d.cause == "stalled"
+    assert any("接下来对它们改用增强采样" in m.get("zh", "") for m in said)
+    more, d, said = run(["stop_early", "add_replicas"], tmp_path / "b")
+    assert more == 0.0 and d.action == "stalled"
+    assert any("用增强采样继续" in m.get("zh", "") for m in said)
+    assert not any("其余项目照常继续" in m.get("zh", "") for m in said)
