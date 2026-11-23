@@ -28,7 +28,7 @@ MODEL = "claude-opus-5-5"
 class RunPlan(BaseModel):
     """Settings for one `mdagent run`. Leave a field null to keep its default."""
 
-    target_kind: Literal["ligand", "residues", "distance", "backbone", "change"] = Field(
+    target_kind: Literal["ligand", "residues", "distance", "backbone", "change", "stability"] = Field(
         description="'ligand': the target is all protein residues near a ligand in the PDB file. "
                     "'residues': the target is a list of residues. Both study side-chain conformations (chi1). "
                     "'distance': the user wants to know about distances between atoms (a pocket opening, a "
@@ -38,6 +38,9 @@ class RunPlan(BaseModel):
                     "them in `backbone`. "
                     "'change': the user wants to stop once a given change is seen (a side chain reaches a state, "
                     "a pocket opens); give it in `observe`. "
+                    "'stability': the user wants to know whether the structure stays stable (backbone RMSD from the "
+                    "start, radius of gyration, steady state, unfolding, an RMSD-Rg free-energy surface, "
+                    "conformational clusters); the whole protein, or a region in `residues`. "
                     "'backbone': the user wants backbone results (Ramachandran / phi-psi basin populations, transitions "
                     "between basins, a phi/psi free-energy landscape, the type of a beta turn); give the items in "
                     "`backbone`, or only the residues in `residues` (each becomes a rama item).")
@@ -90,6 +93,14 @@ class RunPlan(BaseModel):
         None, description="Manual protonation states, e.g. 'A:31=HIP,A:70=ASH'. "
                           "Allowed: ASP/ASH, GLU/GLH, LYS/LYN, HIP/HID/HIE.")
     ion_conc: Optional[float] = Field(None, description="Salt concentration in M. Default 0.15.")
+    stability_tolerance_nm: Optional[float] = Field(None, description="Only for 'stability', if the user gives a "
+                                                      "precision for the mean RMSD/Rg in nm. Default 0.02.")
+    rmsd_cutoff_nm: Optional[float] = Field(None, description="Only for 'stability': the RMSD (nm) above which the "
+                                                              "structure counts as departed or unfolded. Default 0.3.")
+    cluster_cutoff_nm: Optional[float] = Field(None, description="RMSD cutoff (nm) of the conformational clustering. "
+                                                                 "Default 0.15.")
+    cluster: Optional[bool] = Field(None, description="True if the user wants conformational clusters for a run that "
+                                                      "is not 'stability' (stability runs always get them).")
     temperature_k: Optional[float] = Field(None, description="Simulation temperature in K, only if the user asks for "
                                                              "a temperature other than the default. Default 300.")
     cation: Optional[Literal["Na+", "K+"]] = Field(None, description="Default Na+. The anion is Cl-.")
@@ -155,8 +166,10 @@ class RunPlan(BaseModel):
 
 SYSTEM = """You turn a researcher's request into settings for MDAgent, a molecular dynamics tool.
 MDAgent builds a solvated system from a protein PDB file and runs MD until the quantity the user asks for is
-precise enough: side-chain conformations (chi1), distances between atoms, or backbone conformations (phi/psi
-basins, transitions between them, the phi/psi free-energy landscape, beta-turn types). For side chains that
+precise enough: side-chain conformations (chi1), distances between atoms, backbone conformations (phi/psi
+basins, transitions between them, the phi/psi free-energy landscape, beta-turn types), or structure stability
+(backbone RMSD from the start and radius of gyration followed every round, stopping once they are steady and
+precise, with the time spent native-like, an RMSD-Rg free-energy surface and conformational clusters). For side chains that
 plain MD cannot sample it runs enhanced sampling.
 
 By default MDAgent plans how many replicas, how long and when to stop, for the least compute, within at most 10
@@ -211,7 +224,8 @@ def make_plan(request: str, summary: str, client=None, backend: str = "api") -> 
 FLAGS = [  # RunPlan field -> command line option
     ("cutoff_angstrom", "--cutoff-angstrom"), ("forcefield", "--forcefield"), ("ph", "--ph"),
     ("protonation", "--protonation"), ("ion_conc", "--ion-conc"), ("cation", "--cation"),
-    ("temperature_k", "--temperature"),
+    ("temperature_k", "--temperature"), ("stability_tolerance_nm", "--stability-tolerance"),
+    ("rmsd_cutoff_nm", "--rmsd-cutoff"), ("cluster_cutoff_nm", "--cluster-cutoff"),
     ("hold_ps", "--hold-ps"), ("seen_in", "--seen-in"),
     ("box_shape", "--box-shape"), ("padding_nm", "--padding-nm"), ("replicas", "--replicas"),
     ("first_ns", "--first-ns"), ("extend_ns", "--extend-ns"), ("max_ns", "--max-ns"),
@@ -224,7 +238,7 @@ FLAGS = [  # RunPlan field -> command line option
     ("chains", "--chains"), ("uniprot", "--uniprot"), ("termini", "--termini"),
 ]
 SWITCHES = [("check_protonation", "--check-protonation"), ("no_enhanced_sampling", "--no-enhanced-sampling"),
-            ("keep_tags", "--keep-tags"), ("accept_problems", "--accept-problems")]
+            ("keep_tags", "--keep-tags"), ("accept_problems", "--accept-problems"), ("cluster", "--cluster")]
 
 
 def to_argv(plan: RunPlan, pdb: str | None, out: str, prmtop: str | None = None,
@@ -263,6 +277,8 @@ def to_argv(plan: RunPlan, pdb: str | None, out: str, prmtop: str | None = None,
                                                   else ["--around-ligand", plan.ligand])
         else:
             raise ValueError("The plan studies backbone basins but names none.")
+    elif plan.target_kind == "stability":
+        argv += ["--quantity", "stability"] + (["--residues", plan.residues] if plan.residues else [])
     elif plan.target_kind == "ligand":
         if not plan.ligand:
             raise ValueError("The plan targets a ligand but names none.")

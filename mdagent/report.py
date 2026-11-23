@@ -150,6 +150,91 @@ def _backbone_section(run_dir: Path, state: dict, T) -> list:
     return L
 
 
+def _selection_zh(text: str) -> str:
+    """Chinese wording of stability.atom_selection's description."""
+    import re
+
+    m = re.match(r"(C-alpha|heavy) atoms of (.*) \((\d+) atoms(?:; fewer than (\d+) residues)?\)$", text)
+    if not m:
+        return text
+    kind, region, n, few = m.groups()
+    region = "整个蛋白" if region == "the whole protein" else region
+    return (f"{region}的{'Cα 原子' if kind == 'C-alpha' else '重原子'}（{n} 个原子"
+            + (f"；残基少于 {few} 个，所以用重原子" if few else "") + "）")
+
+
+def _stability_section(run_dir: Path, state: dict, T) -> list:
+    """Structure stability: means, steady state, native-like time, the departure bound, figures."""
+    if (state.get("goal") or {}).get("quantity") != "structure_stability":
+        return []
+    s = _load(run_dir / "stability" / "summary.json")
+    if not s:
+        return []
+    items, nat, st = s.get("items", {}), s.get("native", {}), s.get("settings", {})
+    L = [T("## 结构稳定性", "## Structure stability"), "",
+         T(f"原子：{_selection_zh(s.get('selection', ''))}。参照：起始结构（`protein.pdb`），每帧先叠合再算 RMSD。每条轨迹开头 "
+           f"{s.get('burn_in_ns', 0):g} ns 被判为还没有平衡，没有算进结果（自动平衡检测）。",
+           f"Atoms: {s.get('selection', '')}. Reference: the starting structure (`protein.pdb`); every frame is "
+           f"superposed before the RMSD. The first {s.get('burn_in_ns', 0):g} ns of each replica were judged not yet "
+           "equilibrated and left out (automated equilibration detection)."), "",
+         T("| 量 | 平均值 ± 区间半宽 | 各条轨迹的平均值 | 后半段 − 前半段 | 稳态 | 判断 |",
+           "| Quantity | Mean ± interval half-width | Mean per replica | Second half − first half | Steady | Verdict |"),
+         "|---|---|---|---|---|---|"]
+    for name, x in items.items():
+        dr = x.get("drift") or {}
+        per = ", ".join(f"{v:.3f}" for v in x.get("per_replica", []) if v is not None)
+        d = dr.get("drift_nm")
+        L.append(f"| {name} | {x.get('mean', float('nan')):.3f} ± {(x.get('halfwidth_nm') or float('nan')):.3f} nm | {per} | "
+                 + (f"{d:+.3f} ± {(dr.get('halfwidth_nm') or float('nan')):.3f} nm" if d is not None else "-")
+                 + f" | {T('是', 'yes') if dr.get('steady') else T('否', 'no')} | {x.get('verdict', '')} |")
+    cut = st.get("rmsd_cutoff_nm", 0.3)
+    if nat:
+        frac = nat.get("fraction")
+        L += ["", T(f"**是否保持起始结构：** RMSD 低于 {cut:g} nm 的时间占 {frac:.0%}（各条轨迹："
+                    f"{', '.join(f'{f:.0%}' for f in nat.get('fraction_per_replica', []) if f is not None)}）；"
+                    f"离开的次数：{nat.get('departures_per_replica')}。",
+                    f"**Does it keep its starting structure?** RMSD below {cut:g} nm for {frac:.0%} of the time "
+                    f"(per replica: {', '.join(f'{f:.0%}' for f in nat.get('fraction_per_replica', []) if f is not None)}); "
+                    f"departures: {nat.get('departures_per_replica')}.")]
+        if nat.get("departure_rate_upper_per_us") is not None:
+            L.append(T(f"所有轨迹合计 {nat.get('watched_ns', 0):.3g} ns 里没有一次离开。这不能证明它永远不离开："
+                       f"按 95% 置信上限，离开的速率不超过每 µs {nat['departure_rate_upper_per_us']:.3g} 次。想把这个上限压低，"
+                       "就要跑得更久。",
+                       f"No departure in {nat.get('watched_ns', 0):.3g} ns of all replicas together. That does not "
+                       f"prove it never leaves: at 95 % confidence the departure rate is at most "
+                       f"{nat['departure_rate_upper_per_us']:.3g} per µs. A lower bound needs a longer run."))
+    L += ["", T("RMSD 和 Rg 随时间的变化（阴影部分没有算进结果）：", "RMSD and Rg against time (the shaded start was left out):"),
+          "", "![RMSD and Rg](stability/rmsd_rg.svg)", ""]
+    if (run_dir / "stability" / "fes_rmsd_rg.svg").exists():
+        L += [T("RMSD–Rg 自由能面（颜色越深自由能越低；每格的数值和误差在 `stability/fes_rmsd_rg.csv`）：",
+                "RMSD-Rg free-energy surface (darker is lower; values and errors per bin in `stability/fes_rmsd_rg.csv`):"),
+              "", "![F(RMSD, Rg)](stability/fes_rmsd_rg.svg)", ""]
+    return L
+
+
+def _cluster_section(run_dir: Path, T) -> list:
+    c = _load(run_dir / "clusters" / "clusters.json")
+    if not c:
+        return []
+    L = [T("## 构象聚类", "## Conformational clusters"), "",
+         T(f"方法：GROMOS（Daura 1999），叠合后的 RMSD 阈值 {c['cutoff_nm']:g} nm，用了平衡后的 {c['frames_used']} 帧"
+           f"（所有轨迹合在一起，每 {c['stride']} 帧取 1 帧）。误差来自各条轨迹之间的差别。代表结构可以用 PyMOL 或 VMD 打开。",
+           f"Method: GROMOS (Daura 1999), RMSD cutoff {c['cutoff_nm']:g} nm after superposition, {c['frames_used']} "
+           f"equilibrated frames (all replicas, every {c['stride']}th frame). Errors come from the spread between "
+           "replicas. Open the representative structures in PyMOL or VMD."), "",
+         T("| 簇 | 占比 ± 误差 | 出现在哪些轨迹 | 代表结构 |", "| Cluster | Population ± error | Replicas | Representative |"),
+         "|---|---|---|---|"]
+    for k in c.get("clusters", []):
+        err = k.get("error")
+        L.append(f"| {k['cluster']} | {k['population']:.0%}" + (f" ± {err:.0%}" if err is not None else "")
+                 + f" | {', '.join(map(str, k['replicas_visiting']))} | `{k.get('pdb', '')}` |")
+    if c.get("rest_population"):
+        L.append(T(f"\n其余 {c['n_clusters'] - len(c['clusters'])} 个小簇合计占 {c['rest_population']:.0%}。",
+                   f"\nThe other {c['n_clusters'] - len(c['clusters'])} small clusters hold {c['rest_population']:.0%} together."))
+    L.append("")
+    return L
+
+
 def _decision_section(state: dict, T) -> list:
     """Projection allocation: why it started as it did, what it saw, how it allocated, why it stopped, the cost."""
     goal, notes = state.get("goal") or {}, state.get("notes") or {}
@@ -189,6 +274,8 @@ def _decision_section(state: dict, T) -> list:
 
 
 def _fmt(pops: dict, errs: dict) -> str:
+    if list(pops) == ["mean"]:      # a continuous mean in nm (structure stability)
+        return f"{pops['mean']:.3f} ± {errs['mean']:.3f} nm"
     return ", ".join(f"{k} {pops[k]:.2f} ± {errs[k]:.2f}" for k in pops)
 
 
@@ -212,6 +299,18 @@ def write(run_dir: Path) -> list[Path]:
             write_landscapes(run_dir)
         except Exception as e:   # noqa: BLE001 - a missing figure must never stop the report itself.
             print(f"Note: the landscapes could not be drawn ({type(e).__name__}: {e}).")
+    if state.get("rounds_ns") and (goal.get("quantity") == "structure_stability" or goal.get("cluster")):
+        try:
+            from .clustering import run as run_clustering
+
+            s = _load(run_dir / "stability" / "summary.json")
+            whole = "the whole protein" in s.get("selection", "")
+            run_clustering(run_dir, [] if whole else [tuple(k) for k in state.get("target", [])],
+                           len(state.get("rounds_ns", [])),
+                           cutoff_nm=goal.get("cluster_cutoff_nm", 0.15), start_ns=s.get("burn_in_ns", 0.0),
+                           dt_ns=(state.get("md") or {}).get("save_interval_ps", 5.0) / 1000.0)
+        except Exception as e:   # noqa: BLE001 - clustering must never stop the report itself.
+            print(f"Note: the conformations could not be clustered ({type(e).__name__}: {e}).")
     files = describe(run_dir)
     paths = []
     for lang in ("zh", "en"):
@@ -236,6 +335,12 @@ def write(run_dir: Path) -> list[Path]:
                   f"backbone basins ({', '.join(_backbone_items(state))}): basin populations, transition statistics "
                   "between basins (rates and dwell times), free-energy difference and the free-energy landscape")
                 if quantity == "backbone_basins" else
+                T("结构稳定性：相对起始结构的骨架 RMSD 和回转半径（Rg）是否达到稳态、平均值和误差、保持天然结构的时间比例、"
+                  "RMSD–Rg 自由能面和构象聚类",
+                  "structure stability: whether the backbone RMSD from the start and the radius of gyration (Rg) reach a "
+                  "steady state, their means and errors, the time spent native-like, the RMSD-Rg free-energy surface "
+                  "and conformational clusters")
+                if quantity == "structure_stability" else
                 T("目标区域侧链的 chi1 构象（g+、t、g-）的比例", "populations of the chi1 states (g+, t, g-) of the target side chains"))
         L.append(T(f"- 目标量：{what}。", f"- Quantity: {what}."))
         if goal.get("description"):
@@ -246,6 +351,13 @@ def write(run_dir: Path) -> list[Path]:
                        f"- What counts as seen: the item enters the target state from another state and stays at "
                        f"least {goal.get('hold_ps', 100):g} ps; it stops once seen in {goal.get('seen_in', 1)} "
                        "replica(s)."))
+        elif quantity == "structure_stability":
+            tol = goal.get("stability_tolerance_nm", 0.02)
+            L.append(T(f"- 要求的精度：RMSD 和 Rg 平均值的区间半宽不超过 {tol:g} nm；稳态：后半段和前半段平均值之差加上它的区间半宽，"
+                       f"不超过 {3 * tol:g} nm。RMSD 超过 {goal.get('rmsd_cutoff_nm', 0.3):g} nm 算离开起始结构。",
+                       f"- Requested precision: interval half-width of the mean RMSD and Rg at most {tol:g} nm; steady "
+                       f"state: the second-half mean minus the first-half mean, plus its half-width, at most {3 * tol:g} "
+                       f"nm. An RMSD above {goal.get('rmsd_cutoff_nm', 0.3):g} nm counts as departed from the start."))
         else:
             L.append(T(f"- 要求的精度：{_precision(state).describe(zh=True)}。",
                        f"- Requested precision: {_precision(state).describe()}."))
@@ -322,6 +434,19 @@ def write(run_dir: Path) -> list[Path]:
             L += ["", T("下表是各状态所占的时间，只作参考：这类目标不要求比例的精度。",
                         "The table gives the time spent in each state, for information only: this goal asks for no "
                         "precision of populations.")]
+        elif quantity == "structure_stability":
+            steady = [r for r in results if r["met"]]
+            if len(steady) == len(results):
+                L.append(T("RMSD 和 Rg 都达到了稳态，平均值达到了要求的精度。下面的平均值可以作为这个力场和条件下的结果，"
+                           "引用时请附上误差。",
+                           "RMSD and Rg both reached a steady state and their means reached the requested precision. The "
+                           "means below can be quoted for this force field and these conditions, with their errors."))
+            else:
+                L.append(T(f"{', '.join(r['label'] for r in results if not r['met'])} 还没有确认达到稳态和要求的精度"
+                           "（判断写在表里）。下面的平均值只能作为粗略的参考，不能作为结论。",
+                           f"{', '.join(r['label'] for r in results if not r['met'])}: a steady state at the requested "
+                           "precision is not confirmed (see the verdict in the table). The means below are only a rough "
+                           "guide, not a conclusion."))
         elif not open_:
             L.append(T(f"全部 {len(results)} 个项目都达到了要求的精度。下面的比例可以作为这个力场和条件下的平衡比例，"
                        "引用时请附上误差。",
@@ -333,7 +458,9 @@ def write(run_dir: Path) -> list[Path]:
                        f"{len(met)} items reached the requested precision and {len(open_)} did not: "
                        f"{', '.join(r['label'] for r in open_)}. For those, the populations are only a rough guide, "
                        "not a conclusion."))
-        L += ["", T("| 项目 | 比例 ± 标准误差 | 来自 | 达到要求 | 判断 |", "| Item | Population ± standard error | From | Goal met | Verdict |"),
+        head = (T("平均值 ± 标准误差", "Mean ± standard error") if quantity == "structure_stability"
+                else T("比例 ± 标准误差", "Population ± standard error"))
+        L += ["", T(f"| 项目 | {head} | 来自 | 达到要求 | 判断 |", f"| Item | {head} | From | Goal met | Verdict |"),
               "|---|---|---|---|---|"]
         for r in results:
             src = (T("增强采样（重新加权）", "enhanced sampling (reweighted)") if r["source"] == "enhanced_sampling"
@@ -342,6 +469,8 @@ def write(run_dir: Path) -> list[Path]:
                      f"{T('是', 'yes') if r['met'] else T('否', 'no')} | {r['verdict']} |")
         L.append("")
         L += _backbone_section(run_dir, state, T)
+        L += _stability_section(run_dir, state, T)
+        L += _cluster_section(run_dir, T)
         L += _decision_section(state, T)
 
         bb_files = sorted((run_dir / "backbone").glob("*.json")) if quantity == "backbone_basins" else []

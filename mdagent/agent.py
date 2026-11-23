@@ -218,6 +218,12 @@ class Goal:
     seen_in: int = 1                # event_seen: in how many replicas the change must be seen.
     rate_rel_error: float = 0.25    # backbone_basins: largest relative error of the leading transition rates.
     fes_error_kcal: float = 0.5     # backbone_basins: largest error of the phi/psi free energy where it is low.
+    # structure_stability (stability.py): interval half-width asked for the mean RMSD and Rg, the RMSD above which
+    # the structure counts as departed, and the clustering cutoff. cluster: cluster any run in its report.
+    stability_tolerance_nm: float = 0.02
+    rmsd_cutoff_nm: float = 0.3
+    cluster_cutoff_nm: float = 0.15
+    cluster: bool = False
 
     @classmethod
     def for_mode(cls, mode: str, **kw) -> "Goal":
@@ -315,7 +321,9 @@ def _record(run_dir: Path, state: RunState, reports, decisions, next_ns: float) 
         # What the agent looked at: each item's verdict, largest interval half-width and state changes.
         z = state.precision().z
         for r in reports:
-            if r.standard_error:
+            if r.quantity == "stability":
+                lines.append(f"  {r.reason}")
+            elif r.standard_error:
                 lines.append(f"  {r.label}: {r.verdict}; largest half-width {z * max(r.standard_error.values()):.3f} "
                              f"(asked {state.the_goal().precision:g}); state changes per replica {r.transitions}.")
     else:
@@ -445,6 +453,8 @@ def diagnose_run(run_dir: Path, state: RunState) -> list[ResidueReport]:
         return _diagnose_events(run_dir, state)
     if state.quantity == "backbone_basins":
         return _diagnose_backbone(run_dir, state)
+    if state.quantity == "structure_stability":
+        return _diagnose_stability(run_dir, state)
     fixed = fixed_chi1_residues(run_dir / "protein.pdb")
     if state.sampling == "adaptive":
         # Segments start from different frames on purpose, so judge the pooled flips.
@@ -518,6 +528,37 @@ def _diagnose_distances(run_dir: Path, state: RunState) -> list[ResidueReport]:
     trajs = load_run(run_dir, state.target, len(state.rounds_ns), atoms=atoms)
     return diagnose_distances(trajs, specs, [(where[i], where[j]) for i, j in pairs], state.ns_done,
                               state.loop.min_flips_per_replica, state.precision(), state.loop.burn_in)
+
+
+def stability_settings(state: RunState):
+    from .stability import StabilitySettings
+
+    g = state.the_goal()
+    return StabilitySettings(tolerance_nm=g.stability_tolerance_nm, rmsd_cutoff_nm=g.rmsd_cutoff_nm,
+                             cluster_cutoff_nm=g.cluster_cutoff_nm)
+
+
+def _diagnose_stability(run_dir: Path, state: RunState) -> list[ResidueReport]:
+    """Structure stability: RMSD from the start and Rg of the region (stability.py); figures in stability/."""
+    import mdtraj as md
+
+    from .stability import analyze, atom_selection, format_report, save, series
+
+    s = stability_settings(state)
+    top = md.load_topology(str(run_dir / "protein.pdb"))
+    atoms, selection = atom_selection(top, state.target, s.min_ca)
+    trajs = load_run(run_dir, state.target, len(state.rounds_ns), atoms=atoms)
+    reference = md.load(str(run_dir / "protein.pdb")).atom_slice(atoms)
+    pairs = series(trajs, reference)
+    rmsd, rg = [p[0] for p in pairs], [p[1] for p in pairs]
+    dt = state.md.save_interval_ps / 1000.0
+    reports, details = analyze(rmsd, rg, s, state.precision(), dt, state.ns_done,
+                               min_samples=state.loop.min_flips_per_replica,
+                               burn_in=state.loop.burn_in if state.loop.burn_in != "none" else "none",
+                               temperature_k=state.md.temperature_k, selection=selection)
+    save(run_dir / "stability", rmsd, rg, details, dt)
+    print(format_report(reports, details))
+    return reports
 
 
 def _diagnose_backbone(run_dir: Path, state: RunState) -> list[ResidueReport]:

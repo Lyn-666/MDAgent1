@@ -97,6 +97,13 @@ system (from a protein PDB file, or uses a prepared Amber system that keeps its 
 rounds, finds side chains in a target region that did not sample their chi1 states, and runs enhanced
 sampling on them. Runs go on in the background until they finish or the user stops them.
 
+Structure stability (target_kind "stability"): when the user asks whether a protein or region stays stable,
+folded or compact, or wants RMSD / radius of gyration followed, RMSD-Rg free energies or conformational clusters,
+MDAgent follows the backbone RMSD from the start and Rg every round, stops when both are steady and precise
+(default 0.02 nm), reports the time spent native-like (RMSD below 0.3 nm) and an upper bound of the unfolding rate
+if nothing unfolds, an RMSD-Rg free-energy surface and GROMOS clusters (0.15 nm) with representative structures.
+Conformational clusters can also be added to any other run (cluster true).
+
 Defaults: 300 K, 0.15 M NaCl, CHARMM36m with TIP3P water, pH 7, a cubic box with 1.0 nm of water around the
 protein. The user may change each of them (temperature_k, ion_conc, cation, forcefield, ph, box_shape,
 padding_nm). When the request asks for a default value, say in `reply` that it is met; never say a default

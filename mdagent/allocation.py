@@ -298,7 +298,7 @@ def _next_step(items: list, n: int, ns: float, look: int, tests_before: int, z: 
                             f"({limits.budget_ns:g} ns), so more plain MD will not reach the precision" + left_out,
                             planning, "hopeless", aside)
         new_n, new_ns = plan[0], min(max_ns, plan[1] * margin)
-        why = (f"projected: {new_n} replicas of {plan[1]:.1f} ns reach the precision for the least compute "
+        why = (f"projected: {new_n} replicas of {plan[1]:.3g} ns reach the precision for the least compute "
                f"(plus a {margin - 1:.0%} margin)")
     if new_n * new_ns > limits.budget_ns:            # stay inside the budget
         new_ns = max(ns, limits.budget_ns / new_n)

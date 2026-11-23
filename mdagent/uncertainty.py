@@ -358,6 +358,24 @@ def joint_equilibration_start(states: list, n_states: int | None = None, candida
     return best_t0
 
 
+def joint_equilibration_start_values(series: list, candidates: int = 25, max_fraction: float = 0.5,
+                                    min_gain: float = 1.5) -> int:
+    """One first frame for all replicas of a continuous observable (for example an RMSD), by automated
+    equilibration detection (Chodera, JCTC 2016) on the pooled number of independent samples
+    N_eff(t0) = sum over replicas of (n - t0) / g(x[t0:]). The best t0 is kept only if it raises N_eff at least
+    `min_gain` times over keeping everything; at most `max_fraction` of the series is cut."""
+    arrs = [np.asarray(s, dtype=float) for s in series if len(s)]
+    if not arrs:
+        return 0
+    n = min(len(s) for s in arrs)
+    if n < 20:
+        return 0
+    starts = np.unique(np.linspace(0, max_fraction * n, candidates).astype(int))
+    neff = [sum((n - t0) / statistical_inefficiency(x[t0:n]) for x in arrs) for t0 in starts]
+    i = int(np.argmax(neff))
+    return int(starts[i]) if neff[i] >= min_gain * neff[0] else 0
+
+
 def trim_starts(states: list, n_states: int | None = None) -> list[int]:
     """First frame to keep in every replica: one common start (joint_equilibration_start), but never before a
     replica's first frame inside a core (state -1 before it)."""

@@ -32,6 +32,13 @@ OUTPUTS = [
     ("backbone/*_fes.png", "a picture of the landscape (only if matplotlib is installed)"),
     ("backbone/*.json", "transition counts, rates and dwell times between basins, and the lowest F in each basin"),
     ("enhanced/populations.json", "reweighted state populations and free energies of the biased residues"),
+    ("stability/rmsd_rg.svg", "RMSD from the start and radius of gyration against time (figure)"),
+    ("stability/rmsd_rg.csv", "RMSD and radius of gyration against time, per replica (nm)"),
+    ("stability/fes_rmsd_rg.svg", "free-energy surface F(RMSD, Rg) (figure)"),
+    ("stability/fes_rmsd_rg.csv", "free-energy surface F(RMSD, Rg) with errors per bin (kcal/mol)"),
+    ("stability/summary.json", "structure stability: means, errors, steady state, time native-like"),
+    ("clusters/cluster_*.pdb", "representative structure of each conformational cluster"),
+    ("clusters/clusters.json", "conformational clusters: populations with errors, replicas, centres"),
 ]
 
 

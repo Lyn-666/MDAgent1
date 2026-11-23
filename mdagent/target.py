@@ -25,9 +25,17 @@ class Target:
     def describe(self) -> str:
         if self.ligand:
             return f"protein residues within {self.cutoff_nm * 10:.1f} Å of ligand {self.ligand}"
-        return "residues " + ", ".join(
-            f"{c}:{n}" if c else str(n) for c, n in self.residues
-        )
+        # Consecutive numbers on one chain are written as a range (A:42-76), so a whole protein stays readable.
+        parts, run = [], []
+        for c, n in list(self.residues) + [(object(), None)]:
+            if run and (c != run[-1][0] or n != run[-1][1] + 1):
+                a, b = run[0], run[-1]
+                name = f"{a[0]}:" if a[0] else ""
+                parts.append(f"{name}{a[1]}" if a[1] == b[1] else f"{name}{a[1]}-{b[1]}")
+                run = []
+            if n is not None:
+                run.append((c, n))
+        return "residues " + ", ".join(parts)
 
 
 _SPEC_ITEM = re.compile(r"^(?:(?P<chain>[A-Za-z0-9]):)?(?P<start>-?\d+)(?:-(?P<end>-?\d+))?$")

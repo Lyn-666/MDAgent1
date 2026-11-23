@@ -50,7 +50,18 @@ from .target import Target, parse_residue_spec, resolve_target  # noqa: E402
 from .uncertainty import CRITERIA  # noqa: E402
 
 
+def _whole_protein(args) -> Target:
+    """Every protein residue of the input (structure stability of the whole protein)."""
+    import mdtraj as md
+
+    top = md.load_topology(args.pdb) if args.pdb else md.load_topology(args.prmtop)
+    res = [(r.chain.chain_id if args.pdb else None, r.resSeq) for r in top.residues if r.is_protein]
+    return Target(residues=tuple(res))
+
+
 def _target_from_args(args) -> Target:
+    if getattr(args, "quantity", "") == "stability" and not args.residues and not args.around_ligand:
+        return _whole_protein(args)
     if args.around_ligand:
         return Target(ligand=args.around_ligand, cutoff_nm=args.cutoff_angstrom / 10.0)
     if not args.residues and getattr(args, "backbone", None):
@@ -127,9 +138,9 @@ def _print_summary(decisions, enhanced_labels, run_dir) -> None:
     flagged = [d.residue for d in decisions if d.action in ("enhanced_sampling", "stalled")]
     print("\nSummary")
     if not flagged:
-        print("Plain MD sampled all target side chains well. No enhanced sampling was needed.")
+        print("Plain MD answered all target items. No enhanced sampling was needed.")
     else:
-        print("Plain MD could not sample: " + ", ".join(flagged) + ".")
+        print("Plain MD did not answer within the limits: " + ", ".join(flagged) + " (the report says why).")
         if enhanced_labels:
             print(f"Enhanced sampling finished for: {', '.join(enhanced_labels)}.")
             print(f"The order of residues in the .npy files: {', '.join(enhanced_labels)}.")
@@ -224,7 +235,11 @@ def _goal_from_args(args):
                          max_replicas=getattr(args, "max_replicas", 10), extend_factor=getattr(args, "extend_factor", 2.0),
                          hold_ps=getattr(args, "hold_ps", 100.0), seen_in=getattr(args, "seen_in", 1),
                          rate_rel_error=getattr(args, "rate_rel_error", 0.25),
-                         fes_error_kcal=getattr(args, "fes_error_kcal", 0.5))
+                         fes_error_kcal=getattr(args, "fes_error_kcal", 0.5),
+                         stability_tolerance_nm=getattr(args, "stability_tolerance", 0.02),
+                         rmsd_cutoff_nm=getattr(args, "rmsd_cutoff", 0.3),
+                         cluster_cutoff_nm=getattr(args, "cluster_cutoff", 0.15),
+                         cluster=bool(getattr(args, "cluster", False)))
     if args.allow is None and goal.allocation == "projection" and args.mode == "auto":
         # The agent plans within the limits: adding replicas up to --max-replicas is part of the plan, not a step
         # past a limit. Running past the limits (extend) and another method (switch_method) still need a yes.
@@ -382,6 +397,15 @@ def cmd_run(args) -> int:
             return 2
         if args.pdb and args.backbone:
             _check_backbone(args, args.pdb)  # Fail before building if an atom is not there.
+    if args.quantity == "stability":
+        if args.sampling == "adaptive":
+            print("error: adaptive sampling does not support --quantity stability: segments restart from chosen "
+                  "frames, so RMSD and Rg means would be biased.", file=sys.stderr)
+            return 2
+        if args.stability_tolerance <= 0 or args.rmsd_cutoff <= 0 or args.cluster_cutoff <= 0:
+            print("error: --stability-tolerance, --rmsd-cutoff and --cluster-cutoff must be above 0 (nm).",
+                  file=sys.stderr)
+            return 2
     if args.quantity == "chi1" and not (args.residues or args.around_ligand):
         print("error: give the target with --residues or --around-ligand.", file=sys.stderr)
         return 2
@@ -522,8 +546,14 @@ def cmd_run(args) -> int:
                      f"the free-energy landscape; rate error at most {goal.rate_rel_error:g}, landscape error at most "
                      f"{goal.fes_error_kcal:g} kcal/mol)" if state.backbone
                 else "chi1 populations of the target side chains")
-        print(f"Goal: {what}, {state.precision().describe()}"
-              + (f" ({goal.description})" if goal.description else "") + ".")
+        if state.quantity == "structure_stability":
+            print(f"Goal: structure stability of {state.target_description or 'the protein'}: backbone RMSD from the "
+                  f"start and radius of gyration, steady and precise to {goal.stability_tolerance_nm:g} nm "
+                  f"(interval half-width); departed above RMSD {goal.rmsd_cutoff_nm:g} nm; clusters at "
+                  f"{goal.cluster_cutoff_nm:g} nm" + (f" ({goal.description})" if goal.description else "") + ".")
+        else:
+            print(f"Goal: {what}, {state.precision().describe()}"
+                  + (f" ({goal.description})" if goal.description else "") + ".")
     print("The agent may by itself: " + (", ".join(goal.permissions) or "nothing (it only suggests)") + ".")
     if goal.allocation == "projection":
         print(f"Plan: the agent decides how many replicas, how long and when to stop, for the least compute. It "
@@ -684,12 +714,24 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--stop-looks", type=int, default=3,
                    help="With --allocation projection: the agent may stop at no more than this many looks, and its "
                         "intervals are calibrated for that many (default 3).")
-    r.add_argument("--quantity", default="chi1", choices=["chi1", "distance", "backbone", "event"],
+    r.add_argument("--stability-tolerance", type=float, default=0.02,
+                   help="--quantity stability: interval half-width asked for the mean RMSD and Rg (nm, default 0.02).")
+    r.add_argument("--rmsd-cutoff", type=float, default=0.3,
+                   help="--quantity stability: above this RMSD from the start the structure counts as departed "
+                        "(nm, default 0.3).")
+    r.add_argument("--cluster-cutoff", type=float, default=0.15,
+                   help="RMSD cutoff of the conformational clustering in the report (nm, default 0.15).")
+    r.add_argument("--cluster", action="store_true",
+                   help="Also cluster the conformations of this run in its report (always done for "
+                        "--quantity stability).")
+    r.add_argument("--quantity", default="chi1", choices=["chi1", "distance", "backbone", "event", "stability"],
                    help="What you want to know. chi1 (default): the rotamer states of the target side chains. "
                         "distance: how often atom distances are near or far (give them with --distances). "
                         "backbone: backbone basins, with transition statistics and the free-energy landscape (give "
                         "them with --backbone, or the residues with --residues). event: stop once a change is seen "
-                        "(give it with --observe).")
+                        "(give it with --observe). stability: whether the structure stays as it is: backbone RMSD from "
+                        "the start and the radius of gyration, steady state and errors, a free-energy surface and "
+                        "conformational clusters (the whole protein, or a region with --residues).")
     r.add_argument("--rama-basins", default="boxes", choices=["boxes", "centres"],
                    help="--quantity backbone: how Ramachandran basins are defined. boxes (default): regions that "
                         "cover the whole map (alpha_R, beta with PPII, alpha_L, other). centres: three centres "

@@ -301,9 +301,12 @@ def allocation_next(run_dir, state, reports, decisions) -> float:
     if not live:
         return 0.0
     precision = state.precision()
-    items = [ItemState(d.residue, by[d.residue].standard_error or {}, by[d.residue].error_within or 0.0,
-                       by[d.residue].error_between or 0.0, by[d.residue].transitions, by[d.residue].verdict == "ok",
-                       by[d.residue].burn_in_ns or 0.0)
+    # Structure stability is judged in nm against its own tolerance; the allocation works in the goal's precision
+    # unit, and its arithmetic is scale-free, so the errors are rescaled to it.
+    k = (goal.precision / goal.stability_tolerance_nm) if state.quantity == "structure_stability" else 1.0
+    items = [ItemState(d.residue, {s: e * k for s, e in (by[d.residue].standard_error or {}).items()},
+                       (by[d.residue].error_within or 0.0) * k, (by[d.residue].error_between or 0.0) * k,
+                       by[d.residue].transitions, by[d.residue].verdict == "ok", by[d.residue].burn_in_ns or 0.0)
              for d in live]
     alloc = state.notes.setdefault("allocation", {"looks": 0, "tests": 0})
     if alloc.get("counting") != 2:
