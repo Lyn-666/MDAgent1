@@ -10,14 +10,28 @@
 
 **需要多少时间：** 安装约 30 分钟，流程测试约 10 分钟。正式测试一个体系，通常要 GPU 跑几小时到一两天，期间不需要你看着。
 
-**需要什么：** 一台 Linux 电脑，有 NVIDIA GPU，装好 conda；装好并登录 Claude Code 或 Codex（用你自己的账号）；一个 GitHub 账号（用来接受仓库邀请和反馈问题）。
+**需要什么：** 一台 Linux 电脑，有 NVIDIA GPU，装好 conda；装好并登录 Claude Code 或 Codex（用你自己的账号）；一个 GitHub 账号（把用户名告诉邀请你的人，用来接受仓库邀请和反馈问题）。
 
-## 第 1 步：安装
+## 第 1 步：接受邀请并安装
 
-接受仓库邀请后，在终端里运行：
+**1. 接受邀请。** 你会收到一封 GitHub 邀请邮件，点里面的链接接受。也可以登录 GitHub 后打开 https://github.com/Lyn-666/MDAgent1/invitations 接受。仓库是私有的，不接受邀请就看不到。
+
+**2. 让这台电脑能下载私有仓库。** GitHub 不接受用密码下载代码。最简单的办法是装 GitHub 官方的命令行工具 `gh`，用浏览器登录一次：
 
 ```bash
-git clone https://github.com/Lyn-666/MDAgent1.git && cd MDAgent1
+conda install -n base -c conda-forge gh -y
+```
+
+```bash
+gh auth login
+```
+
+它会问几个问题，依次选：GitHub.com → HTTPS → Yes（用 GitHub 账号登录 git）→ Login with a web browser。屏幕上会显示一个 8 位的代码和一个网址。在任何一台电脑或手机的浏览器里打开这个网址，登录你的 GitHub 账号，输入这个代码，就完成了。服务器没有浏览器也没关系。
+
+**3. 下载代码并安装：**
+
+```bash
+gh repo clone Lyn-666/MDAgent1 && cd MDAgent1
 ```
 
 ```bash
@@ -85,6 +99,8 @@ conda activate mdagent && mdagent start
 - 程序出错，或者行为和说明不一致：选“问题报告”。
 - 没出错，但有感受和建议：选“测试反馈”，按第 5 步的问题回答即可。
 
+**请不要往仓库推送代码。** 你被加为协作者后技术上可以推送，但测试期间请只通过 Issue 反馈。
+
 请附上：
 
 - 你在对话里说的那句话；
@@ -100,6 +116,8 @@ conda activate mdagent && mdagent start
 ```bash
 cd MDAgent1 && git pull && conda activate mdagent && python -m pip install -e .
 ```
+
+如果 `git pull` 报 `Permission denied` 或要求输入密码，先运行一次 `gh auth setup-git`，再试。
 
 如果对话服务还开着，按 Ctrl+C 停掉再重新运行 `mdagent start`。这只停对话，不会停正在跑的模拟。
 
