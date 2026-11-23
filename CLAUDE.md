@@ -111,7 +111,7 @@
 - `estimators.py`：具体的估计器（无偏比例、重新加权比例、马尔可夫模型比例、首次进入事件），数值来自 `uncertainty.py`、`msm.py`、`observables.py`。`synthetic.py`：已知答案的合成马尔可夫链工具，给开发和测试用。
 - `.claude/commands/`：Claude Code 项目命令 `/md` 和 `/md-status`。
 
-测试：`pytest -q tests`（约 4 分钟，含在 CPU 上跑小肽段的测试）；`pytest -q tests -m "not slow"` 只跑快速测试（298 个，约 4 分钟；全部 309 个约 15 分钟）。审稿后的修改和独立审查修复的测试在 `tests/test_review_revisions.py`。骨架增强采样的测试在 `tests/test_backbone_enhanced.py`。骨架 φ/ψ 的测试在 `tests/test_backbone.py`（速率和停留时间用 30 个随机种子检查误差是否校准）。通用核心的测试在 `tests/test_core_*.py` 和 `tests/test_estimators.py`（约 7 秒，全在合成体系上）；适配器和影子模式在 `tests/test_shadow.py`（用设定好 chi1 的假运行，不跑 MD）。测试离线运行，UniProt 序列在 `tests/data/uniprot/`。测试体系 `examples/181L.pdb`（T4 溶菌酶 L99A 与苯，口袋里的 Val111 侧链在常规 MD 中很难翻转）。
+测试：`pytest -q tests`（约 4 分钟，含在 CPU 上跑小肽段的测试）；`pytest -q tests -m "not slow"` 只跑快速测试（318 个，约 3 分钟；全部约 15 分钟）。结构稳定性和聚类的测试在 `tests/test_stability.py`。审稿后的修改和独立审查修复的测试在 `tests/test_review_revisions.py`。骨架增强采样的测试在 `tests/test_backbone_enhanced.py`。骨架 φ/ψ 的测试在 `tests/test_backbone.py`（速率和停留时间用 30 个随机种子检查误差是否校准）。通用核心的测试在 `tests/test_core_*.py` 和 `tests/test_estimators.py`（约 7 秒，全在合成体系上）；适配器和影子模式在 `tests/test_shadow.py`（用设定好 chi1 的假运行，不跑 MD）。测试离线运行，UniProt 序列在 `tests/data/uniprot/`。测试体系 `examples/181L.pdb`（T4 溶菌酶 L99A 与苯，口袋里的 Val111 侧链在常规 MD 中很难翻转）。
 
 ## 环境
 
