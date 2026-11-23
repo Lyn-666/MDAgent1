@@ -180,6 +180,12 @@ conda activate mdagent && mdagent start
 
 ## 常见问题
 
+**运行 `mdagent start` 时报 `No module named 'mdagent'`：** 你移动过、重新克隆过项目文件夹，或者换了文件夹。`mdagent` 命令记着原来文件夹的位置，原文件夹不在了就找不到代码。在现在的项目文件夹里重新安装一次：
+
+```bash
+conda activate mdagent && python -m pip install -e .
+```
+
 **CUDA 报 `CUDA_ERROR_UNSUPPORTED_PTX_VERSION`：** conda 装的 CUDA 组件比显卡驱动新。运行 `nvidia-smi`，看第一行的 CUDA 版本（例如 13.3），然后运行下面的命令，把版本号换成你看到的：
 
 ```bash

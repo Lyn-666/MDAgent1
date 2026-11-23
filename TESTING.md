@@ -36,7 +36,7 @@ CUDA 那一行应该写着 “Successfully computed forces”。
 pytest -q tests -m "not slow"
 ```
 
-这一步约 4 分钟，应该全部通过。任何一步出错，先看 [README](README.md) 的“常见问题”；解决不了就按第 6 步反馈，这本身就是有用的测试结果。
+这一步约 4 分钟，应该全部通过。如果 `mdagent start` 报 `No module named 'mdagent'`，说明以前在别的文件夹里装过 MDAgent：在这个文件夹里重新运行一次 `python -m pip install -e .`。任何一步出错，先看 [README](README.md) 的“常见问题”；解决不了就按第 6 步反馈，这本身就是有用的测试结果。
 
 ## 第 3 步：流程测试（约 10 分钟）
 

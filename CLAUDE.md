@@ -12,7 +12,7 @@
 
 用平实词语，写清楚、好懂的完整句子。不要使用工作过程中自己造出的术语或缩写，以任何读者都能理解的方式说明它是什么。写作总体上参考 ASD-STE100 简化技术英语的风格：使用短句，每句表达一个意思，采用主动语态，对同一件事始终使用同一个词。观点彼此相连时，用连贯自然的段落；只有列举独立项目时才使用项目符号。除非读者要求，否则省去不必要的细节，尽量简洁，但要确保保留关键背景。努力让面向用户的文字尽可能清晰易读。
 
-用户使用中文交流，回复用中文。给用户的命令要能直接复制运行，并包含 `cd ~/Desktop/MDAgent1 && git pull`。**用户在测试机上运行时（项目在 `~/MDAgent1`），命令用 `cd ~/MDAgent1 && git pull`，跑模拟和测试要加 `taskset -c 0-7,10-31`。**
+用户使用中文交流，回复用中文。给用户的命令要能直接复制运行，并包含 `cd ~/Desktop/MDAgent1 && git pull`。**用户在测试机上运行时（项目在 `~/lynn/MDAgent1`，2026-11-23 起；以前在 `~/MDAgent1`），命令用 `cd ~/lynn/MDAgent1 && git pull`，跑模拟和测试要加 `taskset -c 0-7,10-31`。**
 
 **测试要和用户使用时一样（用户的要求，2026-11-20）：** 让用户验证功能时，不给脚本和文件路径，而是让用户打开 agent（`mdagent start`），在对话里用一句话把任务交给它，由 agent 自己下载结构、搭体系、决定怎么跑、交付报告。离线基准（`experiment-a`、`scripts/experiment_A.sh`）是开发者用来评估 agent 的工具，不是给用户的测试方法。
 
@@ -115,6 +115,6 @@
 - **用户的电脑：** 项目在 `~/Desktop/MDAgent1`，conda 环境 `mdagent`，OpenMM 8.6.1 带 CUDA，GPU 上约每天 300 到 600 ns。用户有 Claude 订阅，但没有 API 密钥。
 - **不要在用户的 conda 环境里装 openmm-plumed：** conda-forge 上的版本会把 OpenMM 降到 8.2 并丢掉 CUDA，而且其中的 PLUMED 不带 OPES。
 - **云端会话**（Claude Code 网页版的临时容器）：没有 GPU，只适合很短的流程测试；装不了 AdaptivePy；没有 API 密钥。新容器里没有依赖：`pip install openmm mdtraj "pydantic>=2" propka pytest legacy-cgi`；pdbfixer 用 pip 装会失败，要 `git clone https://github.com/openmm/pdbfixer` 后把其中的 `pdbfixer/` 文件夹复制到 site-packages。改动推送到 GitHub `Lyn-666/MDAgent1` 的 `main` 分支（会话被指定了开发分支时推到那个分支，合并到 `main` 由用户决定），用户和测试者都从 `main` 拉代码。有的会话在开发分支（例如 `claude/admiring-noether-6mlzki`）上工作：推送前先把 `main` 合并进来，再快进推到 `main`，不然用户 `git pull` 拿不到（2026-11-20 就因此在测试机上报 `invalid choice: 'experiment-a'`）。两个会话可能同时改代码，合并时两边功能都保留。最早的 `zcorn2017/binding-lang` 仓库已恢复原样，不再使用。
-- **测试机（项目在 `~/MDAgent1`）：** 用户的输出里项目路径是 `~/MDAgent1` 时就是这台。运行测试和 `mdagent start` 要加 `taskset -c 0-7,10-31`（有两个 CPU 核不稳定）；conda 用 `--solver=libmamba`；装包用 `python -m pip`；CUDA 组件版本要和驱动匹配（`cuda-version=13.3`）。第 5 步的 10 个场景在这台机器上跑完过，结论和发现的问题见 `docs/developer.md` 的“GPU 上的验证记录”。
+- **测试机（项目在 `~/lynn/MDAgent1`）：** 用户的输出里项目路径是 `~/lynn/MDAgent1` 时就是这台。2026-11-23 换到这个文件夹后，`mdagent start` 报 `No module named 'mdagent'`（可编辑安装还指向旧文件夹），在新文件夹里 `python -m pip install -e .` 解决。运行测试和 `mdagent start` 要加 `taskset -c 0-7,10-31`（有两个 CPU 核不稳定）；conda 用 `--solver=libmamba`；装包用 `python -m pip`；CUDA 组件版本要和驱动匹配（`cuda-version=13.3`）。第 5 步的 10 个场景在这台机器上跑完过，结论和发现的问题见 `docs/developer.md` 的“GPU 上的验证记录”。
 - **网页可能经 SSH 端口转发打开：** 模拟在 Linux 电脑上，浏览器在另一台电脑上；结果文件只在跑模拟的那台电脑上。
 - **还要在 GPU 电脑上验证的事项：** 新的默认路径（agent 规划、加长、加轨迹、停下，2026-11-23）；Codex 后台；网页下载链接经端口转发是否可用；CHARMM 加帽体系的长时间运行。已验证可用：AdaptivePy、Claude Code 后台、`start` 终端模式。整机死机和 GPU 悄悄改用 CPU 的排查记录见 `docs/developer.md`。
