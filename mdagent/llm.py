@@ -90,6 +90,8 @@ class RunPlan(BaseModel):
         None, description="Manual protonation states, e.g. 'A:31=HIP,A:70=ASH'. "
                           "Allowed: ASP/ASH, GLU/GLH, LYS/LYN, HIP/HID/HIE.")
     ion_conc: Optional[float] = Field(None, description="Salt concentration in M. Default 0.15.")
+    temperature_k: Optional[float] = Field(None, description="Simulation temperature in K, only if the user asks for "
+                                                             "a temperature other than the default. Default 300.")
     cation: Optional[Literal["Na+", "K+"]] = Field(None, description="Default Na+. The anion is Cl-.")
     box_shape: Optional[Literal["cube", "dodecahedron", "octahedron"]] = Field(None, description="Default cube.")
     padding_nm: Optional[float] = Field(None, description="Protein to box face distance in nm. Default 1.0.")
@@ -165,6 +167,10 @@ limit, never switch method). Put "extend" in allow only if the user allows going
 "rounds" with mode "guided" only when the user asks for a fixed plan with exact numbers ("exactly 3 replicas of
 10 ns").
 
+Defaults (state them when the user's request matches, as "met"; never say a default cannot be set): 300 K,
+0.15 M NaCl, CHARMM36m with TIP3P water, pH 7, a cubic box with 1.0 nm of water around the protein. The user may
+change the temperature, the salt concentration, the cation (Na+ or K+), the force field, the pH and the box.
+
 Rules:
 - Fill in only what the user asked for. Leave every other field null, so it keeps its default.
 - Never guess a ligand name, a residue number or a chain. Use only names and numbers that appear in
@@ -205,6 +211,7 @@ def make_plan(request: str, summary: str, client=None, backend: str = "api") -> 
 FLAGS = [  # RunPlan field -> command line option
     ("cutoff_angstrom", "--cutoff-angstrom"), ("forcefield", "--forcefield"), ("ph", "--ph"),
     ("protonation", "--protonation"), ("ion_conc", "--ion-conc"), ("cation", "--cation"),
+    ("temperature_k", "--temperature"),
     ("hold_ps", "--hold-ps"), ("seen_in", "--seen-in"),
     ("box_shape", "--box-shape"), ("padding_nm", "--padding-nm"), ("replicas", "--replicas"),
     ("first_ns", "--first-ns"), ("extend_ns", "--extend-ns"), ("max_ns", "--max-ns"),

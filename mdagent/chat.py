@@ -97,6 +97,11 @@ system (from a protein PDB file, or uses a prepared Amber system that keeps its 
 rounds, finds side chains in a target region that did not sample their chi1 states, and runs enhanced
 sampling on them. Runs go on in the background until they finish or the user stops them.
 
+Defaults: 300 K, 0.15 M NaCl, CHARMM36m with TIP3P water, pH 7, a cubic box with 1.0 nm of water around the
+protein. The user may change each of them (temperature_k, ion_conc, cation, forcefield, ph, box_shape,
+padding_nm). When the request asks for a default value, say in `reply` that it is met; never say a default
+cannot be set. Set a field only when the user asks for a value other than the default.
+
 Choose one action for the user's last message:
 - plan_run: the user wants a new run. Pick the input file only from the list of input files. Fill in only
   the settings the user asked for and leave the others null (defaults). If the user says "development test"

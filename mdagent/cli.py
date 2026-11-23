@@ -326,6 +326,10 @@ def cmd_run(args) -> int:
     from .build import FORCEFIELDS
 
     resolve_defaults(args)
+    if not 200.0 <= getattr(args, "temperature", 300.0) <= 500.0:
+        print(f"error: --temperature {args.temperature:g} K is outside 200 to 500 K, where the force fields are "
+              "parametrized and tested.", file=sys.stderr)
+        return 2
     out = Path(args.out)
     from . import __version__
 
@@ -483,7 +487,8 @@ def cmd_run(args) -> int:
         target=keys,
         n_replicas=args.replicas,
         base_seed=args.seed,
-        md=MDSettings(save_interval_ps=args.save_ps, platform=args.platform, equilibration_ps=args.equil_ps),
+        md=MDSettings(save_interval_ps=args.save_ps, platform=args.platform, equilibration_ps=args.equil_ps,
+                      temperature_k=args.temperature),
         loop=loop,
         setup=asdict(setup) if setup else {"amber": [str(args.prmtop), str(args.inpcrd)]},
         sampling=args.sampling,
@@ -733,6 +738,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Set protonation states by hand, for example 'A:31=HIP,A:70=ASH'. "
                         "Applied after --check-protonation.")
     r.add_argument("--ion-conc", type=float, default=0.15, help="Salt concentration in M (default 0.15).")
+    r.add_argument("--temperature", type=float, default=300.0,
+                   help="Simulation temperature in K (default 300). Used for heating, the thermostat, the barostat, "
+                        "enhanced sampling and every free energy.")
     r.add_argument("--cation", default="Na+", choices=["Na+", "K+"])
     r.add_argument("--padding-nm", type=float, default=1.0,
                    help="Minimum distance from the protein to each face of the water box (nm).")

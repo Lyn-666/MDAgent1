@@ -419,3 +419,28 @@ def test_a_hard_judges_honesty_when_the_reference_cannot_judge_accuracy():
     # With a usable reference there is no honesty verdict.
     fast = run(None, SMALL, Targets(), trials=2, seed=0, pool_factory=lambda sd: family_pool("equilibrium", sd, 8, 40.0))
     assert fast["verdict"]["a_hard"] is None
+
+
+def test_the_temperature_can_be_set_and_defaults_to_300_k(tmp_path, capsys):
+    """Tester feedback (2026-11-23): temperature and salt are user settings. Default 300 K; set only when asked."""
+    from mdagent.cli import build_parser, cmd_run
+    from mdagent.llm import RunPlan, to_argv
+
+    plan = RunPlan(target_kind="residues", residues="A:47", questions=[], summary="t", temperature_k=310.0,
+                   ion_conc=0.1)
+    argv = to_argv(plan, "x.pdb", "runs/a")
+    assert float(argv[argv.index("--temperature") + 1]) == 310.0 and "--ion-conc" in argv
+    assert "--temperature" not in to_argv(RunPlan(target_kind="residues", residues="A:47", questions=[], summary="t"),
+                                          "x.pdb", "runs/a")
+    assert build_parser().parse_args(["run", "--pdb", "x.pdb", "--out", "o"]).temperature == 300.0
+    bad = build_parser().parse_args(["run", "--pdb", "x.pdb", "--out", str(tmp_path / "o"), "--residues", "A:1",
+                                     "--temperature", "800"])
+    assert cmd_run(bad) == 2 and "outside 200 to 500 K" in capsys.readouterr().err
+
+
+def test_the_chat_prompts_state_the_defaults_so_a_default_request_is_met():
+    from mdagent.chat import SYSTEM as CHAT
+    from mdagent.llm import SYSTEM as ASK
+
+    for prompt in (CHAT, ASK):
+        assert "300 K" in prompt and "0.15 M NaCl" in prompt and "never say a default" in prompt
