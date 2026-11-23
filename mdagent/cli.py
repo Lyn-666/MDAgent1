@@ -327,7 +327,9 @@ def cmd_run(args) -> int:
 
     resolve_defaults(args)
     out = Path(args.out)
-    print(f"Run folder: {out.resolve()} (on computer '{_host()}')")
+    from . import __version__
+
+    print(f"MDAgent {__version__}. Run folder: {out.resolve()} (on computer '{_host()}')")
     if (out / "run.json").exists():
         print(f"error: {out} already has a run. Use 'resume --run {out}' to continue it.",
               file=sys.stderr)

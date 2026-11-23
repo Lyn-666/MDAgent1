@@ -11,6 +11,8 @@ about: 程序出错，或者结果和说明不一致 / Something failed or did n
 
 **你期望发生什么 / What you expected**
 
+**MDAgent 版本 / Version**（日志第一行 / first line of the log）:
+
 **电脑 / Computer**
 - 系统 / OS（例如 Ubuntu 22.04）:
 - GPU（`nvidia-smi` 的第一行 / first line of `nvidia-smi`）:

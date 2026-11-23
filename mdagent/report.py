@@ -26,6 +26,7 @@ import time
 from pathlib import Path
 from statistics import NormalDist
 
+from . import __version__
 from .outputs import describe, host
 
 REASONS = {
@@ -219,8 +220,9 @@ def write(run_dir: Path) -> list[Path]:
         def T(a, b):
             return a if zh else b
         L = [T(f"# MDAgent 结果报告：{run_dir.name}", f"# MDAgent result report: {run_dir.name}"), "",
-             T(f"写于 {time.strftime('%Y-%m-%d %H:%M')}，电脑“{host()}”，文件夹 {run_dir.resolve()}。",
-               f"Written {time.strftime('%Y-%m-%d %H:%M')} on computer '{host()}', folder {run_dir.resolve()}."), ""]
+             T(f"写于 {time.strftime('%Y-%m-%d %H:%M')}，电脑“{host()}”，文件夹 {run_dir.resolve()}，MDAgent {__version__}。",
+               f"Written {time.strftime('%Y-%m-%d %H:%M')} on computer '{host()}', folder {run_dir.resolve()}, "
+               f"MDAgent {__version__}."), ""]
 
         L += [T("## 问题", "## The question"), ""]
         quantity = goal.get("quantity", "chi1_populations")
