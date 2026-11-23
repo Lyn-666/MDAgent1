@@ -16,7 +16,7 @@
 
 **测试要和用户使用时一样（用户的要求，2026-11-20）：** 让用户验证功能时，不给脚本和文件路径，而是让用户打开 agent（`mdagent start`），在对话里用一句话把任务交给它，由 agent 自己下载结构、搭体系、决定怎么跑、交付报告。离线基准（`experiment-a`、`scripts/experiment_A.sh`）是开发者用来评估 agent 的工具，不是给用户的测试方法。
 
-**提交署名（用户的要求，2026-11-23）：** 贡献者要显示为用户本人，不要显示 Claude。每次会话开始先运行 `git config user.name "Lin (Lynn) Zhu"` 和 `git config user.email "73653622+Lyn-666@users.noreply.github.com"`（GitHub 隐私邮箱）；提交说明里不加 `Co-Authored-By: Claude` 或 `Claude-Session` 这类行。
+**提交署名（用户的要求，2026-11-23）：** 贡献者要显示为用户本人，不要显示 Claude。每次会话开始先运行 `git config user.name "Lin (Lynn) Zhu"` 和 `git config user.email "73653622+Lyn-666@users.noreply.github.com"`（GitHub 隐私邮箱）；提交说明里不加 `Co-Authored-By: Claude` 或 `Claude-Session` 这类行。2026-11-23 用户同意后改写了 `main` 的全部历史（作者全改为用户、去掉 Claude 署名行，代码内容不变），强制推送了 `main` 和 `claude/brave-allen-dwswih`；改写前的完整备份是会话临时目录里的 git bundle（会话结束会消失）。远端另外四个旧的 `claude/*` 分支还是旧历史。
 
 ## 项目定位（用户的决定，2026-11-23，最新）
 
@@ -68,7 +68,7 @@
 - **语言模型只做"翻译"**：把用户的话填进固定的设置表，不能运行命令；开始、停止、继续都要用户确认（网页点按钮，终端输入 y）。
 - **运行发消息到对话：** 运行写 `runs/<名字>/messages.jsonl`（中英文），网页和终端把新消息显示在启动它的对话里。建议换方法时只发消息，不暂停运行，不用按钮。
 - **使用方式（用户的设计）：** 装好程序后运行 `mdagent start`，依次选界面语言、Claude 还是 ChatGPT（Codex）、网页还是终端。流程由我们的程序控制，不由语言模型控制；网页和终端共用 `chat.Assistant`。**尽量少用 Claude Code 和 Codex 的 token**：每句话只调用一次模型，提示里不放长列表，`/runs` 等本地命令不调用模型。Claude Code 的 `/md` 是 Claude Code 自己按说明工作，费额度，只给开发者用。
-- **公开计划：** 先保持私有，邀请少数同学测试（流程在 `TESTING.md`，版本 `0.1.0b1`，对应提交 `f03db05`；云端会话不能推送 git 标签，标签 `v0.1.0b1` 要用户在自己电脑上打）；公开前要完成：科学修复（已完成：跳过脯氨酸和二硫键半胱氨酸、增强采样最多 10 个侧链）、测试者材料（已完成：`environment.yml`、README 快速上手、Issue 模板、GitHub Actions 自动测试）、许可证（已完成：MIT，版权人 Lyn-666）、用户在 GPU 上的两项验证（见 `docs/developer.md`“下一步”；181L 完整运行的普通 MD 部分已通过：VAL111 在 3×20 ns 里没有翻转，被送进增强采样，10 个侧链的上限生效；增强采样里 VAL111 第 1 条轨迹 5 ns 翻转 373 次，三种状态都去过，也已通过）、删掉 CLAUDE.md 里只和用户个人电脑有关的记录（2026-11-23 已做：用户名、硬件故障和死机记录移到 `docs/developer.md`，去掉了身份信息）。
+- **公开计划：** 先保持私有，邀请少数同学测试（流程在 `TESTING.md`，版本 `0.1.0b1`，对应提交 `3a37da9`（2026-11-23 改写历史后的编号）；云端会话不能推送 git 标签，标签 `v0.1.0b1` 要用户在自己电脑上打）；公开前要完成：科学修复（已完成：跳过脯氨酸和二硫键半胱氨酸、增强采样最多 10 个侧链）、测试者材料（已完成：`environment.yml`、README 快速上手、Issue 模板、GitHub Actions 自动测试）、许可证（已完成：MIT，版权人 Lyn-666）、用户在 GPU 上的两项验证（见 `docs/developer.md`“下一步”；181L 完整运行的普通 MD 部分已通过：VAL111 在 3×20 ns 里没有翻转，被送进增强采样，10 个侧链的上限生效；增强采样里 VAL111 第 1 条轨迹 5 ns 翻转 373 次，三种状态都去过，也已通过）、删掉 CLAUDE.md 里只和用户个人电脑有关的记录（2026-11-23 已做：用户名、硬件故障和死机记录移到 `docs/developer.md`，去掉了身份信息）。
 - **开发阶段测试运行要很短（几分钟）**：`--replicas 2 --first-ns 0.1 --extend-ns 0.1 --max-ns 0.3 --no-flip-patience-ns 0.25 --enhanced-ns 0.1 --equil-ps 60`。
 - **长上限也可以（2026-11-21，用户说明）：** 用户可以把上限定得很长（例如每条 1 µs），agent 在上限内自己决定重复数、长度和何时停；用户允许时也可以换方法。
 
