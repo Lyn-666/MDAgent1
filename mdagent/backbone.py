@@ -305,7 +305,8 @@ def sets_of(state) -> list:
 
 def diagnose_backbone(items: dict, settings: BackboneSettings, ns_per_replica: float, dt_ns: float,
                       temperature_k: float, min_flips_per_replica: int = 4, precision=None,
-                      rate_rel_error: float | None = None, fes_error_kcal: float | None = None):
+                      rate_rel_error: float | None = None, fes_error_kcal: float | None = None,
+                      burn_in: str = "none"):
     """One report per backbone item. `items`: {label: (basins.BasinSet, [angles per replica])}, each angle array
     (frames, 2) in degrees, in the order of the set's dihedrals (phi, psi for rama; psi(i+1), phi(i+2) for turn).
 
@@ -313,8 +314,11 @@ def diagnose_backbone(items: dict, settings: BackboneSettings, ns_per_replica: f
     The verdict is "ok" only when the populations, the leading rates and the landscape all meet their criteria.
     `precision` may be a number (standard error) or an uncertainty.Precision; with a Precision the rate and
     landscape criteria use the same interval width (z), so a run that looks only a few times stays calibrated.
+    The landscape error is the spread between replicas, so with the "confidence" criterion it uses Student's t
+    (n - 1 degrees of freedom). burn_in "auto": each replica's first, non-equilibrated part is left out
+    (basins.trim); the first frame kept per replica is in details[label]["burn_in_frames"].
     """
-    from .basins import assign, summarize
+    from .basins import assign, summarize, trim
     from .diagnose import ResidueReport, count_transitions, judge, occupancy, populations_with_errors, rank
     from .uncertainty import Precision
 
@@ -325,20 +329,23 @@ def diagnose_backbone(items: dict, settings: BackboneSettings, ns_per_replica: f
         values = [np.asarray(v, dtype=float).reshape(len(v), -1) for v in values]
         names = spec.names
         states = [assign(v, spec) for v in values]
+        states, values, kept_from = trim(states, values, len(names), burn_in)
         occ = [occupancy(s, names) for s in states]
         rep = ResidueReport(chain=spec.chain or "", resseq=spec.resseq, resname="", name=label, quantity="backbone",
                             transitions=[count_transitions(s) for s in states], occupancies=occ,
                             dominant=[max(o, key=o.get) for o in occ], ns_per_replica=ns_per_replica)
         (rep.populations, rep.standard_error, rep.replicas_differ,
          rep.error_from_replicas) = populations_with_errors(states, names)
-        judge(rep, min_flips_per_replica, precision)
         est = summarize(states, values, names, dt_ns)      # Free-energy difference, main rates, split-half check.
-        rep.error_within, rep.error_between = est["within"], est["between"]
+        rep.error_within, rep.error_between = est["within"], est["between"]   # before judge: it reads them
+        judge(rep, min_flips_per_replica, precision)
         stats = transition_statistics(states, names, dt_ns)
         rate_err, lead = worst_rate_error(stats, rep.populations, settings.min_population)
         fes = landscape([v[:, 0] for v in values], [v[:, 1] for v in values], temperature_k, settings.bins_deg,
                         n_effective=stats["total_transitions"] + len(states))
         fes_err = worst_landscape_error(fes, settings.fes_cutoff_kcal)
+        # The landscape error is the spread between replicas itself: n - 1 degrees of freedom whenever n > 1.
+        zf = p.factor(len(states) - 1) if p is not None else 1.0
         rep.extra = {"basins": names, "angles": [f"{a} of residue {spec.resseq + off}" for off, a in spec.dihedrals],
                      "dg_kt": est["dg_kt"], "dg_se": est["dg_se"], "rates": est["rates"],
                      "split_js": est.get("split_js"),
@@ -351,15 +358,15 @@ def diagnose_backbone(items: dict, settings: BackboneSettings, ns_per_replica: f
             rep.reason += (f" The leading transition rates ({', '.join(lead)}) have a relative error up to "
                            f"{z * rate_err:.2f}" + (f" ({z:.2f} standard errors)" if z != 1 else "")
                            + f", more than the requested {rate_rel_error:g}.")
-        elif rep.verdict == "ok" and fes_error_kcal is not None and z * fes_err > fes_error_kcal:
+        elif rep.verdict == "ok" and fes_error_kcal is not None and zf * fes_err > fes_error_kcal:
             rep.verdict = "imprecise"
-            rep.reason += (f" The free-energy landscape has an error up to {z * fes_err:.2f} kcal/mol where "
+            rep.reason += (f" The free-energy landscape has an error up to {zf * fes_err:.2f} kcal/mol where "
                            f"F <= {settings.fes_cutoff_kcal:g}, more than the requested {fes_error_kcal:g}.")
         details[label] = {"transitions": stats, "landscape": fes, "minima": basin_minima(fes, spec),
                           "basins": (basins_text(spec.boxes) if spec.boxes else
                                      "; ".join(f"{k}: centre {c}, core {spec.core_deg:g} deg"
                                                for k, c in spec.centres.items())),
-                          "axes": rep.extra["angles"]}
+                          "axes": rep.extra["angles"], "burn_in_frames": kept_from}
         reports.append(rep)
     return rank(reports), details
 

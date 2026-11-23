@@ -101,13 +101,15 @@ def test_fewer_looks_allow_a_narrower_calibrated_interval():
 def test_the_experiment_runs_every_arm_and_writes_its_report(tmp_path):
     pool = model_pool(FAST, n_replicas=12, ns=40.0, seed=0)
     out = run(pool, SMALL, Targets(), trials=4, holdout=4, seed=0)
-    assert set(out["arms"]) == {"sequential_ci_4", "agent"}
+    assert set(out["arms"]) == {"sequential_ci_4", "pilot_fixed", "agent"}
+    assert out["independence"]["mode"] == "shared_pool" and out["independence"]["units"] == 1   # 8 usable, 8 per trial
     assert set(out["summary"]["fixed"]) == {"1", "4"}
     for t in out["arms"]["agent"]:
         assert t["decision"] in ("STOP", "INSUFFICIENT_EVIDENCE")
         assert t["outcome"] in ("correct_stop", "false_stop", "correct_insufficient", "over_cautious")
         assert t["cost"]["compute_ns"] > 0 and t["looks"] <= SMALL.agent_looks + 1   # + the planning look
         assert t["steps"][0]["planning"]                                           # the first look only plans
+        assert set(t["items"]) == {"model1"}
     assert out["verdict"]["result"] in ("supported", "not_supported", "reference_inadequate")
     assert set(out["verdict"]["vs_sequential_ci"]) == {"sequential_ci_4"}
     names = [p.name for p in write_outputs(out, tmp_path)]

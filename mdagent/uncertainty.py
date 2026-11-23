@@ -163,27 +163,33 @@ class Precision:
             return mixture_factor(n, n, self.alpha)
         return NormalDist().inv_cdf(1 - self.alpha / (2 * max(1, self.looks)))
 
-    def halfwidth(self, standard_error: float, population: float | None = None) -> float:
-        """Half-width of the interval of one population."""
+    def factor(self, df: int | None = None) -> float:
+        """z, or for the "confidence" criterion with the error mainly from the spread between n replicas
+        (df = n - 1), the Student-t factor with the same tail probability (t_factor). The "standard_error"
+        criterion is a plain standard error, not an interval, and "sequence" is already wider; both keep z."""
+        return t_factor(self.z, df) if self.criterion == "confidence" else self.z
+
+    def halfwidth(self, standard_error: float, population: float | None = None, df: int | None = None) -> float:
+        """Half-width of the interval of one population. df: see factor()."""
         se = float(standard_error)
         if not math.isfinite(se) or se <= 0:
             return se
         if self.criterion != "sequence":
-            return self.z * se
+            return self.factor(df) * se
         p = 0.5 if population is None else min(max(float(population), 0.0), 1.0)
         n_eff = max(p * (1 - p), 1e-6) / se ** 2
         return mixture_factor(n_eff, 0.25 / max(self.epsilon, 1e-6) ** 2, self.alpha) * se
 
-    def halfwidths(self, errors: dict, populations: dict | None = None) -> dict:
-        return {k: self.halfwidth(v, (populations or {}).get(k)) for k, v in errors.items()}
+    def halfwidths(self, errors: dict, populations: dict | None = None, df: int | None = None) -> dict:
+        return {k: self.halfwidth(v, (populations or {}).get(k), df) for k, v in errors.items()}
 
-    def met(self, errors: dict, populations: dict | None = None) -> bool:
+    def met(self, errors: dict, populations: dict | None = None, df: int | None = None) -> bool:
         """Is every population of this item precise enough?"""
-        hw = self.halfwidths(errors, populations).values()
+        hw = self.halfwidths(errors, populations, df).values()
         return bool(hw) and all(math.isfinite(h) and h <= self.epsilon for h in hw)
 
-    def worst(self, errors: dict, populations: dict | None = None) -> float:
-        hw = list(self.halfwidths(errors, populations).values())
+    def worst(self, errors: dict, populations: dict | None = None, df: int | None = None) -> float:
+        hw = list(self.halfwidths(errors, populations, df).values())
         return max(hw) if hw else float("nan")
 
     def describe(self, zh: bool = False) -> str:
@@ -234,6 +240,90 @@ def changes_needed(n_replicas: int, min_changes_per_replica: int = 4, tolerance:
     if tolerance:
         need = max(need, (2 * (1 - tolerance) * z) ** 2)
     return need
+
+
+def t_factor(z: float, df: int | None) -> float:
+    """The interval factor with the same tail probability as the normal factor z, from Student's t with df degrees
+    of freedom. Used when the error comes mainly from the spread between n replicas (df = n - 1): that spread is
+    itself estimated from only n numbers, so the normal factor makes the interval too narrow (df = 2: 4.30 instead
+    of 1.96 at 95 %). df None or below 1, or z not positive: z unchanged."""
+    if df is None or df < 1 or not math.isfinite(z) or z <= 0:
+        return z
+    from scipy.stats import norm, t
+
+    return float(t.ppf(norm.cdf(z), df))
+
+
+def replica_spread_real(within: float, between: float, n_replicas: int, level: float = 0.95) -> bool:
+    """Is the spread between n replicas larger than their own errors explain (chi-square test at `level`)?
+
+    Only then does the error come from the replicas in a way that n - 1 degrees of freedom describe, so only then
+    is Student's t used. A spread that is larger only by chance is already covered by taking max(within, between).
+    The same test decides in allocation.allocate whether more replicas are needed, so the plan and the verdict use
+    the same interval."""
+    from .allocation import chi2_quantile
+
+    if n_replicas < 2 or not within or within <= 0 or not math.isfinite(within) or not math.isfinite(between):
+        return False
+    k = n_replicas - 1
+    return (between * between) / (within * within) > chi2_quantile(level, k) / k
+
+
+def statistical_inefficiency(x: np.ndarray, min_lag: int = 3) -> float:
+    """g = 1 + 2 sum_t (1 - t/n) C(t): how many frames one independent sample is worth (Chodera, JCTC 2016, 12, 1799;
+    the integration stops at the first non-positive autocorrelation after min_lag). A constant series gives 1."""
+    x = np.asarray(x, dtype=float)
+    n = len(x)
+    if n < 2:
+        return 1.0
+    d = x - x.mean()
+    var = float(np.dot(d, d)) / n
+    if var <= 0:
+        return 1.0
+    size = 1 << (2 * n - 1).bit_length()
+    f = np.fft.rfft(d, size)
+    acf = np.fft.irfft(f * np.conj(f), size)[:n] / (var * np.arange(n, 0, -1))
+    lags = np.arange(1, n)
+    stop = np.nonzero((acf[1:] <= 0) & (lags >= min_lag))[0]
+    end = int(stop[0]) if stop.size else n - 1          # lags 1 .. end are summed
+    g = 1.0 + 2.0 * float(np.sum(acf[1:end + 1] * (1.0 - lags[:end] / n)))
+    return max(g, 1.0)
+
+
+def equilibration_start(states: np.ndarray, n_states: int | None = None, candidates: int = 25,
+                        max_fraction: float = 0.5) -> int:
+    """First frame to keep, by automated equilibration detection (Chodera, JCTC 2016, 12, 1799).
+
+    For each start t0 the number of independent samples left is (n - t0) / g(x[t0:]); the start with the most is
+    kept. An initial non-equilibrium part (for example the starting basin over-occupied while the structure relaxes)
+    raises g, so cutting it off gives more independent samples. For states, x is the indicator of each state and
+    the latest start over the states is kept (the most cautious one). At most `max_fraction` of the series is cut,
+    so a slow series is not cut away entirely. Frames before the first core (state -1) are always cut.
+    """
+    s = np.asarray(states)
+    n = len(s)
+    first = int(np.argmax(s >= 0)) if (s >= 0).any() else n
+    if n - first < 20:
+        return first
+    k = int(n_states if n_states is not None else s.max() + 1)
+    starts = np.unique(np.linspace(first, first + max_fraction * (n - first), candidates).astype(int))
+    best_t0 = first
+    for state in range(k):
+        x = (s == state).astype(float)
+        if x[first:].min() == x[first:].max():
+            continue                     # never or always in this state: no information about a transient
+        best, at = -1.0, first
+        for t0 in starts:
+            neff = (n - t0) / statistical_inefficiency(x[t0:])
+            if neff > best:
+                best, at = neff, int(t0)
+        best_t0 = max(best_t0, at)
+    return best_t0
+
+
+def trim_starts(states: list, n_states: int | None = None) -> list[int]:
+    """equilibration_start of every replica (one start per replica)."""
+    return [equilibration_start(s, n_states) for s in states]
 
 
 def never_changing_hopeless(exposure_ns: float, remaining_ns: float, needed: float) -> bool:

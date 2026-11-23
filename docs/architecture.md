@@ -1,6 +1,6 @@
 # MDAgent as a general scientific MD agent: assessment, architecture, plan
 
-Status: 2026-11-20. Phase 1 (the general decision core) and phase 2 (OpenMM adapters and shadow mode) are
+Status: 2026-11-23 (section 3.4: revisions after an internal review). Phase 1 (the general decision core) and phase 2 (OpenMM adapters and shadow mode) are
 implemented. The core now decides next to every run without acting (shadow mode); the run itself still
 follows `policy.py` and `agent.run_all`. Phase 2 ran no new simulation.
 
@@ -284,6 +284,55 @@ Problems found and fixed during the merge:
 - The new `transition_rates` and `free_energy_surface` estimators keep their own criteria. The new core is
   still in shadow mode.
 
+### 3.4 Revisions after an internal review (2026-11-23)
+
+A review written as for a top venue found that the main claim (the least compute for a given precision) had no
+real-MD evidence yet. It also found that the benchmark would overstate reliability. The order of work was:
+first repair the measurement, then spend GPU time. These changes need no GPU.
+
+**Which agent a paper evaluates.** It is `allocation.next_step`: the projection allocation of live runs
+(`--allocation projection`), replayed in Experiment A. The other three decision paths are not the subject of
+a paper:
+- `policy.py`: the rounds mode;
+- `core/`: shadow mode only;
+- `budget._decide`: a mirror of `policy.py`.
+
+Freeze the code with a git tag before the held-out runs, and quote the tag.
+
+**What the guarantee is.** The intervals are calibrated per estimand, that is, per item and state. Over the
+looks that may stop, they use Bonferroni. The claim to test is this: at the moment a method stops, each item's
+interval holds the reference in at least 1 − alpha of independent trials (`per_item`, `coverage_at_stop`).
+Experiment A reports separately whether all items are right at once. This is the old "success" column.
+
+Changes:
+
+| Review point | Change | Where |
+|---|---|---|
+| Trials share data | Three modes, and the report states the number of independent units. Fresh pools: each trial gets a new model pool, and the reference is the truth. Disjoint groups: trials share no replica. Shared pool: allowed, but the intervals use about usable/needed units, often 1. | `experiment_a.run`, `summarize._interval` |
+| Normal factor with 2 to 4 replicas | Student's t with n − 1 degrees of freedom where the spread between replicas is real by the chi-square test that the allocation already used (`uncertainty.replica_spread_real`). A spread that is larger only by chance keeps z, because max(within, between) already covers it. A first version used t whenever the spread was merely larger; the plan (z) and the verdict (t) then disagreed, and on the easy family the agent ran out of looks in 23 % of trials. It is used in the benchmark verdicts, the coverage check, the allocation projection (more replicas also narrow the factor), the live verdicts with the confidence criterion, and the backbone landscape error. The standard-error criterion keeps z = 1, because it is not an interval. | `uncertainty.t_factor`, `uncertainty.replica_spread_real`, `Precision.factor`, `basins.state_factors`, `allocation.allocate(t_dist)` |
+| Initial-structure bias | Automated equilibration detection (Chodera 2016): for each replica, keep the start t0 that leaves the most independent samples. Each state indicator is checked, and the latest t0 is used. At most half of the series is cut. The cut part is still counted as cost. New runs with projection allocation use it (`--burn-in auto`). Older runs and the rounds mode keep everything. Every method in Experiment A uses it, so the comparison stays fair. | `uncertainty.equilibration_start`, `basins.trim`, `LoopSettings.burn_in` |
+| The synthetic model cannot fail | `family_pool` has four families with known truth: `equilibrium`; `biased_start` (a "crystal" substate that relaxes in about 10 ns); `two_timescale` (hidden groups that exchange about every 2 ns); `hidden_slow_start` (exchange about every 10 ns, and every replica starts on one side). | `experiment_a.FAMILIES` |
+| A weak baseline | `pilot_fixed`: a pilot, one projection with the agent's own `allocate`, then a fixed plan judged once. It is now part of condition 2 of the verdict. | `experiment_a.run_pilot_fixed` |
+| Constants set by judgement | `--sensitivity`: change one constant at a time (margin, final_margin, give_up_factor, agent_looks, starting replicas, min_transitions) on every family. | `experiment_a.sensitivity` |
+| Two different starting replica counts | Experiment A now starts the agent with 3 replicas, the same as the chat plan of a live run. | `Design.replicas` |
+
+`allocation.RULE_VERSION` is now 5. A resumed projection run decides again under the new rule.
+
+**Deferred (smaller points).**
+- Rate errors: check whether the Poisson errors cover the truth when the system recrosses a boundary; else
+  use a bootstrap over trajectory segments.
+- Kish effective sample size: make it aware of time correlation for the error floor of enhanced sampling.
+- Basin boundaries: test how much the populations change when the boundaries move.
+- Landscape JS threshold (0.05 bits): it has no stated reason. It is not part of "success" in Experiment A.
+
+**Decisions only the user can make.**
+1. Where to publish. A computational-chemistry journal tells a statistical-design story. An AI venue then needs
+   a benchmark of how well user requests are translated into settings.
+2. Who chooses the held-out systems, and when the sealed list is committed.
+3. What counts as a correct answer for A-Hard.
+4. How large the GPU pool is. A paper needs independent trials, for example 40 × 100 ns with 8 held out and
+   4 disjoint groups of 8. That is several days of GPU time.
+
 ## 4. Minimal prioritized implementation plan
 
 Each phase is small and can be checked on its own. Phases 2 and 3 change no scientific result until the
@@ -327,7 +376,8 @@ free-energy calculations (still only recommended as external tools).
 | Calibration | choose the remaining heuristic constants (`confirm_looks`, margin, effect table) | 1UBQ and 181L, which are already used for tuning |
 | Held-out benchmark | final claims only; never run during development | 4 to 6 proteins chosen by someone other than the developer, each with independent reference data (long reference MD with other seeds and at least 5 times the agent's budget, and NMR observables where they exist). The list is sealed with a commit hash before the first held-out run. |
 
-Synthetic families with known truth: fast mixing; slow but ergodic; fully trapped; single stable state;
+Synthetic families with known truth (the first four are in `experiment_a.FAMILIES`; every trial gets a fresh
+pool): fast mixing; slow but ergodic; fully trapped; single stable state;
 partial trapping (replicas start in different basins); replica-dependent starts; a hidden slow coupled
 coordinate (the bias pushes the wrong coordinate); degenerate reweighting; rare events with known
 first-passage times; several estimands with different requirements in one task.
@@ -340,6 +390,8 @@ first-passage times; several estimands with different requirements in one task.
   usual practice and close to the current `policy.py` rule 1. A variant with two consecutive passes
   is also run.
 - **Current MDAgent policy** (`policy.py` and `run_all`), as a regression baseline.
+- **Pilot, then a fixed plan** (`experiment_a.run_pilot_fixed`): what a careful user does without an agent. It
+  separates the value of the projection from the value of looking more than once.
 
 All policies run on the same seeds and budgets (paired design).
 

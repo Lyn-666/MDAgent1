@@ -254,7 +254,8 @@ def summarize(states: list, values: list | None, names: list, ns_per_frame: floa
         nij = counts[i, j]
         rates[f"{names[i]}->{names[j]}"] = {"k_per_ns": float(nij / dwell[i]) if dwell[i] > 0 else 0.0,
                                             "n": int(nij), "rel_se": 1 / math.sqrt(nij) if nij else float("inf")}
-    out = {"populations": pops, "se": se, "transitions": trans, "dg_kt": dg, "dg_se": dg_se, "rates": rates}
+    out = {"populations": pops, "se": se, "transitions": trans, "dg_kt": dg, "dg_se": dg_se, "rates": rates,
+           "n_replicas": len(states), "within_by_state": within, "between_by_state": between}
     worst = max(names, key=lambda k: se[k] if np.isfinite(se[k]) else 1.0)
     out["within"], out["between"] = within[worst], between[worst]
     if values is not None:
@@ -265,13 +266,43 @@ def summarize(states: list, values: list | None, names: list, ns_per_frame: floa
     return out
 
 
+def state_factors(est: dict, z: float, t_dist: bool = True) -> dict:
+    """The interval factor of each state's population: z, or the Student-t factor with n - 1 degrees of freedom
+    when the spread between the n replicas is real (uncertainty.replica_spread_real, the same chi-square test the
+    allocation uses), so that the error comes from only n numbers (uncertainty.t_factor)."""
+    from .uncertainty import replica_spread_real, t_factor
+
+    n = est.get("n_replicas", 1)
+    within, between = est.get("within_by_state", {}), est.get("between_by_state", {})
+    return {k: (t_factor(z, n - 1) if t_dist and replica_spread_real(within.get(k, 0.0), between.get(k, 0.0), n)
+                else z) for k in est["se"]}
+
+
+def trim(states: list, values: list | None, n_states: int, burn_in: str = "none") -> tuple[list, list | None, list]:
+    """Leave out the first, non-equilibrated part of each replica. burn_in "auto": automated equilibration
+    detection (uncertainty.equilibration_start) on that replica's own states, so no reference is used; "none":
+    keep everything. Returns (states, values, first frame kept per replica). The cut part is still paid for."""
+    if burn_in != "auto":
+        return states, values, [0] * len(states)
+    from .uncertainty import trim_starts
+
+    starts = trim_starts(states, n_states)
+    return ([s[t0:] for s, t0 in zip(states, starts)],
+            None if values is None else [v[t0:] for v, t0 in zip(values, starts)], starts)
+
+
 def judge(est: dict, z: float, tolerance: float, min_transitions: int = 4, dg_kt: float = 0.5,
-          rate_rel: float = 0.2, landscape_js: float = 0.05) -> dict:
-    """The method's own verdict on each observable, from its own data only (never a reference)."""
+          rate_rel: float = 0.2, landscape_js: float = 0.05, t_dist: bool = True) -> dict:
+    """The method's own verdict on each observable, from its own data only (never a reference).
+
+    Populations and the free-energy difference use Student's t when the replica spread is real (state_factors);
+    rates have Poisson errors and keep z."""
     adequate = bool(est["transitions"]) and min(est["transitions"]) >= min_transitions
-    pops_ok = all(np.isfinite(v) and z * v <= tolerance for v in est["se"].values())
+    zs = state_factors(est, z, t_dist)
+    pops_ok = all(np.isfinite(v) and zs[k] * v <= tolerance for k, v in est["se"].items())
     rates_ok = all(r["n"] > 0 and z * r["rel_se"] <= rate_rel for r in est["rates"].values())
+    zdg = max(zs.values()) if zs else z
     return {"populations": pops_ok and adequate, "adequate": adequate,
-            "dg": adequate and np.isfinite(est["dg_se"]) and z * est["dg_se"] <= dg_kt,
+            "dg": adequate and np.isfinite(est["dg_se"]) and zdg * est["dg_se"] <= dg_kt,
             "rates": adequate and rates_ok,
             "landscape": adequate and est.get("split_js", 1.0) <= landscape_js}

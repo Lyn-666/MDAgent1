@@ -12,8 +12,13 @@
 #                doi:10.1073/pnas.1519609113): a 1.6 us pool cannot give it a reference, so A-Hard tests only
 #                whether a method honestly says INSUFFICIENT_EVIDENCE instead of a false STOP.
 #   Arms         fixed plans of 1, 3, 4, 5, 8 replicas (scanned over length), Sequential-CI with 4 and 8
-#                replicas, and the agent. All unbiased; new replicas start from the prepared structure.
+#                replicas, a pilot followed by a fixed plan, and the agent. All unbiased; new replicas start
+#                from the prepared structure. Every method leaves out each replica's non-equilibrated start
+#                (automated detection) and uses Student's t where the replica spread is real (chi-square test).
 #   Reference    6 pool replicas held out at full length, used by no method.
+#   Independence Trials that draw from one pool share most replicas. With 16 replicas the report says so
+#                (about 1 independent unit). For claims, use DISJOINT=1 with a larger pool, for example
+#                POOL_REPLICAS=40 HOLDOUT=8: the other 32 replicas form 4 groups of 8 that share no replica.
 #
 # Steps (from the MDAgent1 folder, mdagent environment active, inside tmux over SSH):
 #   bash scripts/experiment_A.sh pilot     # 3 x 20 ns (60 ns, a few hours)
@@ -32,6 +37,7 @@ POOL_REPLICAS=${POOL_REPLICAS:-16}
 POOL_NS=${POOL_NS:-100}
 HOLDOUT=${HOLDOUT:-6}
 TRIALS=${TRIALS:-50}
+DISJOINT=${DISJOINT:-0}           # 1: trials use groups of replicas that share no replica (independent trials)
 PILOT=runs/expA_pilot
 POOL=runs/expA_pool
 EASY=runs/expA_easy.txt
@@ -80,6 +86,7 @@ case "$STEP" in
     [ -e "$POOL/run.json" ] || { echo "Run the pool first."; exit 2; }
     ARGS="--run $POOL --holdout $HOLDOUT --trials $TRIALS --max-ns $POOL_NS --population $POPULATION
           --reliability $RELIABILITY"
+    [ "$DISJOINT" = 1 ] && ARGS="$ARGS --disjoint"
     python -m mdagent experiment-a $ARGS --observables "$(cat $EASY)" --name experiment_A_easy
     python -m mdagent experiment-a $ARGS --observables "turn:A:52" --name experiment_A_hard
     ;;

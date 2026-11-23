@@ -23,9 +23,35 @@ new seed, never from a chosen frame, which would be adaptive sampling):
   interval is narrow enough and sampling is adequate. This is the conventional statistical stopping
   rule and the baseline the agent has to beat: if the agent is not cheaper than it, the agent adds
   nothing over textbook sequential stopping.
+- pilot_fixed: what a careful practitioner does without an agent: a short pilot, one projection of the
+  replicas and length needed, then that fixed plan run to the end with one final look. It separates the
+  value of the projection from the value of looking more than once.
 - agent: decides at each look whether to stop, to run longer or to add replicas, from the error
   decomposition (inside vs between replicas) and a projection of the cost still needed; it gives up
   early with INSUFFICIENT_EVIDENCE when the projection is far beyond the budget or nothing moves.
+
+Every method uses the same estimate: by default each replica's first, non-equilibrated part is left out
+by automated equilibration detection on that replica's own data (Design.burn_in "auto"), and where the
+spread between n replicas is real (chi-square test), intervals use Student's t with n - 1 degrees of
+freedom (Design.t_dist).
+
+What counts as an independent trial (review revision, 2026-11-23). Trials that draw replicas from one
+pool share most of their data, so their success rates are not 50 independent results. `run` therefore
+has three modes and reports the number of independent units, which the intervals use:
+- fresh pools (models only, `pool_factory`): every trial gets its own newly generated pool and the
+  reference is the known truth. Trials are independent.
+- disjoint groups (`disjoint=True`): the usable replicas are split into groups that share no replica;
+  one trial per group. Trials are independent, but there are few.
+- shared pool (the old way): reported, with the warning that the independent units are only about
+  (usable replicas / replicas a trial may use).
+
+The guarantee is stated per estimand: for each item, the reported interval at the moment of stopping
+should cover the reference in at least 1 - alpha of the trials (`per_item`, `coverage_at_stop`). That
+all items are right at once is reported too, but it is not what the intervals are calibrated for.
+
+Synthetic families with known truth (`family_pool`), so that the benchmark can fail: equilibrium starts
+(the easy case), a start in a relaxing "crystal" substate, two time scales, and a hidden slow coordinate
+with every replica starting on one side of it.
 
 Observables (each judged separately; a method may stop on the primary one and must then say which
 others are not converged rather than claim them):
@@ -79,7 +105,7 @@ class Targets:
 class Design:
     """What every method may do. The same for all arms, so the comparison is fair."""
 
-    replicas: int = 4              # the agent starts here
+    replicas: int = 3              # the agent starts here (the same as the chat plan of a live run)
     sequential: tuple = (4, 8)     # Sequential-CI arms: this many replicas each, fixed
     chunk_ns: float = 5.0          # sequential_ci looks every chunk_ns; also the agent's first look
     max_ns: float = 100.0          # per replica (the pool length)
@@ -93,6 +119,9 @@ class Design:
     give_up_factor: float = 3.0    # projected cost above this many budgets: give up now
     margin: float = 1.2            # the agent asks for 20% more than the projection
     final_margin: float = 1.6      # before its last look there is no second chance: ask for more
+    burn_in: str = "auto"          # "auto": automated equilibration detection per replica; "none": keep all
+    t_dist: bool = True            # Student's t where the spread between replicas is real (chi-square)
+    pilot_fixed: bool = True       # also run the pilot-then-fixed baseline
 
     def sequential_looks(self, n: int) -> int:
         return max(1, int(math.ceil(min(self.max_ns, self.budget_ns / n) / self.chunk_ns)))
@@ -111,6 +140,7 @@ class BenchPool:
     equilibration_ns: float = 0.6
     source: str = ""
     truth: dict | None = None   # label -> populations, for a model
+    cache: dict = field(default_factory=dict, repr=False)   # (label, replica, first, last frame) -> burn-in
 
     @property
     def n_replicas(self) -> int:
@@ -193,6 +223,102 @@ def model_pool(items: list, n_replicas: int = 16, ns: float = 100.0, ns_per_fram
     return out
 
 
+# Synthetic families with known truth. Each is a continuous-time Markov jump process on hidden states; every hidden
+# state shows as one of two basins (the turn centres). Rates are per ns. "start": "stationary" draws each replica's
+# first state from the equilibrium distribution; an integer starts every replica in that hidden state.
+FAMILIES = {
+    # The easy case: two basins, p = 0.7 / 0.3, about 0.1 to 0.3 ns per visit, replicas start in equilibrium.
+    "equilibrium": {"show": [0, 1], "rates": {(0, 1): 3.0, (1, 0): 7.0}, "start": "stationary"},
+    # Every replica starts in a "crystal" substate of the minor basin that relaxes in about 10 ns and is almost
+    # never visited again: the first part over-counts that basin (initial-structure bias).
+    "biased_start": {"show": [0, 1, 1], "rates": {(0, 1): 3.0, (1, 0): 7.0, (2, 1): 0.1, (1, 2): 0.002},
+                     "start": 2},
+    # Two time scales: inside each of two hidden groups the basins exchange fast (p = 0.8 and 0.3); the groups
+    # exchange about every 2 ns, 50 times slower. Replicas start in equilibrium. Reachable within the budget.
+    "two_timescale": {"show": [0, 1, 0, 1], "rates": {(0, 1): 5.0, (1, 0): 20.0, (2, 3): 17.5, (3, 2): 7.5,
+                                                      (0, 2): 0.5, (2, 0): 0.5, (1, 3): 0.5, (3, 1): 0.5},
+                      "start": "stationary"},
+    # A hidden slow coordinate (groups exchange about every 10 ns) and every replica starts on one side of it.
+    # The first ns look converged at p = 0.8 while the truth is 0.55. A method may stop wrongly here; the family
+    # exists to show whether it does. INSUFFICIENT_EVIDENCE is an acceptable answer.
+    "hidden_slow_start": {"show": [0, 1, 0, 1], "rates": {(0, 1): 5.0, (1, 0): 20.0, (2, 3): 17.5, (3, 2): 7.5,
+                                                          (0, 2): 0.1, (2, 0): 0.1, (1, 3): 0.1, (3, 1): 0.1},
+                          "start": 0},
+}
+
+
+def _generator(spec: dict) -> np.ndarray:
+    k = len(spec["show"])
+    q = np.zeros((k, k))
+    for (i, j), r in spec["rates"].items():
+        q[i, j] = r
+    q[np.diag_indices(k)] = -q.sum(axis=1)
+    return q
+
+
+def family_truth(name: str) -> dict:
+    """The equilibrium basin populations of a family (stationary distribution of its generator, lumped)."""
+    spec = FAMILIES[name]
+    q = _generator(spec)
+    a = np.vstack([q.T, np.ones(len(q))])
+    pi = np.linalg.lstsq(a, np.r_[np.zeros(len(q)), 1.0], rcond=None)[0]
+    shown = np.zeros(2)
+    for h, b in enumerate(spec["show"]):
+        shown[b] += pi[h]
+    return {"betaI": float(shown[0]), "betaII": float(shown[1])}
+
+
+def family_pool(name: str, seed: int = 0, n_replicas: int = 16, ns: float = 100.0, ns_per_frame: float = 0.01,
+                spread_deg: float = 15.0) -> BenchPool:
+    """A pool of one synthetic family (FAMILIES), exact jump-process trajectories sampled every ns_per_frame."""
+    from .basins import TURN_CENTRES
+
+    spec = FAMILIES[name]
+    q = _generator(spec)
+    k, leave = len(q), -np.diag(q)
+    rng = np.random.default_rng(seed)
+    n = int(round(ns / ns_per_frame))
+    times = np.arange(n) * ns_per_frame
+    names = list(TURN_CENTRES)[:2]
+    truth = family_truth(name)
+    if spec["start"] == "stationary":
+        a = np.vstack([q.T, np.ones(k)])
+        pi = np.clip(np.linalg.lstsq(a, np.r_[np.zeros(k), 1.0], rcond=None)[0], 0, None)
+        pi = pi / pi.sum()
+    sts, vals = [], []
+    for _ in range(n_replicas):
+        h = int(rng.choice(k, p=pi)) if spec["start"] == "stationary" else int(spec["start"])
+        t, jumps, hidden = 0.0, [0.0], [h]
+        while t < ns:
+            t += rng.exponential(1.0 / leave[h]) if leave[h] > 0 else ns + 1
+            w = np.clip(q[h], 0, None)
+            h = int(rng.choice(k, p=w / w.sum())) if w.sum() > 0 else h
+            jumps.append(t)
+            hidden.append(h)
+        idx = np.searchsorted(np.asarray(jumps), times, side="right") - 1
+        st = np.asarray(spec["show"])[np.asarray(hidden)[idx]]
+        c = np.array([TURN_CENTRES[names[i]] for i in st], float)
+        vals.append((c + rng.normal(0, spread_deg, c.shape) + 180) % 360 - 180)
+        sts.append(st.astype(int))
+    return BenchPool([name], {name: names}, {name: sts}, {name: vals}, ns_per_frame,
+                     source=f"family {name}, seed {seed}", truth={name: truth})
+
+
+def truth_reference(pool: BenchPool, design: "Design", targets: "Targets") -> dict:
+    """Reference for a model: the known populations and free-energy difference; rates and the landscape from a
+    large independent pool of the same model (all its replicas)."""
+    ref = reference(pool, list(range(pool.n_replicas)), design, targets)
+    for label, r in ref.items():
+        truth = pool.truth[label]
+        names = pool.names[label]
+        r["populations"] = dict(truth)
+        r["se"] = {k: 0.0 for k in truth}
+        pa, pc = truth[names[0]], truth[names[1]]
+        r["dg_kt"] = -math.log(pc / pa) if pa > 0 and pc > 0 else float("inf")
+        r["reference_adequate"] = {**r["reference_adequate"], "populations": True, "dg": True}
+    return ref
+
+
 def select_items(pool: BenchPool, min_transitions: int = 4, at_most: int = 5) -> tuple[list, dict]:
     """The rule that picks the A-Easy items from a PILOT run, never from the pool.
 
@@ -219,22 +345,37 @@ def estimate(pool: BenchPool, label: str, replicas: list, ns: float, design: Des
     """Every observable of one item, from `replicas` up to `ns` (basins.summarize). No reference here."""
     from .basins import summarize
 
+    from .uncertainty import equilibration_start
+
     n, b = pool.frames(ns), pool.frames(design.burn_in_ns) if design.burn_in_ns > 0 else 0
-    return summarize([pool.states[label][i][b:n] for i in replicas],
-                     [pool.values[label][i][b:n] for i in replicas], pool.names[label], pool.ns_per_frame)
+    states, values = [], []
+    for i in replicas:
+        st, val = pool.states[label][i][b:n], pool.values[label][i][b:n]
+        if design.burn_in == "auto":
+            # Only this replica's own frames up to ns: the method decides from its own data.
+            key = (label, i, b, n)
+            if key not in pool.cache:
+                pool.cache[key] = equilibration_start(st, len(pool.names[label]))
+            st, val = st[pool.cache[key]:], val[pool.cache[key]:]
+        states.append(st)
+        values.append(val)
+    return summarize(states, values, pool.names[label], pool.ns_per_frame)
 
 
-def judge_online(est: dict, z: float, targets: Targets) -> dict:
+def judge_online(est: dict, z: float, targets: Targets, t_dist: bool = True) -> dict:
     from .basins import judge
 
     return judge(est, z, targets.population, targets.min_transitions, targets.dg_kt, targets.rate_rel,
-                 targets.landscape_js)
+                 targets.landscape_js, t_dist)
 
 
 def compare_to_reference(est: dict, ref: dict, z: float, targets: Targets) -> dict:
     """Offline: the real error of each observable, and whether the reported interval covered it."""
+    from .basins import state_factors
+
     d = {k: abs(est["populations"][k] - ref["populations"][k]) for k in ref["populations"]}
-    covered = {k: (np.isfinite(est["se"][k]) and d[k] <= z * est["se"][k]) for k in d}
+    zs = state_factors(est, z)          # the interval the method reported (Student's t where it used it)
+    covered = {k: bool(np.isfinite(est["se"][k]) and d[k] <= zs.get(k, z) * est["se"][k]) for k in d}
     dg_err = abs(est["dg_kt"] - ref["dg_kt"]) if np.isfinite(est["dg_kt"]) and np.isfinite(ref["dg_kt"]) else float("inf")
     rate_err = max((abs(r["k_per_ns"] - ref["rates"][k]["k_per_ns"]) / ref["rates"][k]["k_per_ns"]
                     if ref["rates"][k]["k_per_ns"] > 0 else float("inf")) for k, r in est["rates"].items())
@@ -250,13 +391,17 @@ def compare_to_reference(est: dict, ref: dict, z: float, targets: Targets) -> di
 def reference(pool: BenchPool, held: list, design: Design, targets: Targets) -> dict:
     """The in-house reference: held-out replicas at full length. Also says whether it is good enough
     to judge others: its own interval must be at most half of each tolerance."""
+    from .basins import state_factors
+
     z = NormalDist().inv_cdf(1 - targets.alpha / 2)
     out = {}
     for label in pool.labels:
         r = estimate(pool, label, held, pool.ns_per_replica, design)
         moved = min(r["transitions"]) >= targets.min_transitions   # trapped replicas look precise, but are not
+        zs = state_factors(r, z)
         adequate = {
-            "populations": moved and all(np.isfinite(v) and z * v <= targets.population / 2 for v in r["se"].values()),
+            "populations": moved and all(np.isfinite(v) and zs[k] * v <= targets.population / 2
+                                         for k, v in r["se"].items()),
             "dg": moved and np.isfinite(r["dg_se"]) and z * r["dg_se"] <= targets.dg_kt / 2,
             "rates": moved and all(x["n"] > 0 and z * x["rel_se"] <= targets.rate_rel / 2 for x in r["rates"].values()),
             "landscape": moved and r["split_js"] <= targets.landscape_js / 2}
@@ -288,11 +433,13 @@ class Trial:
     outcome: str = ""                               # correct_stop, false_stop, correct_insufficient, over_cautious
     c_hit: float | None = None
     steps: list = field(default_factory=list)
+    # Per item: converged (claimed online), accurate (offline), covered (interval at stop held the reference), error.
+    items: dict = field(default_factory=dict)
 
 
 def _snapshot(pool, order, n, ns, design, targets, ref, z):
     ests = {k: estimate(pool, k, order[:n], ns, design) for k in pool.labels}
-    online = {k: judge_online(e, z, targets) for k, e in ests.items()}
+    online = {k: judge_online(e, z, targets, design.t_dist) for k, e in ests.items()}
     offline = {k: compare_to_reference(e, ref[k], z, targets) for k, e in ests.items()}
     return ests, online, offline
 
@@ -305,6 +452,9 @@ def _close(trial, pool, design, targets, ests, online, offline, n, ns, looks, mo
     trial.population_error = max(offline[k]["population_error"] for k in pool.labels)
     trial.covered = all(offline[k]["covered"] for k in pool.labels)
     trial.covered_share = float(np.mean([offline[k]["covered_share"] for k in pool.labels]))
+    trial.items = {k: {"converged": bool(online[k]["populations"]), "accurate": bool(offline[k]["populations"]),
+                       "covered": bool(offline[k]["covered"]), "error": float(offline[k]["population_error"])}
+                   for k in pool.labels}
     right = trial.offline["populations"]
     trial.outcome = (("correct_stop" if right else "false_stop") if trial.decision == STOP
                      else ("over_cautious" if right else "correct_insufficient"))
@@ -345,7 +495,7 @@ def run_agent(pool, order, design, targets, ref, model) -> Trial:
                     max_ns=min(design.max_ns, pool.ns_per_replica), budget_ns=design.budget_ns,
                     chunk_ns=design.chunk_ns, patience_ns=design.patience_ns, give_up_factor=design.give_up_factor,
                     margin=design.margin, final_margin=design.final_margin, stop_looks=design.agent_looks,
-                    min_transitions=targets.min_transitions)
+                    min_transitions=targets.min_transitions, t_dist=design.t_dist)
     n, ns, looks, tests, t = design.replicas, design.chunk_ns, 0, 0, Trial("agent")
     while True:
         looks += 1
@@ -364,6 +514,43 @@ def run_agent(pool, order, design, targets, ref, model) -> Trial:
                         "next_replicas": step.replicas, "next_ns": round(step.ns, 3), "why": step.reason})
         n, ns = step.replicas, step.ns
     _close(t, pool, design, targets, ests, online, offline, n, ns, looks, model)
+    return t
+
+
+def run_pilot_fixed(pool, order, design, targets, ref, model) -> Trial:
+    """A practitioner's plan: a pilot of design.replicas x chunk_ns, one projection (the agent's own `allocate`, with
+    the same margin), then that fixed plan run to the end and judged once. Without enough state changes in the
+    pilot, or with no plan within the limits, it runs its replicas for the whole budget, as people do."""
+    z1 = z_bonferroni(targets.alpha, 1)          # one look that may stop: the final one
+    n, ns, t = design.replicas, design.chunk_ns, Trial("pilot_fixed")
+    max_n, max_ns = min(design.max_replicas, len(order)), min(design.max_ns, pool.ns_per_replica)
+    ests, online, offline = _snapshot(pool, order, n, ns, design, targets, ref, z1)
+    t.path.append((cost_mod.of([ns] * n, model, looks=1).compute_ns,
+                   max(offline[k]["population_error"] for k in pool.labels),
+                   all(offline[k]["populations"] for k in pool.labels)))
+    adequate = all(min(ests[k]["transitions"]) >= targets.min_transitions for k in pool.labels)
+    plan = (allocate([{"within": ests[k]["within"], "between": ests[k]["between"]} for k in pool.labels], n, ns, z1,
+                     targets.population, max_n, max_ns, pool.equilibration_ns, design.t_dist) if adequate else None)
+    if plan is None:
+        m, length = n, min(max_ns, design.budget_ns / n)
+        why = "no usable projection from the pilot: the whole budget"
+    else:
+        m, length = plan[0], min(max_ns, plan[1] * design.margin)
+        if m * length > design.budget_ns:
+            length = max(ns, design.budget_ns / m)
+        why = f"pilot projection: {m} replicas of {plan[1]:.1f} ns (plus a {design.margin - 1:.0%} margin)"
+    length = max(ns, length)
+    t.steps.append({"look": 1, "planning": True, "replicas": n, "ns": round(ns, 3), "next_replicas": m,
+                    "next_ns": round(length, 3), "why": why})
+    ests, online, offline = _snapshot(pool, order, m, length, design, targets, ref, z1)
+    t.path.append((cost_mod.of([length] * m, model, looks=2).compute_ns,
+                   max(offline[k]["population_error"] for k in pool.labels),
+                   all(offline[k]["populations"] for k in pool.labels)))
+    if all(online[k]["populations"] for k in pool.labels):
+        t.decision, t.reason = STOP, "the fixed plan reached the precision at its one final look"
+    else:
+        t.decision, t.reason = INSUFFICIENT, "the fixed plan did not reach the precision"
+    _close(t, pool, design, targets, ests, online, offline, m, length, 2, model)
     return t
 
 
@@ -397,33 +584,68 @@ def _q(values, q):
     return float(np.quantile(v, q)) if v else float("nan")
 
 
-def run(pool: BenchPool, design: Design | None = None, targets: Targets | None = None, trials: int = 50,
-        holdout: int = 6, seed: int = 0, n_parallel: int = 1, ns_per_day: float = 0.0) -> dict:
-    """The whole experiment: reference, every arm over `trials` replica draws, summaries and the verdict."""
+def run(pool: BenchPool | None, design: Design | None = None, targets: Targets | None = None, trials: int = 50,
+        holdout: int = 6, seed: int = 0, n_parallel: int = 1, ns_per_day: float = 0.0, pool_factory=None,
+        disjoint: bool = False) -> dict:
+    """The whole experiment: reference, every arm over the trials, summaries and the verdict.
+
+    pool_factory(seed) -> BenchPool with known truth: every trial gets a fresh pool (independent trials) and the
+    reference is the truth. disjoint: trials use groups of the pool that share no replica (independent, but few).
+    Otherwise trials draw from one shared pool and the summary says how few independent units that is.
+    """
     design, targets = design or Design(), targets or Targets()
+    need = max([design.replicas, design.max_replicas, *design.families, *design.sequential])
+    if pool_factory is not None:
+        pool = pool_factory(seed)
+        ref = truth_reference(pool_factory(seed + 10_000), design, targets)
+        held, usable = [], list(range(pool.n_replicas))
+    else:
+        if holdout < 2:
+            raise ValueError("the reference needs at least 2 held-out replicas.")
+        held = sorted(random.Random(seed).sample(range(pool.n_replicas), holdout))
+        usable = [i for i in range(pool.n_replicas) if i not in held]
+        ref = reference(pool, held, design, targets)
     model = cost_mod.CostModel(equilibration_ns=pool.equilibration_ns, n_parallel=n_parallel, ns_per_day=ns_per_day)
-    if holdout < 2:
-        raise ValueError("the reference needs at least 2 held-out replicas.")
-    held = sorted(random.Random(seed).sample(range(pool.n_replicas), holdout))
-    usable = [i for i in range(pool.n_replicas) if i not in held]
-    need = max(design.replicas, *design.families, *design.sequential)
-    if len(usable) < need:
-        raise ValueError(f"{len(usable)} pool replicas are left for the methods, but a method needs {need}. "
+    least = max([design.replicas, *design.families, *design.sequential])
+    if len(usable) < least:
+        raise ValueError(f"{len(usable)} pool replicas are left for the methods, but a method needs {least}. "
                          "Use a larger pool or a smaller --holdout.")
     design.max_replicas = min(design.max_replicas, len(usable))
-    ref = reference(pool, held, design, targets)
+    need = min(need, len(usable))
+    if pool_factory is not None:
+        mode, units = "fresh_pools", trials
+        note = "every trial has its own newly generated pool; the reference is the known truth"
+    elif disjoint:
+        groups = [usable[i:i + need] for i in range(0, len(usable) - need + 1, need)]
+        trials = min(trials, len(groups))
+        mode, units = "disjoint_groups", trials
+        note = f"trials use groups of {need} replicas that share no replica"
+    else:
+        mode, units = "shared_pool", max(1, len(usable) // need)
+        note = (f"trials draw from the same {len(usable)} replicas and share most of them; only about {units} "
+                "independent group(s) of data exist, and the intervals use that number")
     rng = random.Random(seed + 1)
-    adaptive = {**{f"sequential_ci_{n}": [] for n in design.sequential}, "agent": []}
+    adaptive = {**{f"sequential_ci_{n}": [] for n in design.sequential},
+                **({"pilot_fixed": []} if design.pilot_fixed else {}), "agent": []}
     fixed = {n: [] for n in design.families}
     for k in range(trials):
-        order = list(usable)
-        rng.shuffle(order)
+        if pool_factory is not None:
+            pool_k = pool if k == 0 else pool_factory(seed + k)
+            order = list(range(pool_k.n_replicas))
+        elif disjoint:
+            pool_k, order = pool, list(groups[k])
+        else:
+            pool_k, order = pool, list(usable)
+            rng.shuffle(order)
         for n in design.sequential:
-            adaptive[f"sequential_ci_{n}"].append(run_sequential_ci(pool, order, design, targets, ref, model, n))
-        adaptive["agent"].append(run_agent(pool, order, design, targets, ref, model))
+            adaptive[f"sequential_ci_{n}"].append(run_sequential_ci(pool_k, order, design, targets, ref, model, n))
+        if design.pilot_fixed:
+            adaptive["pilot_fixed"].append(run_pilot_fixed(pool_k, order, design, targets, ref, model))
+        adaptive["agent"].append(run_agent(pool_k, order, design, targets, ref, model))
         for n in design.families:
-            fixed[n].append(scan_fixed(pool, order, n, design, targets, ref, model))
+            fixed[n].append(scan_fixed(pool_k, order, n, design, targets, ref, model))
     out = {"design": asdict(design), "targets": asdict(targets), "trials": trials, "seed": seed,
+           "independence": {"mode": mode, "units": units, "note": note},
            "pool": {"source": pool.source, "replicas": pool.n_replicas, "ns_per_replica": pool.ns_per_replica,
                     "items": pool.labels, "held_out": held, "equilibration_ns": pool.equilibration_ns},
            "cost_model": asdict(model),
@@ -438,8 +660,14 @@ def run(pool: BenchPool, design: Design | None = None, targets: Targets | None =
     return out
 
 
+def _interval(rate: float, units: int) -> list:
+    """Wilson interval of a rate as if it came from `units` independent trials (the honest sample size)."""
+    return wilson(int(round(rate * units)), units)
+
+
 def summarize(out: dict) -> dict:
     tg = out["targets"]
+    units = out.get("independence", {}).get("units") or len(next(iter(out["arms"].values()), [])) or 1
     s = {}
     for arm, ts in out["arms"].items():
         n = len(ts)
@@ -448,12 +676,28 @@ def summarize(out: dict) -> dict:
         stops = cnt["correct_stop"] + cnt["false_stop"]
         compute = [t["cost"]["compute_ns"] for t in ts]
         ratio = [t["cost"]["compute_ns"] / t["c_hit"] for t in ts if t["outcome"] == "correct_stop" and t["c_hit"]]
+        u = min(units, n)
+        stopped = [t for t in ts if t["decision"] == STOP]
+        per_item = {}
+        for label in (ts[0].get("items") or {}) if ts else {}:
+            claimed = [t for t in stopped if t["items"][label]["converged"]]
+            per_item[label] = {
+                "claimed": len(claimed),
+                "success_rate": sum(t["items"][label]["accurate"] for t in claimed) / n,
+                "accurate_when_claimed": (sum(t["items"][label]["accurate"] for t in claimed) / len(claimed)
+                                          if claimed else float("nan")),
+                "coverage_at_stop": (float(np.mean([t["items"][label]["covered"] for t in claimed]))
+                                     if claimed else float("nan")),
+                "error_median": _q([t["items"][label]["error"] for t in claimed], 0.5)}
         s[arm] = {
-            "trials": n, **{o: c for o, c in cnt.items()},
-            "success_rate": cnt["correct_stop"] / n, "success_interval": wilson(cnt["correct_stop"], n),
-            "false_stop_rate": cnt["false_stop"] / n, "false_stop_interval": wilson(cnt["false_stop"], n),
+            "trials": n, "independent_units": u, **{o: c for o, c in cnt.items()},
+            "success_rate": cnt["correct_stop"] / n, "success_interval": _interval(cnt["correct_stop"] / n, u),
+            "false_stop_rate": cnt["false_stop"] / n, "false_stop_interval": _interval(cnt["false_stop"] / n, u),
             "false_stop_share_of_stops": cnt["false_stop"] / stops if stops else 0.0,
             "coverage": float(np.mean([t["covered"] for t in ts])),
+            # The calibration claim: at the moment a method stops, does its interval hold the reference?
+            "coverage_at_stop": float(np.mean([t["covered"] for t in stopped])) if stopped else float("nan"),
+            "per_item": per_item,
             "compute_ns_median": _q(compute, 0.5), "compute_ns_iqr": [_q(compute, 0.25), _q(compute, 0.75)],
             "aggregate_ns_median": _q([t["cost"]["aggregate_ns"] for t in ts], 0.5),
             "wall_ns_median": _q([t["cost"]["wall_ns"] for t in ts], 0.5),
@@ -507,7 +751,7 @@ def verdict(out: dict, bootstrap: int = 4000) -> dict:
     a = s["agent"]
     c1 = a["success_rate"] >= tg["reliability"] and a["false_stop_rate"] <= tg["false_stop_max"]
     seq = {}
-    for arm in (k for k in out["arms"] if k.startswith("sequential_ci")):
+    for arm in (k for k in out["arms"] if k.startswith("sequential_ci") or k == "pilot_fixed"):
         q = s[arm]
         reliable = q["success_rate"] >= tg["reliability"] and q["false_stop_rate"] <= tg["false_stop_max"]
         ag = [t["cost"]["compute_ns"] for t in out["arms"]["agent"]]
@@ -523,6 +767,7 @@ def verdict(out: dict, bootstrap: int = 4000) -> dict:
                     # better by being right, if it is reliable itself.
                     "agent_better": (interval[0] > 0) if reliable else c1}
     c2 = bool(seq) and all(v["agent_better"] for v in seq.values())
+    pilot = seq.pop("pilot_fixed", None)
     fam = {}
     for n, f in s["fixed"].items():
         if f["reliable_compute_ns"] is None:
@@ -545,19 +790,74 @@ def verdict(out: dict, bootstrap: int = 4000) -> dict:
             "compute_ns": cost_full, "accurate_rate": f["accurate_rate"][i],
             "agent_saving": round(1 - a["compute_ns_median"] / cost_full, 3) if cost_full else None}
     failed = [why for ok, why in ((c1, "not reliable enough"),
-                                  (c2, "not better than every Sequential-CI arm at the same reliability"),
+                                  (c2, "not better than every Sequential-CI arm and the pilot-then-fixed plan "
+                                       "at the same reliability"),
                                   (c3, "not cheaper than every fixed plan at the same reliability")) if not ok]
     result = ("reference_inadequate" if not ref_ok else "supported" if not failed else "not_supported")
     return {"result": result, "failed": failed if ref_ok else ["the reference is not precise enough"],
-            "reliable": c1, "vs_sequential_ci": seq, "better_than_sequential_ci": c2,
+            "reliable": c1, "vs_sequential_ci": seq, "vs_pilot_fixed": pilot, "better_than_sequential_ci": c2,
+            "independence": out.get("independence", {}),
             "vs_fixed": fam, "cheaper_than_fixed": c3, "vs_literature_protocols": literature}
+
+
+# ---------------------------------------------------------------------------------------------
+# Sensitivity: does the conclusion depend on the constants that were set by judgement?
+
+SENSITIVITY = {"margin": (1.0, 1.2, 1.5), "final_margin": (1.3, 1.6, 2.0), "give_up_factor": (2.0, 3.0, 5.0),
+               "agent_looks": (2, 3, 5), "replicas": (2, 3, 4), "min_transitions": (2, 4, 8)}
+
+
+def sensitivity(families: list, design: Design | None = None, targets: Targets | None = None, trials: int = 20,
+                seed: int = 0, constants: dict | None = None, n_replicas: int = 16, ns: float = 100.0) -> list[dict]:
+    """The agent on each synthetic family (fresh pool per trial), changing one constant at a time from the default.
+
+    Returns one row per (family, constant, value): success, false stops, coverage at stop, median compute. Only the
+    agent runs (no baselines), so this is cheap enough to repeat. min_transitions is a Targets field; the others
+    are Design fields.
+    """
+    import dataclasses
+
+    base_d, base_t = design or Design(), targets or Targets()
+    rows = []
+    for fam in families:
+        def factory(sd, fam=fam):
+            return family_pool(fam, sd, n_replicas, ns)
+        for name, values in (constants or SENSITIVITY).items():
+            for value in values:
+                d = dataclasses.replace(base_d, sequential=(), families=(), pilot_fixed=False)
+                t = dataclasses.replace(base_t)
+                if name == "min_transitions":
+                    t = dataclasses.replace(t, min_transitions=int(value))
+                else:
+                    d = dataclasses.replace(d, **{name: type(getattr(d, name))(value)})
+                out = run(None, d, t, trials=trials, seed=seed, pool_factory=factory)
+                a = out["summary"]["agent"]
+                rows.append({"family": fam, "constant": name, "value": value,
+                             "default": (getattr(base_t, name) if name == "min_transitions" else getattr(base_d, name)),
+                             "success_rate": a["success_rate"], "false_stop_rate": a["false_stop_rate"],
+                             "coverage_at_stop": a["coverage_at_stop"], "compute_ns_median": a["compute_ns_median"],
+                             "trials": trials})
+    return rows
+
+
+def sensitivity_markdown(rows: list[dict]) -> str:
+    L = ["# Experiment A: sensitivity to the agent's constants", "",
+         "One constant changed at a time; fresh pool per trial (independent trials); reference = known truth.", "",
+         "| Family | Constant | Value | Success | False stop | Coverage at stop | Compute ns (median) |",
+         "|---|---|---|---|---|---|---|"]
+    for r in rows:
+        cov = "-" if not np.isfinite(r["coverage_at_stop"]) else f"{r['coverage_at_stop']:.0%}"
+        mark = " (default)" if r["value"] == r["default"] else ""
+        L.append(f"| {r['family']} | {r['constant']} | {r['value']:g}{mark} | {r['success_rate']:.0%} | "
+                 f"{r['false_stop_rate']:.0%} | {cov} | {r['compute_ns_median']:.0f} |")
+    return "\n".join(L) + "\n"
 
 
 # ---------------------------------------------------------------------------------------------
 # Output: experiment_A.json, experiment_A.md, cost_accuracy.csv and cost_accuracy.svg.
 
 ARM_TITLES = {"agent": "MD Agent", "sequential_ci_4": "Sequential-CI, 4 replicas",
-              "sequential_ci_8": "Sequential-CI, 8 replicas"}
+              "sequential_ci_8": "Sequential-CI, 8 replicas", "pilot_fixed": "Pilot, then a fixed plan"}
 
 
 def _arm_title(arm: str) -> str:
@@ -732,7 +1032,11 @@ def markdown(out: dict, svg_name: str, csv_name: str) -> str:
     L = [f"# Experiment A: budget allocation for unbiased MD", "",
          f"Written {time.strftime('%Y-%m-%d %H:%M')}. Pool: {out['pool']['source']} — {out['pool']['replicas']} "
          f"replicas of {out['pool']['ns_per_replica']:g} ns; items {', '.join(out['pool']['items'])}; "
-         f"{len(out['pool']['held_out'])} replicas held out as the reference.", "",
+         + (f"{len(out['pool']['held_out'])} replicas held out as the reference." if out["pool"]["held_out"] else
+          "Reference: the known truth (populations, dG) and a large independent pool (rates, landscape)."), "",
+         f"Independent units: **{out.get('independence', {}).get('units', '?')}** "
+         f"({out.get('independence', {}).get('mode', 'shared_pool')}: {out.get('independence', {}).get('note', '')}). "
+         "Every interval over trials below uses this number, not the number of trials.", "",
          f"## Verdict: {v['result']}（{zh}）", ""]
     if v["failed"]:
         L.append("Failed: " + "; ".join(v["failed"]) + ".")
@@ -746,6 +1050,12 @@ def markdown(out: dict, svg_name: str, csv_name: str) -> str:
           ]
     for arm, x in v["vs_sequential_ci"].items():
         L.append(f"- **Against {_arm_title(arm)}** (success {x['success_rate']:.0%}): paired saving "
+                 f"{x['saving_mean']:.0%}, 95% interval {x['saving_interval']} → "
+                 f"{'agent better' if x['agent_better'] else 'agent not better'}"
+                 + ("" if x["reliable"] else " (this baseline is not reliable itself)") + ".")
+    if v.get("vs_pilot_fixed"):
+        x = v["vs_pilot_fixed"]
+        L.append(f"- **Against a pilot, then a fixed plan** (success {x['success_rate']:.0%}): paired saving "
                  f"{x['saving_mean']:.0%}, 95% interval {x['saving_interval']} → "
                  f"{'agent better' if x['agent_better'] else 'agent not better'}"
                  + ("" if x["reliable"] else " (this baseline is not reliable itself)") + ".")
@@ -763,20 +1073,35 @@ def markdown(out: dict, svg_name: str, csv_name: str) -> str:
           f"![cost and accuracy]({svg_name})", "",
           f"The numbers behind the figure: `{csv_name}`.", "",
           "## Methods", "",
-          "| Method | Success | False stop | Insufficient | Coverage | Compute ns (median, IQR) | Replicas × ns | Looks | C_stop / C_hit |",
+          "| Method | Success | False stop | Insufficient | Coverage at stop | Compute ns (median, IQR) | Replicas × ns | Looks | C_stop / C_hit |",
           "|---|---|---|---|---|---|---|---|---|"]
     for arm in out["arms"]:
         x = s[arm]
+        cov = x.get("coverage_at_stop", float("nan"))
+        cov = "-" if not np.isfinite(cov) else f"{cov:.0%}"
         L.append(f"| {_arm_title(arm)} | {x['success_rate']:.0%} | {x['false_stop_rate']:.0%} | "
-                 f"{x['correct_insufficient'] + x['over_cautious']} | {x['coverage']:.0%} | "
+                 f"{x['correct_insufficient'] + x['over_cautious']} | {cov} | "
                  f"{x['compute_ns_median']:.0f} ({x['compute_ns_iqr'][0]:.0f}–{x['compute_ns_iqr'][1]:.0f}) | "
                  f"{x['replicas_median']:g} × {x['ns_per_replica_median']:.0f} | {x['looks_median']:g} | "
                  f"{x['stop_over_hit_median']:.2f} |")
     L += ["", "Success = STOP with an accurate answer. False stop = STOP with a wrong answer (premature "
           "convergence). Insufficient = INSUFFICIENT_EVIDENCE, which is the right answer when the data cannot "
-          "support a conclusion. Coverage = the reference lies inside the reported interval. C_hit = the cost at "
+          "support a conclusion. Coverage at stop = among the trials where the method stopped, the share in which "
+          f"the reference lay inside every reported interval (calibrated for ≥ {1 - tg['alpha']:.0%} per estimand). "
+          "C_hit = the cost at "
           "which the answer first became accurate and stayed so along the method's own path; C_stop / C_hit near 1 "
           "means it stopped as soon as it could have.", "",
+          "## Per item (the calibrated claim)", "",
+          "| Method | Item | Claimed | Accurate when claimed | Coverage at stop | Median error |", "|---|---|---|---|---|---|"]
+    for arm in out["arms"]:
+        for label, x in s[arm].get("per_item", {}).items():
+            acc, cov, err = x["accurate_when_claimed"], x["coverage_at_stop"], x["error_median"]
+            acc = "-" if not np.isfinite(acc) else f"{acc:.0%}"
+            cov = "-" if not np.isfinite(cov) else f"{cov:.0%}"
+            err = "-" if not np.isfinite(err) else f"{err:.3f}"
+            L.append(f"| {_arm_title(arm)} | {label} | {x['claimed']} | {acc} | {cov} | {err} |")
+    L += ["", "The intervals are calibrated per estimand (per item and state), not for all items at once; that all "
+          "items are right together is the Success column above.", "",
           "## Other observables (judged separately)", "",
           "| Method | dG claimed / wrong | Rates claimed / wrong | Landscape claimed / wrong |", "|---|---|---|---|"]
     for arm in out["arms"]:
@@ -801,6 +1126,9 @@ def markdown(out: dict, svg_name: str, csv_name: str) -> str:
           f"- Tolerances: populations {tg['population']:g}, dG {tg['dg_kt']:g} kT, rates {tg['rate_rel']:.0%}, "
           f"landscape JS {tg['landscape_js']:g} bits; alpha {tg['alpha']:g}; at least {tg['min_transitions']} "
           "transitions per replica before an occupancy counts.",
+          f"- Every method: burn-in {d.get('burn_in', 'none')} (auto = automated equilibration detection per replica, "
+          f"Chodera 2016; the cut part is still paid for); Student's t where the replica spread is real (chi-square): "
+          f"{'yes' if d.get('t_dist') else 'no'}.",
           f"- Agent: starts with {d['replicas']} replicas; one planning look at {d['chunk_ns']:g} ns that may not stop; "
           f"then at most {d['agent_looks']} looks that may stop, intervals calibrated for that many (Bonferroni); "
           f"budget {d['budget_ns']:g} ns, at most {d['max_replicas']} replicas of {d['max_ns']:g} ns.",
@@ -808,6 +1136,8 @@ def markdown(out: dict, svg_name: str, csv_name: str) -> str:
           "intervals calibrated for all its looks.",
           "- Fixed plans: " + ", ".join(f"{n} replica(s)" for n in d["families"]) + f", scanned every {d['scan_ns']:g} ns.",
           "- New replicas start from the same prepared structure with new seeds; no method restarts from a chosen "
-          "frame. The trials take different replicas out of one pool, so they are not fully independent experiments.",
+          "frame.",
+          "- Pilot, then a fixed plan: the agent's first look and projection, then that plan run to its end and "
+          "judged once.",
           ""]
     return "\n".join(L)

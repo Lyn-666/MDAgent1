@@ -183,6 +183,12 @@ def _write_report(run_dir: Path) -> None:
          "and the open questions.", "done")
 
 
+def burn_in_default(args) -> str:
+    """--burn-in if given; otherwise "auto" for projection allocation (review revision, 2026-11-23), else "none"."""
+    return getattr(args, "burn_in", None) or ("auto" if getattr(args, "allocation", "rounds") == "projection"
+                                               else "none")
+
+
 def _goal_from_args(args):
     from .agent import PERMISSIONS, Goal
 
@@ -442,6 +448,7 @@ def cmd_run(args) -> int:
         extend_ns=args.extend_ns if args.extend_ns is not None else max(5.0, round(args.max_ns / 20.0)),
         max_ns=args.max_ns,
         no_flip_patience_ns=args.no_flip_patience_ns,
+        burn_in=burn_in_default(args),
     )
     state = RunState(
         pdb=str(args.pdb),
@@ -677,6 +684,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Length of each later round per replica (ns). Default: 5, or 1/20 of --max-ns for long "
                         "budgets, so that there are about 20 decision points.")
     r.add_argument("--max-ns", type=float, default=20.0, help="Budget: total length per replica (ns).")
+    r.add_argument("--burn-in", default=None, choices=["auto", "none"],
+                   help="auto: leave out each replica's first, non-equilibrated part before judging (automated "
+                        "equilibration detection, Chodera 2016; the part is still counted as cost). none: keep "
+                        "everything. Default: auto with --allocation projection, none otherwise.")
     r.add_argument("--no-flip-patience-ns", type=float, default=None,
                    help="Give up on plain MD for an item that has not changed state after this (ns per replica). "
                         "Default: decide from the budget: stop waiting when, even at the highest rate the data "
@@ -861,6 +872,18 @@ def build_parser() -> argparse.ArgumentParser:
     ea.add_argument("--model", default=None,
                     help="Instead of a run: model items with known populations, 'populations@rate per ns', "
                          "separated by ';', for example '0.7,0.3@8'. Needs no GPU.")
+    ea.add_argument("--family", default=None,
+                    help="A synthetic family with known truth (no GPU): equilibrium, biased_start, two_timescale, "
+                         "hidden_slow_start. Every trial gets a fresh pool, so trials are independent.")
+    ea.add_argument("--sensitivity", default=None,
+                    help="Comma-separated families: run only the agent, changing one constant at a time "
+                         "(margin, final_margin, give_up_factor, agent_looks, replicas, min_transitions).")
+    ea.add_argument("--disjoint", action="store_true",
+                    help="With --run or --model: trials use groups of replicas that share no replica (independent "
+                         "trials, but few). Without it the trials share one pool and the report says so.")
+    ea.add_argument("--burn-in", default="auto", choices=["auto", "none"],
+                    help="auto (default): leave out each replica's non-equilibrated start (automated detection, the "
+                         "same for every method). none: keep everything.")
     ea.add_argument("--model-replicas", type=int, default=16)
     ea.add_argument("--model-ns", type=float, default=100.0)
     ea.add_argument("--select", action="store_true",
@@ -869,7 +892,7 @@ def build_parser() -> argparse.ArgumentParser:
     ea.add_argument("--trials", type=int, default=50)
     ea.add_argument("--holdout", type=int, default=6)
     ea.add_argument("--seed", type=int, default=0)
-    ea.add_argument("--replicas", type=int, default=4, help="The agent starts with this many replicas.")
+    ea.add_argument("--replicas", type=int, default=3, help="The agent starts with this many replicas.")
     ea.add_argument("--sequential", default="4,8", help="Replica counts of the Sequential-CI arms.")
     ea.add_argument("--families", default="1,3,4,5,8", help="Replica counts of the fixed plans.")
     ea.add_argument("--chunk-ns", type=float, default=5.0)
@@ -1058,12 +1081,42 @@ def cmd_budget(args) -> int:
 
 
 def cmd_experiment_a(args) -> int:
-    from .experiment_a import Design, Targets, model_pool, pool_from_run, run, select_items, write_outputs
+    from .experiment_a import (FAMILIES, Design, Targets, family_pool, model_pool, pool_from_run, run, select_items,
+                               sensitivity, sensitivity_markdown, write_outputs)
 
     def ints(text):
         return tuple(int(x) for x in text.split(",") if x.strip())
 
-    if args.model:
+    factory = None
+    for fam in ([args.family] if args.family else []) + [f for f in (args.sensitivity or "").split(",") if f.strip()]:
+        if fam not in FAMILIES:
+            print(f"Unknown family {fam!r}. Use one of {', '.join(FAMILIES)}.")
+            return 2
+    design = Design(replicas=args.replicas, sequential=ints(args.sequential), families=ints(args.families),
+                    chunk_ns=args.chunk_ns, max_ns=args.max_ns, budget_ns=args.budget_ns,
+                    max_replicas=args.max_replicas, agent_looks=args.agent_looks, burn_in_ns=args.burn_in_ns,
+                    burn_in=args.burn_in)
+    targets = Targets(population=args.population, dg_kt=args.dg_kt, rate_rel=args.rate_rel,
+                      landscape_js=args.landscape_js, alpha=args.alpha, reliability=args.reliability,
+                      false_stop_max=args.false_stop_max)
+    if args.sensitivity:
+        import json as _json
+
+        rows = sensitivity([f.strip() for f in args.sensitivity.split(",") if f.strip()], design, targets,
+                           trials=args.trials, seed=args.seed, n_replicas=args.model_replicas, ns=args.model_ns)
+        out_dir = Path(args.out or "runs/experiment_A_model")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / f"{args.name}_sensitivity.json").write_text(_json.dumps(rows, indent=1))
+        (out_dir / f"{args.name}_sensitivity.md").write_text(sensitivity_markdown(rows), encoding="utf-8")
+        print(sensitivity_markdown(rows))
+        print(f"Written: {(out_dir / (args.name + '_sensitivity.md')).resolve()}")
+        return 0
+    if args.family:
+        def factory(sd):
+            return family_pool(args.family, sd, args.model_replicas, args.model_ns)
+        pool = None
+        out_dir = Path(args.out or "runs/experiment_A_model")
+    elif args.model:
         items = []
         for chunk in [c for c in args.model.split(";") if c.strip()]:
             pops, _, rate = chunk.partition("@")
@@ -1074,9 +1127,9 @@ def cmd_experiment_a(args) -> int:
         pool = pool_from_run(args.run, args.observables)
         out_dir = Path(args.out or args.run)
     else:
-        print("Give --run with --observables (a pool run), or --model (no GPU).")
+        print("Give --run with --observables (a pool run), or --model or --family (no GPU).")
         return 2
-    if args.select:
+    if args.select and pool is not None:
         chosen, counts = select_items(pool, at_most=args.at_most)
         for k, c in counts.items():
             print(f"{k:<14} transitions per replica {c}" + ("  <- chosen" if k in chosen else ""))
@@ -1085,20 +1138,19 @@ def cmd_experiment_a(args) -> int:
             Path(args.out).write_text(";".join(chosen) + "\n")
             print(f"Written: {Path(args.out).resolve()}")
         return 0 if chosen else 1
-    design = Design(replicas=args.replicas, sequential=ints(args.sequential), families=ints(args.families),
-                    chunk_ns=args.chunk_ns, max_ns=args.max_ns, budget_ns=args.budget_ns,
-                    max_replicas=args.max_replicas, agent_looks=args.agent_looks, burn_in_ns=args.burn_in_ns)
-    targets = Targets(population=args.population, dg_kt=args.dg_kt, rate_rel=args.rate_rel,
-                      landscape_js=args.landscape_js, alpha=args.alpha, reliability=args.reliability,
-                      false_stop_max=args.false_stop_max)
-    print(f"Pool: {pool.source}; {pool.n_replicas} replicas of {pool.ns_per_replica:g} ns; items {', '.join(pool.labels)}.")
+    if pool is not None:
+        print(f"Pool: {pool.source}; {pool.n_replicas} replicas of {pool.ns_per_replica:g} ns; "
+              f"items {', '.join(pool.labels)}.")
     out = run(pool, design, targets, trials=args.trials, holdout=args.holdout, seed=args.seed,
-              n_parallel=args.parallel, ns_per_day=args.ns_per_day)
+              n_parallel=args.parallel, ns_per_day=args.ns_per_day, pool_factory=factory, disjoint=args.disjoint)
     v = out["verdict"]
+    ind = out["independence"]
+    print(f"Independent units: {ind['units']} ({ind['mode']}: {ind['note']}).")
     print(f"\nVerdict: {v['result']}" + (f" ({'; '.join(v['failed'])})" if v["failed"] else ""))
     for arm, s in out["summary"].items():
         if arm != "fixed":
             print(f"  {arm:<16} success {s['success_rate']:.0%}  false stops {s['false_stop_rate']:.0%}  "
+                  f"coverage at stop {s['coverage_at_stop']:.0%}  "
                   f"compute {s['compute_ns_median']:.0f} ns  ({s['replicas_median']:g} x {s['ns_per_replica_median']:.0f} ns)")
     for path in write_outputs(out, out_dir, args.name):
         print(f"Written: {path.resolve()}")

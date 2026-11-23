@@ -54,6 +54,9 @@ class Limits:
     final_margin: float = 1.6
     stop_looks: int = 3
     min_transitions: int = 4
+    # Student's t (n - 1 degrees of freedom) instead of z where the replica spread is real. True when z is the
+    # factor of a confidence interval; False for the plain standard-error criterion (z = 1 is not an interval).
+    t_dist: bool = False
 
 
 @dataclass
@@ -86,24 +89,31 @@ def chi2_quantile(p: float, k: int) -> float:
 
 
 def allocate(items: list, n: int, ns: float, z: float, tolerance: float, max_n: int, max_ns: float,
-             equil_ns: float):
+             equil_ns: float, t_dist: bool = False):
     """The cheapest (replicas, ns per replica) projected to reach the precision, or None.
 
     `items` are ItemState (or dicts with "within" and "between"). Lengths cannot shrink.
+    t_dist: where the spread between replicas is real (uncertainty.replica_spread_real, the same test as the
+    verdict in basins.judge and diagnose.judge), the interval of m replicas uses Student's t with m - 1
+    degrees of freedom (uncertainty.t_factor), so more replicas also narrow the factor itself.
     Returns (replicas, ns per replica, projected compute ns).
     """
+    from .uncertainty import t_factor
+
     def part(i, k):
         return i[k] if isinstance(i, dict) else getattr(i, k)
 
+    from .uncertainty import replica_spread_real
+
     best = None
-    limit = chi2_quantile(0.95, n - 1) / (n - 1) if n > 1 else float("inf")
     for m in range(n, max_n + 1):
         need = 0.0
         for i in items:
             w, b = part(i, "within"), part(i, "between")
-            real = w > 0 and (b * b) / (w * w) > limit
+            real = replica_spread_real(w, b, n)
             extra = (b * b - w * w) * n / m if real else 0.0     # shrinks with more replicas only
-            room = (tolerance / z) ** 2 - extra
+            zm = t_factor(z, m - 1) if (t_dist and real) else z
+            room = (tolerance / zm) ** 2 - extra
             if room <= 0:
                 need = float("inf")
                 break
@@ -117,7 +127,9 @@ def allocate(items: list, n: int, ns: float, z: float, tolerance: float, max_n: 
     return best
 
 
-RULE_VERSION = 4   # Raised when the rule changes, so a resumed run decides again under the new rule.
+# Raised when the rule changes, so a resumed run decides again under the new rule.
+# 5 (2026-11-23): Student's t where the replica spread is real; automated burn-in in projection runs.
+RULE_VERSION = 5
 
 
 def stuck_projection(n: int, ns: float, z: float, tolerance: float) -> tuple[float, float, float]:
@@ -161,7 +173,7 @@ def _next_step(items: list, n: int, ns: float, look: int, tests_before: int, z: 
         for i in items:
             if i.label in aside or i.converged or not (i.transitions and min(i.transitions) >= limits.min_transitions):
                 continue
-            own = allocate([i], n, ns, z, tolerance, max_n, max_ns, equil_ns)
+            own = allocate([i], n, ns, z, tolerance, max_n, max_ns, equil_ns, limits.t_dist)
             if own is None or own[2] > limits.give_up_factor * limits.budget_ns:
                 aside[i.label] = "hopeless"
     active = [i for i in items if i.label not in aside]
@@ -202,7 +214,7 @@ def _next_step(items: list, n: int, ns: float, look: int, tests_before: int, z: 
         new_ns = min(max_ns, (4 if last else 2) * ns)
         why = "too few state changes to trust the errors yet; running longer"
     else:
-        plan = allocate(active, n, ns, z, tolerance, max_n, max_ns, equil_ns)
+        plan = allocate(active, n, ns, z, tolerance, max_n, max_ns, equil_ns, limits.t_dist)
         if plan is None or plan[2] > limits.give_up_factor * limits.budget_ns:
             if spent < limits.budget_ns / 4:
                 plan = (n, min(max_ns, max(2 * ns, limits.budget_ns / 4 / n)), 0.0)

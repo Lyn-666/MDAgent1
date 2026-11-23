@@ -115,7 +115,7 @@ def two_state(values: np.ndarray, cutoff: float, buffer: float) -> np.ndarray:
 
 def diagnose_distances(trajs: list[md.Trajectory], specs: list[DistanceSpec], pairs: list[tuple[int, int]],
                        ns_per_replica: float, min_flips_per_replica: int = 4,
-                       precision: float | None = None) -> list[ResidueReport]:
+                       precision: float | None = None, burn_in: str = "none") -> list[ResidueReport]:
     """One report per distance, judged like the chi1 of a side chain (diagnose.judge).
 
     `pairs` are atom indices in the loaded trajectories.
@@ -124,6 +124,9 @@ def diagnose_distances(trajs: list[md.Trajectory], specs: list[DistanceSpec], pa
     for k, (spec, pair) in enumerate(zip(specs, pairs)):
         values = [md.compute_distances(t, [pair])[:, 0] for t in trajs]
         states = [two_state(v, spec.cutoff_nm, spec.buffer_nm) for v in values]
+        from .basins import trim
+
+        states, values, _ = trim(states, values, len(DISTANCE_STATES), burn_in)
         occ = [occupancy(s, DISTANCE_STATES) for s in states]
         rep = ResidueReport(chain="", resseq=k, resname="", name=spec.label, quantity="distance",
                             transitions=[count_transitions(s) for s in states], occupancies=occ,

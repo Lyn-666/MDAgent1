@@ -207,6 +207,14 @@ def judge(report: ResidueReport, min_flips_per_replica: int = 4, precision=None)
     p = Precision.of(precision)
     total = sum(report.transitions)
     n = len(report.transitions)
+    # The spread between the n replicas is real (the chi-square test the allocation uses): the error then comes
+    # from n numbers, so Student's t with n - 1 degrees of freedom (only the "confidence" criterion changes; see
+    # Precision.factor). A spread larger only by chance is already covered by max(within, between).
+    from .uncertainty import replica_spread_real
+
+    real = (report.error_from_replicas and report.error_within is not None and report.error_between is not None
+            and replica_spread_real(report.error_within, report.error_between, n))
+    df = n - 1 if real else None
     q = {"chi1": "chi1", "distance": "The distance", "backbone": "The backbone (phi/psi) basin"}.get(
         report.quantity, "The state")
     if len(set(report.dominant)) > 1 and (total == 0 or report.replicas_differ is not False):
@@ -225,18 +233,18 @@ def judge(report: ResidueReport, min_flips_per_replica: int = 4, precision=None)
         report.verdict = "rare_flips"
         report.reason = (f"{q} state changes per replica: {report.transitions}. "
                          f"Fewer than {min_flips_per_replica} in at least one replica.")
-    elif p is not None and report.standard_error and not p.met(report.standard_error, report.populations):
+    elif p is not None and report.standard_error and not p.met(report.standard_error, report.populations, df):
         report.halfwidth = {k: round(v, 3) for k, v in
-                            p.halfwidths(report.standard_error, report.populations).items()}
+                            p.halfwidths(report.standard_error, report.populations, df).items()}
         report.verdict = "imprecise"
         report.reason = (f"{q} state changes per replica: {report.transitions}, but the largest population error is "
-                         f"{p.worst(report.standard_error, report.populations):.3f}"
+                         f"{p.worst(report.standard_error, report.populations, df):.3f}"
                          + (f" ({p.criterion})" if p.criterion != "standard_error" else "")
                          + f", more than the requested {p.epsilon:g}.")
     else:
         if p is not None and report.standard_error:
             report.halfwidth = {k: round(v, 3) for k, v in
-                                p.halfwidths(report.standard_error, report.populations).items()}
+                                p.halfwidths(report.standard_error, report.populations, df).items()}
         report.verdict = "ok"
         report.reason = f"{q} state changes per replica: {report.transitions}."
 
@@ -281,6 +289,7 @@ def diagnose_trajectories(
     n_replicas: int | None = None,
     fixed: dict[ResidueKey, str] | None = None,
     precision: float | None = None,
+    burn_in: str = "none",
 ) -> list[ResidueReport]:
     """Diagnose the target side chains.
 
@@ -307,6 +316,10 @@ def diagnose_trajectories(
     reports = []
     for k, res in keep:
         states = [assign_states(a[:, k], core_width_deg) for a in per_traj_angles]
+        if pooled_total_ns is None:          # Not for adaptive segments: they start from chosen frames on purpose.
+            from .basins import trim
+
+            states = trim(states, None, len(STATE_NAMES), burn_in)[0]
         occ = [occupancy(s) for s in states]
         rep = ResidueReport(
             chain=res.chain.chain_id,

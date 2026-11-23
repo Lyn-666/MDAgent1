@@ -53,6 +53,10 @@ class LoopSettings:
     # new runs): judge from the budget instead (no_change_hopeless), so no system-specific time is needed.
     no_flip_patience_ns: float | None = None
     min_flips_per_replica: int = 4
+    # "auto": leave out each replica's first, non-equilibrated part before judging (automated equilibration
+    # detection, uncertainty.equilibration_start; the part is still paid for). "none": keep everything. New runs
+    # with projection allocation use "auto" (review revision, 2026-11-23); older runs keep "none".
+    burn_in: str = "none"
 
 
 @dataclass
@@ -452,7 +456,7 @@ def diagnose_run(run_dir: Path, state: RunState) -> list[ResidueReport]:
     return diagnose_trajectories(
         load_run(run_dir, state.target, len(state.rounds_ns)), state.target, state.ns_done,
         min_flips_per_replica=state.loop.min_flips_per_replica, fixed=fixed,
-        precision=state.precision())
+        precision=state.precision(), burn_in=state.loop.burn_in)
 
 
 def _diagnose_and_decide(run_dir: Path, state: RunState):
@@ -513,7 +517,7 @@ def _diagnose_distances(run_dir: Path, state: RunState) -> list[ResidueReport]:
     where = {a: k for k, a in enumerate(atoms)}
     trajs = load_run(run_dir, state.target, len(state.rounds_ns), atoms=atoms)
     return diagnose_distances(trajs, specs, [(where[i], where[j]) for i, j in pairs], state.ns_done,
-                              state.loop.min_flips_per_replica, state.precision())
+                              state.loop.min_flips_per_replica, state.precision(), state.loop.burn_in)
 
 
 def _diagnose_backbone(run_dir: Path, state: RunState) -> list[ResidueReport]:
@@ -527,7 +531,7 @@ def _diagnose_backbone(run_dir: Path, state: RunState) -> list[ResidueReport]:
     goal = state.the_goal()
     reports, details = diagnose_backbone(items, settings, state.ns_done, state.md.save_interval_ps / 1000.0,
                                          state.md.temperature_k, state.loop.min_flips_per_replica, state.precision(),
-                                         goal.rate_rel_error, goal.fes_error_kcal)
+                                         goal.rate_rel_error, goal.fes_error_kcal, burn_in=state.loop.burn_in)
     save_details(run_dir / "backbone", details)
     for label, why in skipped:
         reports.append(ResidueReport(chain="", resseq=0, resname="", name=label, transitions=[], occupancies=[],

@@ -312,7 +312,8 @@ def allocation_next(run_dir, state, reports, decisions) -> float:
                     max_ns=state.max_ns_per_replica(), budget_ns=state.budget_ns(), chunk_ns=state.loop.extend_ns,
                     patience_ns=state.loop.no_flip_patience_ns or 0.0,   # None (default): the budget rule only.
                     stop_looks=goal.stop_looks,
-                    min_transitions=state.loop.min_flips_per_replica)
+                    min_transitions=state.loop.min_flips_per_replica,
+                    t_dist=precision.criterion == "confidence")
     look = alloc["looks"] + 1
     step = next_step(items, n, ns, look, alloc["tests"], precision.z, goal.precision, limits,
                      state.md.equilibration_ps / 1000.0)
