@@ -283,3 +283,30 @@ def test_every_family_obeys_detailed_balance():
         flux = pi[:, None] * q
         np.fill_diagonal(flux, 0)
         assert np.abs(flux - flux.T).max() < 1e-9, name
+
+
+def test_the_live_loop_adds_replicas_to_measure_an_uncertain_spread(tmp_path):
+    """The live run executes explore_replicas: more replicas (they catch up), one more chunk, a Chinese message."""
+    import json
+    from dataclasses import asdict
+
+    from mdagent.agent import Decision, Goal, LoopSettings, RunState
+    from mdagent.diagnose import ResidueReport
+    from mdagent.policy import allocation_next
+    from mdagent.simulate import MDSettings
+
+    goal = Goal(quantity="backbone_basins", allocation="projection", criterion="confidence", precision=0.05,
+                max_replicas=8, permissions=["extend", "add_replicas", "stop_early"])
+    state = RunState(pdb="x", target_description="t", target=[("A", 5)], n_replicas=3, base_seed=1,
+                     md=MDSettings(), loop=LoopSettings(first_ns=80.0, extend_ns=5.0, max_ns=100.0, burn_in="auto"),
+                     rounds_ns=[80.0], goal=asdict(goal), backbone=["rama:A:5"],
+                     notes={"allocation": {"looks": 1, "tests": 0, "counting": 2}})
+    state.save(tmp_path)
+    rep = ResidueReport("A", 5, "", transitions=[40, 40, 40], occupancies=[], dominant=["alpha_R"] * 3,
+                        name="rama:A:5", quantity="backbone", verdict="imprecise",
+                        populations={"alpha_R": 0.6, "beta": 0.4}, standard_error={"alpha_R": 0.039, "beta": 0.039},
+                        error_within=0.0203, error_between=0.0394)
+    more = allocation_next(tmp_path, state, [rep], [Decision("rama:A:5", "extend", "")])
+    assert state.n_replicas == 8 and more == pytest.approx(5.0)
+    said = [json.loads(line) for line in (tmp_path / "messages.jsonl").read_text().splitlines()]
+    assert any("先加重复把它测准" in m.get("zh", "") for m in said)

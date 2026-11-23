@@ -339,6 +339,8 @@ defaults: 30 independent trials per family, each with a fresh pool of 16 × 100 
 truth; the budget is 800 ns; the tolerance is 0.05; alpha is 0.05. The commands to reproduce them:
 `mdagent experiment-a --family <name> --trials 30` and `--sensitivity <names> --trials 20`.
 
+First round (before the independent review and the replica rule):
+
 | Family | Agent: success / false stops / median compute | Best other method |
 |---|---|---|
 | equilibrium | 90 % / 0 % / 242 ns | Sequential-CI with 8 replicas: 100 % / 0 % / 185 ns |
@@ -346,9 +348,25 @@ truth; the budget is 800 ns; the tolerance is 0.05; alpha is 0.05. The commands 
 | two_timescale | 47 % / 3 % / 302 ns | Sequential-CI with 8 replicas: 77 % / 0 % / 505 ns |
 | hidden_slow_start | 3 % / 7 % / 242 ns | all methods fail; their false stops are 3 to 10 % |
 
+Final rules (joint burn-in, suggestive spread adds replicas, reversible families), the current state:
+
+| Family | Agent: success / false stops / median compute | Others (success / false stops / compute) |
+|---|---|---|
+| equilibrium | 93 % / 0 % / 196 ns | Sequential-CI 8: 100 % / 0 % / 205 ns; Sequential-CI 4: 93 % / 0 % / 222 ns; pilot: 57 % / 0 % / 64 ns |
+| biased_start | 70 % / 0 % / 290 ns | pilot: 83 % / 0 % / 302 ns; Sequential-CI 4: 70 % / 0 % / 332 ns; Sequential-CI 8: 67 % / 0 % / 645 ns |
+| two_timescale | 60 % / 0 % / 476 ns | Sequential-CI 8: 83 % / 0 % / 565 ns; pilot: 47 % / 0 % / 302 ns; Sequential-CI 4: 0 % |
+| hidden_slow_start | 0 % / 0 % / 330 ns | all fail; only the pilot plan stops wrongly (7 %) |
+
+The agent makes no false stop in 120 independent trials. On `biased_start` all methods lost success when the
+burn-in became joint and cautious: some replicas stay 20 to 40 ns in the start substate, a little bias remains,
+and the errors at the end (0.05 to 0.067) are just above the tolerance. The methods then say INSUFFICIENT_EVIDENCE
+instead of a wrong answer. This is the intended trade: the per-replica rule corrected more here but biased
+equilibrium data, which no reference from a real pool could reveal.
+
 What this shows:
-- Hypothesis A is not supported on any family. The agent is not cheaper than Sequential-CI. The old "100 %
-  success, 32 % cheaper" came from a design that did not use independent trials, t or burn-in.
+- Hypothesis A is still not supported. The agent is the cheapest reliable method only on `equilibrium` (196 ns
+  against 205 ns), and not by a clear margin. The old "100 % success, 32 % cheaper" came from a design that did
+  not use independent trials, t or burn-in.
 - The automated burn-in works. In the first runs on `biased_start` without it, Sequential-CI and the pilot
   plan never succeeded. With it, they succeed in 38 % or more of trials.
 - `two_timescale` is the agent's structural weakness. It stays at 3 replicas, and in 9 of 30 trials it gives up
