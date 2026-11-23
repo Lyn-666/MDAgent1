@@ -329,11 +329,13 @@ def diagnose_backbone(items: dict, settings: BackboneSettings, ns_per_replica: f
         values = [np.asarray(v, dtype=float).reshape(len(v), -1) for v in values]
         names = spec.names
         states = [assign(v, spec) for v in values]
+        frames = len(states[0]) if states else 1
         states, values, kept_from = trim(states, values, len(names), burn_in)
         occ = [occupancy(s, names) for s in states]
         rep = ResidueReport(chain=spec.chain or "", resseq=spec.resseq, resname="", name=label, quantity="backbone",
                             transitions=[count_transitions(s) for s in states], occupancies=occ,
-                            dominant=[max(o, key=o.get) for o in occ], ns_per_replica=ns_per_replica)
+                            dominant=[max(o, key=o.get) for o in occ], ns_per_replica=ns_per_replica,
+                            burn_in_ns=float(np.mean(kept_from)) * ns_per_replica / max(1, frames))
         (rep.populations, rep.standard_error, rep.replicas_differ,
          rep.error_from_replicas) = populations_with_errors(states, names)
         est = summarize(states, values, names, dt_ns)      # Free-energy difference, main rates, split-half check.

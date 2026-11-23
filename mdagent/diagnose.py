@@ -167,6 +167,7 @@ class ResidueReport:
     error_from_replicas: bool = False    # The largest error comes mainly from the spread between replicas.
     error_within: float | None = None    # Worst state: error part inside the replicas (allocation.py).
     error_between: float | None = None   # Worst state: spread between the replicas.
+    burn_in_ns: float = 0.0   # Left out at the start of each replica before judging (automated burn-in), mean.
 
     @property
     def label(self) -> str:
@@ -212,7 +213,7 @@ def judge(report: ResidueReport, min_flips_per_replica: int = 4, precision=None)
     # Precision.factor). A spread larger only by chance is already covered by max(within, between).
     from .uncertainty import replica_spread_real
 
-    real = (report.error_from_replicas and report.error_within is not None and report.error_between is not None
+    real = (report.error_within is not None and report.error_between is not None
             and replica_spread_real(report.error_within, report.error_between, n))
     df = n - 1 if real else None
     q = {"chi1": "chi1", "distance": "The distance", "backbone": "The backbone (phi/psi) basin"}.get(
@@ -319,7 +320,9 @@ def diagnose_trajectories(
         if pooled_total_ns is None:          # Not for adaptive segments: they start from chosen frames on purpose.
             from .basins import trim
 
-            states = trim(states, None, len(STATE_NAMES), burn_in)[0]
+            states, _, kept_from = trim(states, None, len(STATE_NAMES), burn_in)
+        else:
+            kept_from = [0] * len(states)
         occ = [occupancy(s) for s in states]
         rep = ResidueReport(
             chain=res.chain.chain_id,
@@ -332,6 +335,7 @@ def diagnose_trajectories(
             total_ns_override=pooled_total_ns,
         )
         if pooled_total_ns is None:
+            rep.burn_in_ns = float(np.mean(kept_from)) * ns_per_replica / max(1, len(per_traj_angles[0]))
             (rep.populations, rep.standard_error, rep.replicas_differ,
              rep.error_from_replicas) = populations_with_errors(states, STATE_NAMES)
             rep.error_within, rep.error_between = error_split(states, STATE_NAMES)

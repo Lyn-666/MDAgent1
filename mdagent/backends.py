@@ -91,7 +91,8 @@ def _call_claude(system, user, model, runner):
     env = {k: v for k, v in os.environ.items() if k not in API_KEY_VARS}
     # Run in an empty folder, so Claude Code does not load this project's CLAUDE.md.
     with tempfile.TemporaryDirectory() as tmp:
-        done = runner(cmd, capture_output=True, text=True, timeout=TIMEOUT_S, cwd=tmp, env=env)
+        done = runner(cmd, capture_output=True, text=True, timeout=TIMEOUT_S, cwd=tmp, env=env,
+                      stdin=subprocess.DEVNULL)   # never read the caller's input (it holds the y/N answer)
     try:
         data = json.loads(done.stdout)
     except (json.JSONDecodeError, TypeError):
@@ -116,7 +117,8 @@ def _call_codex(system, user, model, runner):
         cmd = ["codex", "exec", "--skip-git-repo-check", "--sandbox", "read-only",
                "-c", 'model_reasoning_effort="low"',
                "--output-schema", str(schema_path), "-o", str(out_path), prompt]
-        done = runner(cmd, capture_output=True, text=True, timeout=TIMEOUT_S, cwd=tmp)
+        done = runner(cmd, capture_output=True, text=True, timeout=TIMEOUT_S, cwd=tmp,
+                      stdin=subprocess.DEVNULL)
         if done.returncode != 0:
             raise ValueError(f"Codex failed: {(done.stderr or done.stdout).strip()[:500]}")
         if not out_path.exists():

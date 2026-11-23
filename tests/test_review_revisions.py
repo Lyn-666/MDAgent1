@@ -191,3 +191,95 @@ def test_sensitivity_runs_one_constant_at_a_time():
                        n_replicas=8, ns=40.0)
     assert [(r["constant"], r["value"]) for r in rows] == [("margin", 1.0), ("margin", 1.2)]
     assert "(default)" in sensitivity_markdown(rows)
+
+
+def test_a_suggestive_spread_already_calls_for_more_replicas():
+    """User's choice (2026-11-23): add replicas when the spread between them is only suggestive."""
+    from mdagent.allocation import Limits
+    from mdagent.uncertainty import replica_spread_real
+
+    item = [{"within": 0.02, "between": 0.032}]           # ratio 2.56: chi-square 0.8 yes, 0.95 no (3 replicas)
+    assert replica_spread_real(0.02, 0.032, 3, 0.8) and not replica_spread_real(0.02, 0.032, 3)
+    strict = allocate(item, 3, 10.0, 2.39, 0.05, 8, 100.0, 0.6, t_dist=True, spread_level=0.95)
+    loose = allocate(item, 3, 10.0, 2.39, 0.05, 8, 100.0, 0.6, t_dist=True, spread_level=0.8)
+    assert strict[0] == 3 and loose[0] > 3
+    assert Limits(max_replicas=8, max_ns=100, budget_ns=800).spread_level == 0.8
+
+
+def test_an_uncertain_spread_is_measured_with_more_replicas_not_given_up():
+    """3 replicas, a large spread estimated from 2 degrees of freedom: the point projection is hopeless, the
+    optimistic one (95 % lower bound of the spread) is not. The agent adds replicas (and one chunk) instead of
+    giving up; at the replica limit it would have to give up."""
+    from mdagent.allocation import CONTINUE, INSUFFICIENT, ItemState, Limits, next_step, optimistic
+
+    item = ItemState("x", {"a": 0.039}, 0.0203, 0.0394, [40, 40, 40], False)
+    assert optimistic(item, 3)["between"] < 0.0394 * 0.6
+    lim = Limits(max_replicas=8, max_ns=100.0, budget_ns=800.0, t_dist=True)
+    s = next_step([item], 3, 80.0, look=2, tests_before=0, z=2.39, tolerance=0.05, limits=lim)
+    assert s.action == CONTINUE and s.kind == "explore_replicas" and s.replicas == 8 and s.ns == 85.0
+    assert s.replicas * s.ns <= lim.budget_ns
+    hopeless = ItemState("x", {"a": 0.12}, 0.05, 0.12, [40, 40, 40], False)
+    s = next_step([hopeless], 3, 80.0, look=2, tests_before=0, z=2.39, tolerance=0.05, limits=lim)
+    assert s.action == INSUFFICIENT
+
+
+def test_the_live_loop_has_a_chinese_message_for_every_step_kind():
+    from mdagent.policy import STEP_ZH
+
+    assert {"converged", "looks_used", "budget_used", "stuck", "hopeless", "too_few_changes", "projected",
+            "explore_replicas"} <= set(STEP_ZH)
+
+
+# --- fixes after the independent code review (2026-11-23) ------------------------------------------
+
+def test_burn_in_leaves_equilibrium_data_unbiased():
+    """Per-replica starts on short series cut after minor-state stays (bias -0.014 to -0.023). The joint start
+    with a gain threshold and a minimum number of changes must not shift equilibrium data."""
+    from mdagent.uncertainty import joint_equilibration_start
+
+    rng = np.random.default_rng(7)
+
+    def chain(n, p=0.3, leave=0.04):
+        s = [0 if rng.random() < p else 1]
+        for _ in range(n - 1):
+            c = s[-1]
+            s.append((1 if rng.random() < leave * (1 - p) else 0) if c == 0 else (0 if rng.random() < leave * p else 1))
+        return np.array(s)
+    shifts = []
+    for _ in range(150):
+        sts = [chain(600) for _ in range(4)]
+        t0 = joint_equilibration_start(sts, 2)
+        shifts.append(np.mean([np.mean(s[t0:] == 0) for s in sts]) - np.mean([np.mean(s == 0) for s in sts]))
+    assert abs(np.mean(shifts)) < 0.002
+
+
+def test_a_change_inside_the_cut_part_does_not_count_as_watched_time():
+    """An item with no change in the kept data: the never-changing rule uses only the kept time."""
+    from mdagent.allocation import ItemState, Limits, next_step
+
+    # About 21 changes are needed; with 3200 ns left, giving up needs more than 3 x 3200 / 21 = 466 ns watched.
+    lim = Limits(max_replicas=4, max_ns=1000.0, budget_ns=4000.0)
+    full = ItemState("x", {"a": 0.0}, 0.0, 0.0, [0, 0, 0, 0], False, cut_ns=0.0)
+    half = ItemState("x", {"a": 0.0}, 0.0, 0.0, [0, 0, 0, 0], False, cut_ns=100.0)
+    a = next_step([full], 4, 200.0, look=2, tests_before=0, z=2.39, tolerance=0.05, limits=lim)
+    b = next_step([half], 4, 200.0, look=2, tests_before=0, z=2.39, tolerance=0.05, limits=lim)
+    assert a.set_aside == {"x": "stuck"} and b.set_aside == {}       # 400 ns watched is not 800 ns
+
+
+def test_without_baselines_condition_two_is_not_a_failure():
+    d = Design(sequential=(), families=(), pilot_fixed=False, max_ns=40.0, budget_ns=320.0)
+    out = run(None, d, Targets(), trials=2, seed=0, pool_factory=lambda sd: family_pool("equilibrium", sd, 8, 40.0))
+    assert out["verdict"]["better_than_sequential_ci"] is None
+    assert not any("Sequential-CI" in f for f in out["verdict"]["failed"])
+
+
+def test_every_family_obeys_detailed_balance():
+    from mdagent.experiment_a import _generator
+
+    for name, spec in FAMILIES.items():
+        q = _generator(spec)
+        a = np.vstack([q.T, np.ones(len(q))])
+        pi = np.linalg.lstsq(a, np.r_[np.zeros(len(q)), 1.0], rcond=None)[0]
+        flux = pi[:, None] * q
+        np.fill_diagonal(flux, 0)
+        assert np.abs(flux - flux.T).max() < 1e-9, name

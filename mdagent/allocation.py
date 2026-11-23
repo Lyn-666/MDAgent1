@@ -40,6 +40,7 @@ class ItemState:
     between: float         # spread between replicas (worst state)
     transitions: list      # state changes per replica
     converged: bool        # precise enough by the caller's calibrated interval, and adequately sampled
+    cut_ns: float = 0.0    # left out at the start of each replica (automated burn-in); the errors come from the rest
 
 
 @dataclass
@@ -57,6 +58,12 @@ class Limits:
     # Student's t (n - 1 degrees of freedom) instead of z where the replica spread is real. True when z is the
     # factor of a confidence interval; False for the plain standard-error criterion (z = 1 is not an interval).
     t_dist: bool = False
+    # Level of the chi-square test above which the spread between replicas counts in the plan (it then calls for
+    # more replicas). Below the verdict's 0.95 on purpose: with 3 replicas the test has little power, and a spread
+    # that is only suggestive is cheaper to resolve by adding replicas early than by running long and failing.
+    # Chosen on the synthetic development families (review revision, 2026-11-23). The verdict's t factor still
+    # needs the 0.95 test.
+    spread_level: float = 0.8
 
 
 @dataclass
@@ -89,19 +96,21 @@ def chi2_quantile(p: float, k: int) -> float:
 
 
 def allocate(items: list, n: int, ns: float, z: float, tolerance: float, max_n: int, max_ns: float,
-             equil_ns: float, t_dist: bool = False):
+             equil_ns: float, t_dist: bool = False, spread_level: float = 0.95):
     """The cheapest (replicas, ns per replica) projected to reach the precision, or None.
 
     `items` are ItemState (or dicts with "within" and "between"). Lengths cannot shrink.
     t_dist: where the spread between replicas is real (uncertainty.replica_spread_real, the same test as the
     verdict in basins.judge and diagnose.judge), the interval of m replicas uses Student's t with m - 1
     degrees of freedom (uncertainty.t_factor), so more replicas also narrow the factor itself.
+    spread_level: the spread between replicas counts as extra error, which only more replicas reduce, when the
+    chi-square test passes at this level (0.95: significant; lower: also when only suggestive).
     Returns (replicas, ns per replica, projected compute ns).
     """
     from .uncertainty import t_factor
 
-    def part(i, k):
-        return i[k] if isinstance(i, dict) else getattr(i, k)
+    def part(i, k, default=None):
+        return i.get(k, default) if isinstance(i, dict) else getattr(i, k, default)
 
     from .uncertainty import replica_spread_real
 
@@ -110,14 +119,18 @@ def allocate(items: list, n: int, ns: float, z: float, tolerance: float, max_n: 
         need = 0.0
         for i in items:
             w, b = part(i, "within"), part(i, "between")
-            real = replica_spread_real(w, b, n)
-            extra = (b * b - w * w) * n / m if real else 0.0     # shrinks with more replicas only
+            real = replica_spread_real(w, b, n)                     # the verdict's test: t
+            seen = real or replica_spread_real(w, b, n, spread_level)
+            extra = (b * b - w * w) * n / m if seen else 0.0     # shrinks with more replicas only
             zm = t_factor(z, m - 1) if (t_dist and real) else z
             room = (tolerance / zm) ** 2 - extra
             if room <= 0:
                 need = float("inf")
                 break
-            need = max(need, ns * (w * w * n / m) / room)        # length at which the inside part fits
+            # The inside part was measured on the kept length (ns - cut); a burn-in is a transient of fixed duration,
+            # so a longer replica keeps (length - cut).
+            cut = min(part(i, "cut_ns", 0.0) or 0.0, ns)
+            need = max(need, (ns - cut) * (w * w * n / m) / room + cut)   # length at which the inside part fits
         length = max(ns, need)
         if length > max_ns + 1e-9:
             continue
@@ -129,7 +142,10 @@ def allocate(items: list, n: int, ns: float, z: float, tolerance: float, max_n: 
 
 # Raised when the rule changes, so a resumed run decides again under the new rule.
 # 5 (2026-11-23): Student's t where the replica spread is real; automated burn-in in projection runs.
-RULE_VERSION = 5
+# 6 (2026-11-23): a spread between replicas that is only suggestive (chi-square at 0.8) already calls for replicas;
+#   give up only when even the optimistic spread (95 % lower bound) cannot reach the precision, and otherwise add
+#   replicas to measure the spread.
+RULE_VERSION = 6
 
 
 def stuck_projection(n: int, ns: float, z: float, tolerance: float) -> tuple[float, float, float]:
@@ -144,6 +160,21 @@ def stuck_projection(n: int, ns: float, z: float, tolerance: float) -> tuple[flo
     rate = 3.0 / seen
     need = (2 * (1 - tolerance) * z) ** 2
     return rate, need, need / rate
+
+
+def optimistic(item, n: int) -> dict:
+    """The item with its spread between replicas at the 95 % lower confidence bound (chi-square, n - 1 degrees of
+    freedom). With few replicas the spread itself is a rough number (3 replicas: 2 degrees of freedom), so a
+    projection from it can look hopeless by chance. Giving up needs even this optimistic projection to fail, as
+    for an item that never changed state (stuck_projection uses the fastest rate the data allow)."""
+    def part(k):
+        return item[k] if isinstance(item, dict) else getattr(item, k)
+    w, b = part("within"), part("between")
+    cut = (item.get("cut_ns", 0.0) if isinstance(item, dict) else getattr(item, "cut_ns", 0.0)) or 0.0
+    if n < 2:
+        return {"within": w, "between": b, "cut_ns": cut}
+    k = n - 1
+    return {"within": w, "between": b * math.sqrt(k / chi2_quantile(0.95, k)), "cut_ns": cut}
 
 
 def _next_step(items: list, n: int, ns: float, look: int, tests_before: int, z: float, tolerance: float,
@@ -166,16 +197,21 @@ def _next_step(items: list, n: int, ns: float, look: int, tests_before: int, z: 
         from .uncertainty import changes_needed, never_changing_hopeless
 
         need = changes_needed(n, limits.min_transitions, tolerance, z)
-        if never_changing_hopeless(spent, limits.budget_ns - spent, need):
+        # Exposure without a change: only the kept time (a change inside a cut burn-in is not seen).
+        cut = max([i.cut_ns for i in items if sum(i.transitions) == 0] or [0.0])
+        if never_changing_hopeless(n * max(ns - cut, 0.0), limits.budget_ns - spent, need):
             aside = {i.label: "stuck" for i in items if sum(i.transitions) == 0}
     if spent >= limits.budget_ns / 4:
         # A projection from very little data is too noisy to give up on: wait for a quarter of the budget.
         for i in items:
             if i.label in aside or i.converged or not (i.transitions and min(i.transitions) >= limits.min_transitions):
                 continue
-            own = allocate([i], n, ns, z, tolerance, max_n, max_ns, equil_ns, limits.t_dist)
+            own = allocate([i], n, ns, z, tolerance, max_n, max_ns, equil_ns, limits.t_dist, limits.spread_level)
             if own is None or own[2] > limits.give_up_factor * limits.budget_ns:
-                aside[i.label] = "hopeless"
+                best = allocate([optimistic(i, n)], n, ns, z, tolerance, max_n, max_ns, equil_ns, limits.t_dist,
+                                limits.spread_level)
+                if best is None or best[2] > limits.give_up_factor * limits.budget_ns:
+                    aside[i.label] = "hopeless"   # even the optimistic spread cannot reach the precision
     active = [i for i in items if i.label not in aside]
     # Only a look that could have stopped counts as a test: not the planning look, and not a look at which an
     # item still has too few state changes (STOP needs adequate sampling, so no false stop can happen there).
@@ -214,8 +250,29 @@ def _next_step(items: list, n: int, ns: float, look: int, tests_before: int, z: 
         new_ns = min(max_ns, (4 if last else 2) * ns)
         why = "too few state changes to trust the errors yet; running longer"
     else:
-        plan = allocate(active, n, ns, z, tolerance, max_n, max_ns, equil_ns, limits.t_dist)
-        if plan is None or plan[2] > limits.give_up_factor * limits.budget_ns:
+        plan = allocate(active, n, ns, z, tolerance, max_n, max_ns, equil_ns, limits.t_dist, limits.spread_level)
+        hopeless = plan is None or plan[2] > limits.give_up_factor * limits.budget_ns
+        hope = None
+        if hopeless:
+            hope = allocate([optimistic(i, n) for i in active], n, ns, z, tolerance, max_n, max_ns, equil_ns,
+                            limits.t_dist, limits.spread_level)
+            if hope is not None and hope[2] > limits.give_up_factor * limits.budget_ns:
+                hope = None
+        # The spread between few replicas is uncertain: the point projection fails, but the optimistic one does not.
+        # Measure the spread with more replicas first (the user's choice of 2026-11-23: a spread that is only
+        # suggestive already calls for replicas). New replicas catch up to the current length, and every replica
+        # runs one chunk more (the live loop runs new replicas only within a round of positive length); the
+        # budget holds. Not possible at the length limit.
+        longer = min(max_ns, ns + limits.chunk_ns)
+        explore = min(max_n, int((limits.budget_ns + 1e-9) // max(longer, 1e-9)))
+        if hopeless and hope is not None and explore > n and longer > ns + 1e-9:
+            return Step(CONTINUE, explore, round(longer, 6),
+                        f"the spread between {n} replicas is too uncertain to project from; adding replicas to "
+                        f"measure it ({explore} replicas of {longer:g} ns)" + left_out, planning, "explore_replicas",
+                        aside)
+        if hopeless and hope is not None:
+            plan = hope                                   # no room for more replicas: go on as the optimistic plan says
+        if hopeless and hope is None:
             if spent < limits.budget_ns / 4:
                 plan = (n, min(max_ns, max(2 * ns, limits.budget_ns / 4 / n)), 0.0)
             else:

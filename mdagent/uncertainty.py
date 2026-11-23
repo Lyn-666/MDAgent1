@@ -321,9 +321,53 @@ def equilibration_start(states: np.ndarray, n_states: int | None = None, candida
     return best_t0
 
 
+def joint_equilibration_start(states: list, n_states: int | None = None, candidates: int = 25,
+                              max_fraction: float = 0.5, min_gain: float = 1.5, min_changes: int = 20) -> int:
+    """One first frame for all replicas together (they start from the same prepared structure, so they share the
+    transient), by automated equilibration detection on the pooled number of independent samples.
+
+    For each state indicator: N_eff(t0) = sum over replicas of (n_r - t0) / g(x_r[t0:]). The best t0 is kept only
+    if it raises N_eff at least `min_gain` times over keeping everything; otherwise nothing is cut. The latest such
+    t0 over the states is used. Why jointly and with a gain threshold (review of 2026-11-23): choosing a start per
+    replica on short series follows the noise and tends to cut just after a stay in the minor state, which biased
+    equilibrium data by 0.014 to 0.023 in population. With few state changes the correlation time itself is
+    unknown, so where to cut is noise: nothing is cut unless the replicas change state at least `min_changes` times
+    (median over replicas). On equilibrium two-state data this left the populations unbiased (shift below 0.001);
+    a start in a slowly relaxing substate is still found.
+    """
+    arrs = [np.asarray(s) for s in states if len(s)]
+    if not arrs:
+        return 0
+    n = min(len(s) for s in arrs)
+    if n < 20:
+        return 0
+    changes = [int(np.count_nonzero(s[1:][s[1:] >= 0] != s[:-1][s[1:] >= 0])) for s in arrs]
+    if float(np.median(changes)) < min_changes:
+        return 0
+    k = int(n_states if n_states is not None else max(int(s.max()) for s in arrs) + 1)
+    starts = np.unique(np.linspace(0, max_fraction * n, candidates).astype(int))
+    best_t0 = 0
+    for state in range(k):
+        xs = [(s[:n] == state).astype(float) for s in arrs]
+        if all(x.min() == x.max() for x in xs):
+            continue
+        neff = [sum((n - t0) / statistical_inefficiency(x[t0:]) for x in xs) for t0 in starts]
+        i = int(np.argmax(neff))
+        if neff[i] >= min_gain * neff[0]:
+            best_t0 = max(best_t0, int(starts[i]))
+    return best_t0
+
+
 def trim_starts(states: list, n_states: int | None = None) -> list[int]:
-    """equilibration_start of every replica (one start per replica)."""
-    return [equilibration_start(s, n_states) for s in states]
+    """First frame to keep in every replica: one common start (joint_equilibration_start), but never before a
+    replica's first frame inside a core (state -1 before it)."""
+    t0 = joint_equilibration_start(states, n_states)
+    out = []
+    for s in states:
+        s = np.asarray(s)
+        first = int(np.argmax(s >= 0)) if (s >= 0).any() else len(s)
+        out.append(max(t0, first))
+    return out
 
 
 def never_changing_hopeless(exposure_ns: float, remaining_ns: float, needed: float) -> bool:

@@ -264,6 +264,7 @@ STEP_ZH = {
     "hopeless": "按投影，达到精度需要的计算量远超预算，再跑普通 MD 也达不到",
     "too_few_changes": "状态变化还太少，误差还不可信，先跑长一些",
     "projected": "按投影，这是达到精度花费最少的分配",
+    "explore_replicas": "重复之间的差别只靠几条重复估计，还测不准；先加重复把它测准，再决定要跑多长",
 }
 
 
@@ -300,7 +301,8 @@ def allocation_next(run_dir, state, reports, decisions) -> float:
         return 0.0
     precision = state.precision()
     items = [ItemState(d.residue, by[d.residue].standard_error or {}, by[d.residue].error_within or 0.0,
-                       by[d.residue].error_between or 0.0, by[d.residue].transitions, by[d.residue].verdict == "ok")
+                       by[d.residue].error_between or 0.0, by[d.residue].transitions, by[d.residue].verdict == "ok",
+                       by[d.residue].burn_in_ns or 0.0)
              for d in live]
     alloc = state.notes.setdefault("allocation", {"looks": 0, "tests": 0})
     if alloc.get("counting") != 2:

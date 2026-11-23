@@ -126,12 +126,15 @@ def diagnose_distances(trajs: list[md.Trajectory], specs: list[DistanceSpec], pa
         states = [two_state(v, spec.cutoff_nm, spec.buffer_nm) for v in values]
         from .basins import trim
 
-        states, values, _ = trim(states, values, len(DISTANCE_STATES), burn_in)
+        frames = len(states[0]) if states else 1
+        states, values, kept_from = trim(states, values, len(DISTANCE_STATES), burn_in)
         occ = [occupancy(s, DISTANCE_STATES) for s in states]
         rep = ResidueReport(chain="", resseq=k, resname="", name=spec.label, quantity="distance",
                             transitions=[count_transitions(s) for s in states], occupancies=occ,
                             dominant=[max(o, key=o.get) for o in occ], ns_per_replica=ns_per_replica,
-                            extra={"mean_nm_per_replica": [round(float(v.mean()), 3) for v in values],
+                            burn_in_ns=float(np.mean(kept_from)) * ns_per_replica / max(1, frames),
+                            extra={"mean_nm_per_replica": [round(float(v.mean()), 3) if len(v) else None
+                                                           for v in values],
                                    "cutoff_nm": spec.cutoff_nm})
         (rep.populations, rep.standard_error, rep.replicas_differ,
          rep.error_from_replicas) = populations_with_errors(states, DISTANCE_STATES)
