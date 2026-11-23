@@ -318,6 +318,37 @@ Changes:
 
 `allocation.RULE_VERSION` is now 5. A resumed projection run decides again under the new rule.
 
+**First results on the synthetic families (2026-11-23, models only, not real MD).** The settings were the
+defaults: 30 independent trials per family, each with a fresh pool of 16 × 100 ns; the reference is the known
+truth; the budget is 800 ns; the tolerance is 0.05; alpha is 0.05. The commands to reproduce them:
+`mdagent experiment-a --family <name> --trials 30` and `--sensitivity <names> --trials 20`.
+
+| Family | Agent: success / false stops / median compute | Best other method |
+|---|---|---|
+| equilibrium | 90 % / 0 % / 242 ns | Sequential-CI with 8 replicas: 100 % / 0 % / 185 ns |
+| biased_start | 93 % / 0 % / 259 ns | Sequential-CI with 4 replicas: 100 % / 0 % / 242 ns |
+| two_timescale | 47 % / 3 % / 302 ns | Sequential-CI with 8 replicas: 77 % / 0 % / 505 ns |
+| hidden_slow_start | 3 % / 7 % / 242 ns | all methods fail; their false stops are 3 to 10 % |
+
+What this shows:
+- Hypothesis A is not supported on any family. The agent is not cheaper than Sequential-CI. The old "100 %
+  success, 32 % cheaper" came from a design that did not use independent trials, t or burn-in.
+- The automated burn-in works. In the first runs on `biased_start` without it, Sequential-CI and the pilot
+  plan never succeeded. With it, they succeed in 38 % or more of trials.
+- `two_timescale` is the agent's structural weakness. It stays at 3 replicas, and in 9 of 30 trials it gives up
+  because the projected cost is too high. With 3 replicas, the chi-square test for a real spread has little
+  power, and t with 2 degrees of freedom makes the projection large. Sequential-CI with 8 replicas from the
+  start does better.
+- `hidden_slow_start` shows a limit of plain MD from one start. A run cannot see a state that no replica has
+  visited. Every method sometimes stops wrongly.
+- Sensitivity: in these two families, no single constant (margin, final margin, give-up factor, looks,
+  starting replicas 2 to 4, minimum transitions) changes the success rate much. Their failures are therefore
+  not a tuning problem. With 2 starting replicas, `biased_start` gets false stops (5 %). With 3 it gets none,
+  so 3 stays.
+
+These families are the development set, so changing the agent's rules on them is allowed. Which change to make
+is for the user to decide (see the decisions below).
+
 **Deferred (smaller points).**
 - Rate errors: check whether the Poisson errors cover the truth when the system recrosses a boundary; else
   use a bootstrap over trajectory segments.
@@ -330,7 +361,13 @@ Changes:
    a benchmark of how well user requests are translated into settings.
 2. Who chooses the held-out systems, and when the sealed list is committed.
 3. What counts as a correct answer for A-Hard.
-4. How large the GPU pool is. A paper needs independent trials, for example 40 × 100 ns with 8 held out and
+4. How to repair the agent's weakness on `two_timescale`, before any GPU run. Options: start with more
+   replicas when the budget allows; add replicas when the spread between them is only suggestive, not just
+   when it is significant; or accept the weakness and report it.
+5. Whether to start replicas from different structures. Only that can reveal a hidden slow state
+   (`hidden_slow_start`). The populations then need a correction, for example a Markov state model, which
+   adds a method.
+6. How large the GPU pool is. A paper needs independent trials, for example 40 × 100 ns with 8 held out and
    4 disjoint groups of 8. That is several days of GPU time.
 
 ## 4. Minimal prioritized implementation plan

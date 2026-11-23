@@ -548,6 +548,17 @@ python -m mdagent experiment-a --sensitivity equilibrium,biased_start,two_timesc
 
 第二条一次只改一个常数（余量、最后一次查看前的余量、放弃倍数、查看次数、起始重复数、最少翻转次数），看结论变不变。结果写在 `runs/experiment_A_model/`。
 
+**第一批结果（2026-11-23，只是模型，不是真实 MD）：** 每类模型 30 次独立试验，每次 16 条 × 100 ns 的新数据池，预算 800 ns，容差 0.05。
+
+| 模型 | agent：成功 / 错误停止 / 计算量中位数 | 表现最好的其他方法 |
+|---|---|---|
+| equilibrium | 90% / 0% / 242 ns | 8 条的 Sequential-CI：100% / 0% / 185 ns |
+| biased_start | 93% / 0% / 259 ns | 4 条的 Sequential-CI：100% / 0% / 242 ns |
+| two_timescale | 47% / 3% / 302 ns | 8 条的 Sequential-CI：77% / 0% / 505 ns |
+| hidden_slow_start | 3% / 7% / 242 ns | 所有方法都失败，错误停止 3% 到 10% |
+
+结论：在更诚实的评估下，假设 A 在四类模型上都不成立，agent 并不比 Sequential-CI 更省。自动丢弃开头部分是有效的。agent 的结构性弱点在 `two_timescale`：它停在 3 条重复上，有时因为投影成本过高而放弃。`hidden_slow_start` 说明，从同一个结构出发的普通 MD 看不见从没去过的隐藏状态。敏感性分析显示，单独改哪个常数都救不了这两类，所以要改的是规则本身。怎样改由你决定，见 `docs/architecture.md` 3.4 节。
+
 ### 怎么跑
 
 ```bash
