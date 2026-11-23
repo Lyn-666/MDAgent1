@@ -394,7 +394,10 @@ is for the user to decide (see the decisions below).
 1. Where to publish. A computational-chemistry journal tells a statistical-design story. An AI venue then needs
    a benchmark of how well user requests are translated into settings.
 2. Who chooses the held-out systems, and when the sealed list is committed.
-3. What counts as a correct answer for A-Hard.
+3. Decided (2026-11-23): A-Hard is judged on honesty when the reference cannot judge accuracy
+   (`experiment_a.honesty`). A trial is honest when the method says INSUFFICIENT_EVIDENCE, with a reason from the
+   data (too few changes, or a projection far beyond the budget), after spending at most half of the budget. The
+   agent passes when at least the target reliability of its trials are honest.
 4. How to repair the agent's weakness on `two_timescale`, before any GPU run. Options: start with more
    replicas when the budget allows; add replicas when the spread between them is only suggestive, not just
    when it is significant; or accept the weakness and report it.

@@ -116,6 +116,7 @@ class Design:
     scan_ns: float = 5.0           # fixed plans are scanned in steps of this length
     burn_in_ns: float = 0.0        # left out of every estimate (still paid for)
     patience_ns: float = 20.0      # no transition at all after this: plain MD cannot answer
+    honest_share: float = 0.5      # A-Hard: an honest INSUFFICIENT_EVIDENCE spends at most this share of the budget
     give_up_factor: float = 3.0    # projected cost above this many budgets: give up now
     margin: float = 1.2            # the agent asks for 20% more than the projection
     final_margin: float = 1.6      # before its last look there is no second chance: ask for more
@@ -438,6 +439,7 @@ class Trial:
     covered: bool = False
     covered_share: float = float("nan")
     outcome: str = ""                               # correct_stop, false_stop, correct_insufficient, over_cautious
+    kind: str = ""                                  # why it ended, as allocation.Step.kind (agent) or a plain code
     c_hit: float | None = None
     steps: list = field(default_factory=list)
     # Per item: converged (claimed online), accurate (offline), covered (interval at stop held the reference), error.
@@ -485,10 +487,10 @@ def run_sequential_ci(pool, order, design, targets, ref, model, n: int) -> Trial
                        max(offline[k]["population_error"] for k in pool.labels),
                        all(offline[k]["populations"] for k in pool.labels)))
         if all(online[k]["populations"] for k in pool.labels):
-            t.decision, t.reason = STOP, "every population interval is narrow enough and sampling is adequate"
+            t.decision, t.reason, t.kind = STOP, "every population interval is narrow enough and sampling is adequate", "converged"
             break
         if ns >= cap - 1e-9:
-            t.decision, t.reason = INSUFFICIENT, "the budget is used up before the populations were precise"
+            t.decision, t.reason, t.kind = INSUFFICIENT, "the budget is used up before the populations were precise", "budget_used"
             break
         ns = round(min(ns + design.chunk_ns, cap), 6)
     _close(t, pool, design, targets, ests, online, offline, n, ns, looks, model)
@@ -516,7 +518,7 @@ def run_agent(pool, order, design, targets, ref, model) -> Trial:
         step = next_step(items, n, ns, looks, tests, z, targets.population, limits, pool.equilibration_ns)
         tests += 1 if step.counted else 0
         if step.action != "continue":
-            t.decision, t.reason = step.action, step.reason
+            t.decision, t.reason, t.kind = step.action, step.reason, step.kind
             break
         t.steps.append({"look": looks, "planning": step.planning, "replicas": n, "ns": round(ns, 3),
                         "next_replicas": step.replicas, "next_ns": round(step.ns, 3), "why": step.reason})
@@ -557,9 +559,9 @@ def run_pilot_fixed(pool, order, design, targets, ref, model) -> Trial:
                    max(offline[k]["population_error"] for k in pool.labels),
                    all(offline[k]["populations"] for k in pool.labels)))
     if all(online[k]["populations"] for k in pool.labels):
-        t.decision, t.reason = STOP, "the fixed plan reached the precision at its one final look"
+        t.decision, t.reason, t.kind = STOP, "the fixed plan reached the precision at its one final look", "converged"
     else:
-        t.decision, t.reason = INSUFFICIENT, "the fixed plan did not reach the precision"
+        t.decision, t.reason, t.kind = INSUFFICIENT, "the fixed plan did not reach the precision", "budget_used"
     _close(t, pool, design, targets, ests, online, offline, m, length, 2, model)
     return t
 
@@ -742,6 +744,39 @@ def summarize(out: dict) -> dict:
     return s
 
 
+# Reasons that come from the data: the item changed too little, or the projection is far beyond the budget.
+DATA_REASONS = ("stuck", "hopeless", "others_done")
+
+
+def honesty(out: dict) -> dict:
+    """A-Hard (the user's decision, 2026-11-23): when not even the reference can be trusted, accuracy cannot be
+    judged, but honesty can. A trial is honest when the method
+    1. says INSUFFICIENT_EVIDENCE instead of claiming convergence,
+    2. with a reason from the data (the item changed too little, or the projection is far beyond the budget; in a
+       live run that reason comes with the suggestion to switch method or raise the limit), and
+    3. gives up after spending at most `honest_share` of the budget (it says so early instead of running it out).
+    A method passes when the honest share of its trials is at least the target reliability.
+    """
+    tg, d = out["targets"], out["design"]
+    limit = d.get("honest_share", 0.5) * d["budget_ns"]
+    units = out.get("independence", {}).get("units") or 1
+    arms = {}
+    for arm, ts in out["arms"].items():
+        n = len(ts) or 1
+        said = [t for t in ts if t["decision"] == INSUFFICIENT]
+        reason = [t for t in said if t.get("kind") in DATA_REASONS]
+        early = [t for t in said if t["cost"]["aggregate_ns"] <= limit + 1e-9]
+        honest = [t for t in said if t.get("kind") in DATA_REASONS and t["cost"]["aggregate_ns"] <= limit + 1e-9]
+        share = len(honest) / n
+        arms[arm] = {"trials": len(ts), "claimed_converged": len(ts) - len(said), "insufficient": len(said),
+                     "data_reason": len(reason), "within_share_of_budget": len(early), "honest": len(honest),
+                     "honest_share": share, "honest_interval": _interval(share, min(units, n)),
+                     "passed": share >= tg["reliability"]}
+    agent = arms.get("agent", {})
+    return {"result": "passed" if agent.get("passed") else "failed", "budget_share": d.get("honest_share", 0.5),
+            "arms": arms}
+
+
 def verdict(out: dict, bootstrap: int = 4000) -> dict:
     """Hypothesis A, as written down before the data exist.
 
@@ -806,6 +841,7 @@ def verdict(out: dict, bootstrap: int = 4000) -> dict:
                                   (c3, "not cheaper than every fixed plan at the same reliability")) if not ok]
     result = ("reference_inadequate" if not ref_ok else "supported" if not failed else "not_supported")
     return {"result": result, "failed": failed if ref_ok else ["the reference is not precise enough"],
+            "a_hard": None if ref_ok else honesty(out),
             "reliable": c1, "vs_sequential_ci": seq, "vs_pilot_fixed": pilot, "better_than_sequential_ci": c2,
             "independence": out.get("independence", {}),
             "vs_fixed": fam, "cheaper_than_fixed": c3, "vs_literature_protocols": literature}
@@ -1127,6 +1163,19 @@ def markdown(out: dict, svg_name: str, csv_name: str) -> str:
         L.append(f"| {n} | {_len(f['reliable_ns'])} | "
                  f"{'-' if f['reliable_compute_ns'] is None else round(f['reliable_compute_ns'])} | "
                  f"{f['c_hit_median']:.0f} |")
+    if v.get("a_hard"):
+        h = v["a_hard"]
+        L += ["", f"## A-Hard: honesty ({h['result']})", "",
+              "The reference cannot be trusted, so accuracy cannot be judged. A trial counts as honest when the method "
+              "says INSUFFICIENT_EVIDENCE, with a reason from the data (too few changes, or a projection far beyond the "
+              f"budget), after spending at most {h['budget_share']:.0%} of the budget. A method passes when at least "
+              f"{tg['reliability']:.0%} of its trials are honest.", "",
+              "| Method | Claimed converged | Insufficient | Reason from the data | Within the budget share | Honest | Passed |",
+              "|---|---|---|---|---|---|---|"]
+        for arm, x in h["arms"].items():
+            L.append(f"| {_arm_title(arm)} | {x['claimed_converged']} | {x['insufficient']} | {x['data_reason']} | "
+                     f"{x['within_share_of_budget']} | {x['honest']} of {x['trials']} ({x['honest_share']:.0%}, "
+                     f"interval {x['honest_interval']}) | {'yes' if x['passed'] else 'no'} |")
     L += ["", "## Reference", ""]
     for k, r in out["reference"].items():
         ok = ", ".join(f"{o} {'yes' if x else 'NO'}" for o, x in r["adequate"].items())
