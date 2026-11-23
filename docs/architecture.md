@@ -310,13 +310,29 @@ Changes:
 |---|---|---|
 | Trials share data | Three modes, and the report states the number of independent units. Fresh pools: each trial gets a new model pool, and the reference is the truth. Disjoint groups: trials share no replica. Shared pool: allowed, but the intervals use about usable/needed units, often 1. | `experiment_a.run`, `summarize._interval` |
 | Normal factor with 2 to 4 replicas | Student's t with n − 1 degrees of freedom where the spread between replicas is real by the chi-square test that the allocation already used (`uncertainty.replica_spread_real`). A spread that is larger only by chance keeps z, because max(within, between) already covers it. A first version used t whenever the spread was merely larger; the plan (z) and the verdict (t) then disagreed, and on the easy family the agent ran out of looks in 23 % of trials. It is used in the benchmark verdicts, the coverage check, the allocation projection (more replicas also narrow the factor), the live verdicts with the confidence criterion, and the backbone landscape error. The standard-error criterion keeps z = 1, because it is not an interval. | `uncertainty.t_factor`, `uncertainty.replica_spread_real`, `Precision.factor`, `basins.state_factors`, `allocation.allocate(t_dist)` |
-| Initial-structure bias | Automated equilibration detection (Chodera 2016): for each replica, keep the start t0 that leaves the most independent samples. Each state indicator is checked, and the latest t0 is used. At most half of the series is cut. The cut part is still counted as cost. New runs with projection allocation use it (`--burn-in auto`). Older runs and the rounds mode keep everything. Every method in Experiment A uses it, so the comparison stays fair. | `uncertainty.equilibration_start`, `basins.trim`, `LoopSettings.burn_in` |
+| Initial-structure bias | Automated equilibration detection (Chodera 2016), with one start t0 for all replicas (they start from the same structure). t0 maximises the pooled number of independent samples. It is used only if it raises that number at least 1.5 times and the replicas changed state at least 20 times (median); otherwise nothing is cut. Each state indicator is checked, and the latest accepted t0 is used. At most half of the series is cut. The cut part is still counted as cost, and the rules use only the kept time (`ItemState.cut_ns`, `ResidueReport.burn_in_ns`): the never-changing rule and the projection. A first version chose t0 per replica; an independent review showed that on short equilibrium series it followed the noise and shifted populations by 0.014 to 0.023. The joint rule leaves equilibrium data unbiased (shift below 0.001) and still finds the relaxing start of `biased_start` in 8 of 10 seeds. New runs with projection allocation use it (`--burn-in auto`). Older runs and the rounds mode keep everything. Every method in Experiment A uses it, so the comparison stays fair. | `uncertainty.joint_equilibration_start`, `basins.trim`, `LoopSettings.burn_in` |
 | The synthetic model cannot fail | `family_pool` has four families with known truth: `equilibrium`; `biased_start` (a "crystal" substate that relaxes in about 10 ns); `two_timescale` (hidden groups that exchange about every 2 ns); `hidden_slow_start` (exchange about every 10 ns, and every replica starts on one side). | `experiment_a.FAMILIES` |
 | A weak baseline | `pilot_fixed`: a pilot, one projection with the agent's own `allocate`, then a fixed plan judged once. It is now part of condition 2 of the verdict. | `experiment_a.run_pilot_fixed` |
 | Constants set by judgement | `--sensitivity`: change one constant at a time (margin, final_margin, give_up_factor, agent_looks, starting replicas, min_transitions) on every family. | `experiment_a.sensitivity` |
 | Two different starting replica counts | Experiment A now starts the agent with 3 replicas, the same as the chat plan of a live run. | `Design.replicas` |
 
-`allocation.RULE_VERSION` is now 5. A resumed projection run decides again under the new rule.
+**Adding replicas when the spread is only suggestive** (the user's choice of 2026-11-23, for the weakness on
+`two_timescale`). The projection counts the spread between replicas as extra error when the chi-square test passes
+at 0.8 (`Limits.spread_level`), not only at 0.95. With 3 replicas the spread rests on 2 degrees of freedom, so the
+agent gives up only when even the optimistic spread (its 95 % lower bound, `allocation.optimistic`) cannot reach
+the precision. When the point projection fails but the optimistic one does not, the agent adds replicas to measure
+the spread (`explore_replicas`), and every replica runs one chunk more (the live loop runs new replicas only in a
+round of positive length). This follows the same idea as the never-changing rule: give up only when even the most
+favourable reading of the data says so.
+
+**Independent code review.** A separate review of the diff found seven problems, all fixed: the per-replica
+burn-in bias and the uncounted cut time (above); coverage that ignored `Design.t_dist`; condition 2 of the verdict
+reported as failed when there were no baselines (it is now `None`); the live verdict used a slightly different
+test for t than the plan (now the same chi-square test); `two_timescale` and `hidden_slow_start` violated detailed
+balance (the rates between groups are now a flux divided by the equilibrium probability, so the chains are
+reversible like equilibrium MD, with the same truth); a distance replica with no frame in a core gave NaN.
+
+`allocation.RULE_VERSION` is now 6. A resumed projection run decides again under the new rule.
 
 **First results on the synthetic families (2026-11-23, models only, not real MD).** The settings were the
 defaults: 30 independent trials per family, each with a fresh pool of 16 × 100 ns; the reference is the known
