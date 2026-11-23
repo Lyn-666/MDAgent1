@@ -3,7 +3,7 @@
 #
 # Question: given an MD task and a precision fixed in advance, can the agent decide how many replicas,
 # how long each one runs and when to stop, so that the result is reliable for the least computing?
-# README "实验 A" explains the design. Every rule below is fixed before any data exist; the code version
+# docs/developer.md "实验 A" explains the design. Every rule below is fixed before any data exist; the code version
 # is written into runs/expA_protocol.txt before the pool is analysed.
 #
 #   Observables  backbone basins. A-Easy: phi/psi Ramachandran basins of residues that plain MD can answer,
