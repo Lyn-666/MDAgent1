@@ -1,20 +1,20 @@
 ---
-description: 查看 MDAgent 运行的进度（正在跑的和已经跑完的）
-argument-hint: "[运行名称，可省略]"
+description: Show the progress of MDAgent runs (running and finished)
+argument-hint: "[run name, optional]"
 ---
 
-用户想知道运行的进度。要查看的运行：$ARGUMENTS（为空时查看 `runs/` 里最近修改的运行）。
+The user wants to know how a run is doing. The run to check: $ARGUMENTS (if empty, the most recently modified run in `runs/`).
 
-1. 运行 `pgrep -af "mdagent (run|resume)"`，看哪些运行还在进行。
-2. 运行 `ls -t runs/ | head`，找到要看的运行目录和日志（日志一般是 `runs/<名字>.log`）。
-3. 运行 `tail -n 40 <日志文件>`。如果有 `runs/<名字>/enhanced/replica_*.json`，也读一下，其中 `ns_done` 是增强采样已完成的 ns 数。
+1. Run `pgrep -af "mdagent (run|resume)"` to see which runs are still going.
+2. Run `ls -t runs/ | head` to find the run folder and its log (usually `runs/<name>.log`).
+3. Run `tail -n 40 <log file>`. If `runs/<name>/enhanced/replica_*.json` exist, read them too: `ns_done` is the number of ns of enhanced sampling done.
 
-然后用中文简短告诉用户：
-- 还在运行，还是已经结束，或者中途停了（进程不在，日志末尾也没有 `Summary`）。
-- 现在处在哪个阶段：搭体系、普通 MD 第几轮、还是增强采样；大约完成了多少。
-- 日志里最近一次的决定（例如"所有轨迹再跑 0.1 ns"、"交给增强采样的侧链有哪些"）。
-- 已经结束时：输出文件在哪里。日志末尾的 Summary 会列出电脑名和完整路径。把完整路径告诉用户，并提醒文件在跑模拟的那台电脑上。
-- 中途停了时：用 `nohup python -m mdagent resume --run runs/<名字> > runs/<名字>.resume.log 2>&1 &` 可以从最后保存的位置接着跑。先问用户要不要续跑，得到同意后再运行。
-- 日志里有报错时：把报错原文告诉用户。
+Then tell the user briefly, in their language:
+- whether the run is still going, has finished, or stopped part way (no process, and no `Summary` at the end of the log);
+- the current stage (building the system, plain MD round N, or enhanced sampling) and roughly how much is done;
+- the latest decision in the log (e.g. "run all replicas 0.1 ns more", "side chains handed to enhanced sampling");
+- if finished: where the output files are. The Summary at the end of the log lists the computer name and full path. Give the user the full path, and remind them that the files are on the computer that ran the simulation;
+- if it stopped part way: `nohup python -m mdagent resume --run runs/<name> > runs/<name>.resume.log 2>&1 &` continues from the last saved point. Ask the user first, and run it only after they agree;
+- if the log contains an error: the exact error text.
 
-不要自己计算模拟结果。结果由程序算好：增强采样的状态比例在 `runs/<名字>/enhanced/populations.json`，运行发来的消息在 `runs/<名字>/messages.jsonl`。只转述这些文件里的内容。
+Do not compute simulation results yourself. The program computes them: enhanced-sampling populations are in `runs/<name>/enhanced/populations.json`, and messages from the run are in `runs/<name>/messages.jsonl`. Only relay what these files say.

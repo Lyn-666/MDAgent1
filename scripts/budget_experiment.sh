@@ -2,7 +2,7 @@
 # The main experiment: how should simulation time be spent to reach a precision for the lowest cost?
 #
 # It runs ONE expensive pool of independent plain MD replicas, and then replays every budget strategy
-# on that pool (python -m mdagent budget, docs/developer.md "用多少计算量：策略对照"). Replaying is exact for
+# on that pool (python -m mdagent budget, docs/developer.md "How much compute: comparing strategies"). Replaying is exact for
 # strategies that only run longer or start another independent replica, so the whole comparison costs
 # one simulation campaign instead of one per strategy.
 #

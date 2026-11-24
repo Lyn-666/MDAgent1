@@ -1074,8 +1074,8 @@ def _len(x) -> str:
 
 def markdown(out: dict, svg_name: str, csv_name: str) -> str:
     tg, s, v, d = out["targets"], out["summary"], out["verdict"], out["design"]
-    zh = {"supported": "假设 A 成立", "not_supported": "假设 A 不成立",
-          "reference_inadequate": "参考不够精确，无法判定"}[v["result"]]
+    plain = {"supported": "hypothesis A holds", "not_supported": "hypothesis A does not hold",
+             "reference_inadequate": "the reference is not precise enough to decide"}[v["result"]]
     L = [f"# Experiment A: budget allocation for unbiased MD", "",
          f"Written {time.strftime('%Y-%m-%d %H:%M')}. Pool: {out['pool']['source']} — {out['pool']['replicas']} "
          f"replicas of {out['pool']['ns_per_replica']:g} ns; items {', '.join(out['pool']['items'])}; "
@@ -1084,7 +1084,7 @@ def markdown(out: dict, svg_name: str, csv_name: str) -> str:
          f"Independent units: **{out.get('independence', {}).get('units', '?')}** "
          f"({out.get('independence', {}).get('mode', 'shared_pool')}: {out.get('independence', {}).get('note', '')}). "
          "Every interval over trials below uses this number, not the number of trials.", "",
-         f"## Verdict: {v['result']}（{zh}）", ""]
+         f"## Verdict: {v['result']} ({plain})", ""]
     if v["failed"]:
         L.append("Failed: " + "; ".join(v["failed"]) + ".")
         L.append("")

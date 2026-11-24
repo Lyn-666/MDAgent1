@@ -1,39 +1,39 @@
 ---
-description: 用一句话描述 MD 运行要求，转成 mdagent run 命令，确认后在后台启动
-argument-hint: "[要求，例如：用 Amber，看苯周围的口袋，先检查质子化]"
+description: Describe an MD run in one sentence, turn it into an mdagent run command, and start it in the background after confirmation
+argument-hint: "[request, e.g.: use Amber, look at the pocket around benzene, check protonation first]"
 ---
 
-用户的要求：$ARGUMENTS
+The user's request: $ARGUMENTS
 
-你是 MDAgent 的操作窗口。把用户的要求转成一条 `python -m mdagent run` 命令，得到用户确认后在后台启动。按下面的步骤做，不要跳步。
+You are the MDAgent operator. Turn the user's request into one `python -m mdagent run` command, and start it in the background once the user confirms. Follow these steps in order. Do not skip any.
 
-1. **检查环境。** 运行 `python -c "import mdagent, openmm; print(openmm.__version__)"`。如果失败，告诉用户：先退出 Claude Code，运行 `conda activate mdagent`，再在 MDAgent1 文件夹里重新运行 `claude`。然后停下。
+1. **Check the environment.** Run `python -c "import mdagent, openmm; print(openmm.__version__)"`. If it fails, tell the user to quit Claude Code, run `conda activate mdagent`, and run `claude` again in the MDAgent1 folder. Then stop.
 
-2. **确定输入文件。** 有两种输入：
-   - 蛋白 PDB 文件（`--pdb`）：MDAgent 自己搭体系，配体会被删掉。
-   - 用户自己准备好的 Amber 体系（`.parm7`/`.prmtop` 加 `.rst7`/`.inpcrd`，用 `--prmtop` 和 `--inpcrd`）：原样使用，配体保留。用户提到这类文件，或者要求保留配体时用这种。
-   - 用户给出 PDB 编号（例如 3HTB）时，先运行 `python -m mdagent fetch <编号>`，它下载到 `structures/<编号>.pdb`；命令里用 `--pdb-id <编号>`，或者 `--pdb structures/<编号>.pdb`。
-   用户没有提到文件时用 `examples/181L.pdb`，并在第 5 步告诉用户。文件不存在时问用户，然后停下。要保留配体但用户只给了 PDB 文件时，告诉用户需要先用 tleap 等工具准备好 Amber 体系，然后停下。
+2. **Find the input files.** There are two kinds of input:
+   - A protein PDB file (`--pdb`): MDAgent builds the system itself, and ligands are removed.
+   - An Amber system the user prepared (`.parm7`/`.prmtop` plus `.rst7`/`.inpcrd`, with `--prmtop` and `--inpcrd`): used as it is, and ligands are kept. Use this when the user mentions such files or wants to keep a ligand.
+   - For a PDB ID (e.g. 3HTB), first run `python -m mdagent fetch <ID>`. It downloads to `structures/<ID>.pdb`. In the command, use `--pdb-id <ID>` or `--pdb structures/<ID>.pdb`.
+   If the user names no file, use `examples/181L.pdb` and say so in step 5. If a file does not exist, ask the user and stop. If the user wants to keep a ligand but gives only a PDB file, explain that they must first prepare an Amber system (e.g. with tleap), and stop.
 
-3. **读取 PDB 概况。** 运行：
-   `python -m mdagent info --pdb <PDB 文件>`（Amber 体系用 `--prmtop <文件>`；Amber 文件里残基从 1 开始编号，没有链名，`--residues` 写成 `3-5` 这样不带链名的形式）
-   它列出链、残基编号范围和配体名称。只能使用这里出现的配体名称和残基编号。用户说的配体或残基在这里找不到时（例如用户说 ATP，文件里没有），向用户提问，然后停下。
+3. **Read the PDB summary.** Run:
+   `python -m mdagent info --pdb <PDB file>` (for an Amber system, `--prmtop <file>`. Amber files number residues from 1 and have no chain IDs, so write `--residues` without a chain, e.g. `3-5`.)
+   It lists the chains, residue number ranges and ligand names. Use only ligand names and residue numbers that appear here. If a ligand or residue the user named is missing (e.g. the user says ATP and the file has none), ask the user and stop.
 
-3b. **检查结构（用 PDB 文件或编号时）。** 运行 `python -m mdagent check --pdb <文件>`（可加 `--chains`、`--keep-tags`、`--uniprot`）。有 PROBLEM 时，把问题和"What to do"告诉用户，问怎么处理，然后停下。只有用户明确说"有问题也继续"时，才在命令里加 `--accept-problems`。
+3b. **Check the structure (PDB file or ID).** Run `python -m mdagent check --pdb <file>` (options: `--chains`, `--keep-tags`, `--uniprot`). If it reports a PROBLEM, tell the user the problem and its "What to do", ask how to proceed, and stop. Add `--accept-problems` only if the user explicitly says to continue despite problems.
 
-4. **转成命令。** 运行 `python -m mdagent run --help` 查看所有选项和默认值。规则：
-   - 只设置用户明确要求的选项，其余保持默认。不要自作主张改参数。
-   - 目标区域用 `--around-ligand <配体名>`（可加 `--cutoff-angstrom`），或 `--residues A:99-120`。
-   - 用户说"开发测试"或"短一点"时，用很短的参数（181L 还要加 `--accept-problems`，它和参考序列有两处差异）：`--replicas 2 --first-ns 0.1 --extend-ns 0.1 --max-ns 0.3 --no-flip-patience-ns 0.25 --enhanced-ns 0.1 --equil-ps 60`。
-   - 输出目录用 `runs/<简短英文名>`，必须是不存在的目录（先用 `ls runs` 检查）。
-   - 要求里有这些选项做不到的事情时，告诉用户，然后停下。
+4. **Build the command.** Run `python -m mdagent run --help` to see all options and defaults. Rules:
+   - Set only the options the user explicitly asked for. Keep all other defaults. Do not change parameters on your own.
+   - Target region: `--around-ligand <ligand>` (optionally `--cutoff-angstrom`), or `--residues A:99-120`.
+   - If the user says "development test" or "short", use very short settings: `--replicas 2 --first-ns 0.1 --extend-ns 0.1 --max-ns 0.3 --no-flip-patience-ns 0.25 --enhanced-ns 0.1 --equil-ps 60`. For 181L, also add `--accept-problems` (it differs from its reference sequence at two positions).
+   - Output folder: `runs/<short English name>`. It must not exist yet (check with `ls runs`).
+   - If the request needs something these options cannot do, tell the user and stop.
 
-5. **请用户确认。** 用中文简短列出：PDB 文件、目标区域、哪些设置改了默认值、预计的模拟总长度，以及完整命令。问用户"要开始吗？"，然后停下，等用户回答。用户没有明确同意之前，不要运行。
+5. **Ask for confirmation.** In the user's language, list briefly: the PDB file, the target region, the settings changed from their defaults, the expected total simulation length, and the full command. Ask "Start?" and stop. Do not run anything until the user clearly agrees.
 
-6. **在后台启动。** 用户同意后运行：
-   `mkdir -p runs && nohup python -m mdagent run <选项> --out runs/<名字> > runs/<名字>.log 2>&1 &`
-   等 20 秒，运行 `tail -n 15 runs/<名字>.log`，确认已开始（看到 `Building the system` 或 `Round 1`）。如果日志里有 `error`，把错误告诉用户。
+6. **Start in the background.** After the user agrees, run:
+   `mkdir -p runs && nohup python -m mdagent run <options> --out runs/<name> > runs/<name>.log 2>&1 &`
+   Wait 20 seconds and run `tail -n 15 runs/<name>.log` to confirm it started (look for `Building the system` or `Round 1`). If the log contains `error`, tell the user the error.
 
-7. **告诉用户：** 运行已在后台开始，关掉 Claude Code 也不会停；日志在 `runs/<名字>.log`；以后用 `/md-status` 查看进度。
+7. **Tell the user:** the run started in the background and continues after Claude Code closes; the log is `runs/<name>.log`; use `/md-status` to check progress.
 
-不要自己计算模拟结果。结果由程序算好：增强采样的状态比例在 `runs/<名字>/enhanced/populations.json`，运行发来的消息在 `runs/<名字>/messages.jsonl`。只转述这些文件里的内容。
+Do not compute simulation results yourself. The program computes them: enhanced-sampling populations are in `runs/<name>/enhanced/populations.json`, and messages from the run are in `runs/<name>/messages.jsonl`. Only relay what these files say.

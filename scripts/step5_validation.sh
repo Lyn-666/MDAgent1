@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Step 5: check that the agent judges correctly on real simulations, not only that it runs.
 #
-# Two test proteins. The plan is the same for any protein (docs/developer.md "第 5 步"); pick, for each scenario,
+# Two test proteins. The plan is the same for any protein (docs/developer.md "Step 5"); pick, for each scenario,
 # residues of that kind in your protein.
 #
 # 1UBQ (human ubiquitin, 76 residues, no ligand; default). The file names UniProt P62988, which is no
