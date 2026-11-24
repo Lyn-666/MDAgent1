@@ -294,3 +294,15 @@ def test_projection_works_with_the_default_patience(tmp_path):
     rep = ResidueReport("A", 5, "", transitions=[0, 0], occupancies=[], dominant=[], name="rama:A:5",
                         quantity="backbone", standard_error={"alpha_R": 0.2})
     assert allocation_next(tmp_path, state, [rep], [Decision("rama:A:5", "extend", "")]) > 0
+
+
+def test_too_few_changes_names_the_item_and_the_replicas():
+    from mdagent.allocation import Limits, next_step
+    from mdagent.allocation import ItemState
+
+    ok = ItemState("A:47-A:51", {"near": 0.01, "far": 0.01}, 0.01, 0.0, [40, 50, 60], False)
+    slow = ItemState("A:51-A:58", {"near": 0.01, "far": 0.01}, 0.01, 0.0, [8, 10, 2], False)
+    step = next_step([ok, slow], 3, 128.0, 8, 0, 2.4, 0.05,
+                     Limits(max_replicas=10, max_ns=2000, budget_ns=20000, chunk_ns=100))
+    assert step.kind == "too_few_changes"
+    assert "A:51-A:58 [8, 10, 2]" in step.reason and "A:47-A:51" not in step.reason

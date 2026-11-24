@@ -146,7 +146,9 @@ def allocate(items: list, n: int, ns: float, z: float, tolerance: float, max_n: 
 #   give up only when even the optimistic spread (95 % lower bound) cannot reach the precision, and otherwise add
 #   replicas to measure the spread.
 # 7 (2026-11-23): when everything that changed state is precise enough, items that never changed stop plain MD.
-RULE_VERSION = 7
+# 8 (2026-11-24): automated burn-in counts a stretch without changes as one sample (uncertainty.indicator_samples),
+#   so it no longer cuts away the part with the changes.
+RULE_VERSION = 8
 
 
 def stuck_projection(n: int, ns: float, z: float, tolerance: float) -> tuple[float, float, float]:
@@ -262,7 +264,10 @@ def _next_step(items: list, n: int, ns: float, look: int, tests_before: int, z: 
     new_n, new_ns = n, ns
     if not adequate:
         new_ns = min(max_ns, (4 if last else 2) * ns)
-        why = "too few state changes to trust the errors yet; running longer"
+        short = [f"{i.label} {list(i.transitions)}" for i in active
+                 if not (i.transitions and min(i.transitions) >= limits.min_transitions)]
+        why = (f"too few state changes to trust the errors yet (changes per replica: {'; '.join(short)}; every "
+               f"replica needs at least {limits.min_transitions}); running longer")
     else:
         plan = allocate(active, n, ns, z, tolerance, max_n, max_ns, equil_ns, limits.t_dist, limits.spread_level)
         hopeless = plan is None or plan[2] > limits.give_up_factor * limits.budget_ns

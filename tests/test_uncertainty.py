@@ -119,3 +119,29 @@ def test_compare_counts_tiny_differences_as_the_same(tmp_path):
     finally:
         report.final_results = old
     assert agree, text
+
+
+def test_burn_in_does_not_cut_away_the_changes_of_a_replica_that_freezes_later():
+    """HP35, 2026-11-24: a replica changed state often, then stayed in one state. The burn-in rated the frozen tail
+    as many independent samples and cut the active half away, leaving 0 changes, so the run kept doubling."""
+    import numpy as np
+
+    from mdagent.uncertainty import indicator_samples, joint_equilibration_start
+
+    rng = np.random.default_rng(0)
+
+    def flipping(n, p):
+        s, cur = np.zeros(n, int), 0
+        for i in range(n):
+            if rng.random() < p:
+                cur = 1 - cur
+            s[i] = cur
+        return s
+
+    n = 12800
+    a, b = flipping(n, 0.004), flipping(n, 0.004)
+    c = np.concatenate([flipping(n // 2, 0.004), np.zeros(n // 2, int)])
+    t0 = joint_equilibration_start([a, b, c], 2)
+    kept = [int(np.count_nonzero(s[t0:][1:] != s[t0:][:-1])) for s in (a, b, c)]
+    assert min(kept) >= 20
+    assert indicator_samples(np.zeros(1000)) == 1.0          # a frozen stretch is one sample

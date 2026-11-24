@@ -290,6 +290,20 @@ def statistical_inefficiency(x: np.ndarray, min_lag: int = 3) -> float:
     return max(g, 1.0)
 
 
+def indicator_samples(x: np.ndarray) -> float:
+    """Independent samples in a 0/1 indicator series: len / g, but at most the number of stays (changes + 1).
+
+    A stretch in which the state never changes holds one stay, so it is one sample of the occupancy, however long.
+    g alone calls it uncorrelated (a constant series gives g = 1), so a frozen tail would look like the best data,
+    and automated equilibration detection would cut away the part with the changes (seen on 2026-11-24 in a HP35
+    run: a replica with 50 changes kept only 2). For series that change often the cap does not bind."""
+    x = np.asarray(x)
+    if len(x) == 0:
+        return 0.0
+    stays = 1 + int(np.count_nonzero(x[1:] != x[:-1]))
+    return min(len(x) / statistical_inefficiency(x), float(stays))
+
+
 def equilibration_start(states: np.ndarray, n_states: int | None = None, candidates: int = 25,
                         max_fraction: float = 0.5) -> int:
     """First frame to keep, by automated equilibration detection (Chodera, JCTC 2016, 12, 1799).
@@ -314,7 +328,7 @@ def equilibration_start(states: np.ndarray, n_states: int | None = None, candida
             continue                     # never or always in this state: no information about a transient
         best, at = -1.0, first
         for t0 in starts:
-            neff = (n - t0) / statistical_inefficiency(x[t0:])
+            neff = indicator_samples(x[t0:])
             if neff > best:
                 best, at = neff, int(t0)
         best_t0 = max(best_t0, at)
@@ -326,7 +340,8 @@ def joint_equilibration_start(states: list, n_states: int | None = None, candida
     """One first frame for all replicas together (they start from the same prepared structure, so they share the
     transient), by automated equilibration detection on the pooled number of independent samples.
 
-    For each state indicator: N_eff(t0) = sum over replicas of (n_r - t0) / g(x_r[t0:]). The best t0 is kept only
+    For each state indicator: N_eff(t0) = sum over replicas of (n_r - t0) / g(x_r[t0:]), each at most the number
+    of stays in x_r[t0:] (indicator_samples: a frozen tail is one sample, not many). The best t0 is kept only
     if it raises N_eff at least `min_gain` times over keeping everything; otherwise nothing is cut. The latest such
     t0 over the states is used. Why jointly and with a gain threshold (review of 2026-11-23): choosing a start per
     replica on short series follows the noise and tends to cut just after a stay in the minor state, which biased
@@ -351,7 +366,7 @@ def joint_equilibration_start(states: list, n_states: int | None = None, candida
         xs = [(s[:n] == state).astype(float) for s in arrs]
         if all(x.min() == x.max() for x in xs):
             continue
-        neff = [sum((n - t0) / statistical_inefficiency(x[t0:]) for x in xs) for t0 in starts]
+        neff = [sum(indicator_samples(x[t0:]) for x in xs) for t0 in starts]
         i = int(np.argmax(neff))
         if neff[i] >= min_gain * neff[0]:
             best_t0 = max(best_t0, int(starts[i]))

@@ -327,6 +327,11 @@ def allocation_next(run_dir, state, reports, decisions) -> float:
     alloc["tests"] += 1 if step.counted else 0
     what = f"{n} × {ns:g} ns"
     why_zh = STEP_ZH.get(step.kind, step.reason)
+    if step.kind == "too_few_changes":
+        short = [f"{i.label} {list(i.transitions)}" for i in items
+                 if i.label not in step.set_aside and not (i.transitions and min(i.transitions) >= limits.min_transitions)]
+        why_zh = (f"状态变化还太少，误差还不可信，先跑长一些（各条重复的变化次数：{'；'.join(short)}；"
+                  f"每条重复至少要 {limits.min_transitions} 次）")
     stuck = [k for k, v in step.set_aside.items() if v == "stuck"]
     if step.kind == "stuck" and stuck:
         from .allocation import stuck_projection
