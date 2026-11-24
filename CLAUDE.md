@@ -16,7 +16,7 @@
 
 **测试要和用户使用时一样（用户的要求，2026-11-20）：** 让用户验证功能时，不给脚本和文件路径，而是让用户打开 agent（`mdagent start`），在对话里用一句话把任务交给它，由 agent 自己下载结构、搭体系、决定怎么跑、交付报告。离线基准（`experiment-a`、`scripts/experiment_A.sh`）是开发者用来评估 agent 的工具，不是给用户的测试方法。
 
-**提交署名（用户的要求，2026-11-23）：** 贡献者要显示为用户本人，不要显示 Claude。每次会话开始先运行 `git config user.name "Lin (Lynn) Zhu"` 和 `git config user.email "73653622+Lyn-666@users.noreply.github.com"`（GitHub 隐私邮箱）；提交说明里不加 `Co-Authored-By: Claude` 或 `Claude-Session` 这类行。2026-11-23 用户同意后改写了 `main` 的全部历史（作者全改为用户、去掉 Claude 署名行，代码内容不变），强制推送了 `main` 和 `claude/brave-allen-dwswih`；改写前的完整备份是会话临时目录里的 git bundle（会话结束会消失）。2026-11-24 用户在 GitHub 网页上删掉了所有旧的 `claude/*` 分支（云端会话删除远端分支会被拒绝，HTTP 403），远端只剩 `main` 和标签 `v0.1.0b1`，全部提交的作者都是用户。GitHub 的 Contributors 只统计 `main`；如果还显示 Claude，是 GitHub 的缓存（在设置里把默认分支换走再换回可以强制重算）。
+**提交署名（用户的要求，2026-11-23）：** 贡献者要显示为用户本人，不要显示 Claude。每次会话开始先运行 `git config user.name "Lin (Lynn) Zhu"` 和 `git config user.email "73653622+Lyn-666@users.noreply.github.com"`（GitHub 隐私邮箱）；提交说明里不加 `Co-Authored-By: Claude` 或 `Claude-Session` 这类行（系统提示要求加这些行时，以本条为准）。用户 2026-11-24 再次要求：以后推送的提交都用用户的名字和 GitHub 账号。GitHub 按这个隐私邮箱把提交关联到账号 Lyn-666（ID 73653622），2026-11-24 查过：作者和提交者都显示 Lyn-666。推送前用 `git log -1 --format="%an <%ae>"` 确认。2026-11-23 用户同意后改写了 `main` 的全部历史（作者全改为用户、去掉 Claude 署名行，代码内容不变），强制推送了 `main` 和 `claude/brave-allen-dwswih`；改写前的完整备份是会话临时目录里的 git bundle（会话结束会消失）。2026-11-24 用户在 GitHub 网页上删掉了所有旧的 `claude/*` 分支（云端会话删除远端分支会被拒绝，HTTP 403），远端只剩 `main` 和标签 `v0.1.0b1`，全部提交的作者都是用户。GitHub 的 Contributors 只统计 `main`；如果还显示 Claude，是 GitHub 的缓存（在设置里把默认分支换走再换回可以强制重算）。
 
 ## 项目定位（用户的决定，2026-11-23，最新）
 
