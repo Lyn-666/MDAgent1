@@ -325,13 +325,27 @@ def allocation_next(run_dir, state, reports, decisions) -> float:
                      state.md.equilibration_ps / 1000.0)
     alloc["looks"] = look
     alloc["tests"] += 1 if step.counted else 0
+    rate_note_zh = ""
+    if state.quantity == "structure_stability" and step.action == CONTINUE:
+        # "Stable" needs enough watched time for the departure-rate bound (stability.analyze, verdict too_short):
+        # go straight to the length that gives it, within the limits, instead of small steps.
+        need_total = max([(r.extra or {}).get("rate_needs_total_ns", 0.0) for r in reports] or [0.0])
+        burn = max([r.burn_in_ns or 0.0 for r in reports] or [0.0])
+        need_ns = round(min(limits.max_ns, burn + need_total / max(step.replicas, 1)) * 1.05, 6) if need_total else 0.0
+        need_ns = min(need_ns, limits.max_ns, limits.budget_ns / max(step.replicas, 1))
+        if need_ns > step.ns + 1e-9:
+            step.ns = need_ns
+            step.reason = (step.reason.rstrip(". ") + f"; the departure-rate bound needs about {need_total:.3g} ns "
+                           f"watched in all, so every replica runs to {need_ns:g} ns")
+            rate_note_zh = (f"；要把离开速率的上限压到目标以下，所有重复合计大约要观察 {need_total:.3g} ns，所以每条跑到 "
+                            f"{need_ns:g} ns")
     what = f"{n} × {ns:g} ns"
-    why_zh = STEP_ZH.get(step.kind, step.reason)
+    why_zh = STEP_ZH.get(step.kind, step.reason) + rate_note_zh
     if step.kind == "too_few_changes":
         short = [f"{i.label} {list(i.transitions)}" for i in items
                  if i.label not in step.set_aside and not (i.transitions and min(i.transitions) >= limits.min_transitions)]
         why_zh = (f"状态变化还太少，误差还不可信，先跑长一些（各条重复的变化次数：{'；'.join(short)}；"
-                  f"每条重复至少要 {limits.min_transitions} 次）")
+                  f"每条重复至少要 {limits.min_transitions} 次）{rate_note_zh}")
     stuck = [k for k, v in step.set_aside.items() if v == "stuck"]
     if step.kind == "stuck" and stuck:
         from .allocation import stuck_projection

@@ -148,7 +148,8 @@ def allocate(items: list, n: int, ns: float, z: float, tolerance: float, max_n: 
 # 7 (2026-11-23): when everything that changed state is precise enough, items that never changed stop plain MD.
 # 8 (2026-11-24): automated burn-in counts a stretch without changes as one sample (uncertainty.indicator_samples),
 #   so it no longer cuts away the part with the changes.
-RULE_VERSION = 8
+# 9 (2026-11-24): structure stability stops only when the departure-rate bound reaches its goal (default 10 per µs).
+RULE_VERSION = 9
 
 
 def stuck_projection(n: int, ns: float, z: float, tolerance: float) -> tuple[float, float, float]:

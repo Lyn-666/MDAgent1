@@ -12,7 +12,7 @@ Its main goal is **no wasted simulation**. It starts with 3 short replicas. Then
 | A distance between two atoms (salt bridge, pocket opening) | Populations of the "near" and "far" states |
 | Backbone conformations | Ramachandran basin populations, transition rates, and a φ/ψ free-energy surface |
 | Whether a change happens | When and in which replica it is seen. The run stops once it is seen. |
-| Structural stability | RMSD and radius of gyration: whether they are steady, their means, an RMSD–Rg free-energy surface, and conformational clusters |
+| Structural stability | RMSD and radius of gyration: whether they are steady, their means, an RMSD–Rg free-energy surface, and conformational clusters. "Stable" means the structure was watched long enough: by default, at most 10 departures per µs (about 300 ns in total). Say *"stable for 1 µs"* for a stricter check. |
 
 Plain MD is the default. When a conformation does not change, the agent can switch to enhanced sampling (metadynamics, with the bias removed afterwards). Adaptive sampling is optional. MDAgent does not compute binding free energies.
 

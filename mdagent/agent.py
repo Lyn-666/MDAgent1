@@ -223,6 +223,7 @@ class Goal:
     stability_tolerance_nm: float = 0.02
     rmsd_cutoff_nm: float = 0.3
     cluster_cutoff_nm: float = 0.15
+    max_departure_rate_per_us: float = 10.0
     cluster: bool = False
 
     @classmethod
@@ -535,7 +536,8 @@ def stability_settings(state: RunState):
 
     g = state.the_goal()
     return StabilitySettings(tolerance_nm=g.stability_tolerance_nm, rmsd_cutoff_nm=g.rmsd_cutoff_nm,
-                             cluster_cutoff_nm=g.cluster_cutoff_nm)
+                             cluster_cutoff_nm=g.cluster_cutoff_nm,
+                             max_departure_rate_per_us=g.max_departure_rate_per_us)
 
 
 def _diagnose_stability(run_dir: Path, state: RunState) -> list[ResidueReport]:

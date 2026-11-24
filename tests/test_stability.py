@@ -29,7 +29,8 @@ def steady(n_rep=3, n=3000, rmsd=0.15, rg=1.20, seed=1):
 
 def test_a_steady_structure_is_ok_and_its_mean_is_right():
     r, g = steady()
-    reports, details = analyze(r, g, StabilitySettings(), 0.05, DT, 30.0)
+    # 3 x 30 ns: a departure-rate goal of 50 per µs is reachable (bound about 33 per µs).
+    reports, details = analyze(r, g, StabilitySettings(max_departure_rate_per_us=50), 0.05, DT, 30.0)
     by = {x.name: x for x in reports}
     assert by["RMSD"].verdict == "ok" and by["Rg"].verdict == "ok"
     assert abs(by["RMSD"].populations["mean"] - 0.15) < 0.01
@@ -53,7 +54,7 @@ def test_the_relaxation_at_the_start_is_left_out():
     relax = np.linspace(0.02, 0.15, 400)       # the structure relaxes away from the crystal, then stays
     r = [np.concatenate([relax + ar1(400, 0, 0.005, 0.5, rng), ar1(4000, 0.15, 0.02, 0.9, rng)]) for _ in range(3)]
     g = [ar1(4400, 1.2, 0.01, 0.9, rng) for _ in range(3)]
-    reports, details = analyze(r, g, StabilitySettings(), 0.05, DT, 44.0)
+    reports, details = analyze(r, g, StabilitySettings(max_departure_rate_per_us=50), 0.05, DT, 44.0)
     assert details["burn_in_frames"] > 0
     assert abs(reports[0].populations["mean"] - 0.15) < 0.01
     assert reports[0].verdict == "ok"
@@ -79,11 +80,12 @@ def test_native_time_departures_and_the_upper_bound():
     stays = [np.full(1000, 0.1)]
     out = native(stays, s, DT)
     assert out["fraction"] == 1.0 and out["departures_per_replica"] == [0]
-    assert out["departure_rate_upper_per_us"] == pytest.approx(3.0 / 10.0 * 1000.0)
+    assert out["departure_rate_upper_per_us"] == pytest.approx(2.996 / 10.0 * 1000.0, rel=1e-3)
+    assert out["needed_total_ns"] == pytest.approx(2.996 / 10.0 * 1000.0, rel=1e-3)   # goal 10 per µs: ~300 ns
     leaves = [np.concatenate([np.full(500, 0.1), np.full(500, 0.5)])]
     out = native(leaves, s, DT)
     assert out["departures_per_replica"] == [1] and out["fraction"] == pytest.approx(0.5)
-    assert "departure_rate_upper_per_us" not in out
+    assert out["departure_rate_upper_per_us"] == pytest.approx(4.744 / 10.0 * 1000.0, rel=1e-3)   # one departure
     # Hysteresis: wobbling around the cutoff inside the buffer is not a departure.
     wobble = [0.3 + 0.02 * np.sin(np.arange(1000))]
     assert native(wobble, s, DT)["departures_per_replica"] == [0]
@@ -108,7 +110,7 @@ def test_save_writes_the_files(tmp_path):
     names = {p.name for p in paths}
     assert {"summary.json", "rmsd_rg.csv", "rmsd_rg.svg", "fes_rmsd_rg.csv", "fes_rmsd_rg.svg"} <= names
     summary = json.loads((tmp_path / "summary.json").read_text())
-    assert summary["items"]["RMSD"]["verdict"] in ("ok", "imprecise", "drifting", "rare_flips")
+    assert summary["items"]["RMSD"]["verdict"] in ("ok", "imprecise", "drifting", "rare_flips", "too_short")
 
 
 # ------------------------------------------------------------------------------------------------------------------
@@ -195,3 +197,43 @@ def test_the_chinese_report_describes_the_atoms_in_chinese():
     assert _selection_zh("C-alpha atoms of the whole protein (35 atoms)") == "整个蛋白的Cα 原子（35 个原子）"
     assert "重原子" in _selection_zh("heavy atoms of A:VAL111 (7 atoms; fewer than 5 residues)")
     assert _selection_zh("something else") == "something else"
+
+
+def test_stable_needs_enough_watched_time_for_the_departure_rate_goal():
+    """Precise means alone are not "stable": the 95 % bound of the departure rate must reach its goal (default 10 per
+    µs, about 300 ns in all without a departure). For every system, not only the one where this was found."""
+    short_r, short_g = steady(n=3000)                     # 3 x 30 ns = 90 ns: bound about 33 per µs
+    reports, details = analyze(short_r, short_g, StabilitySettings(), 0.05, DT, 30.0)
+    by = {x.name: x for x in reports}
+    assert by["RMSD"].verdict == "too_short" and by["Rg"].verdict == "ok"
+    assert by["RMSD"].extra["rate_needs_total_ns"] == pytest.approx(299.6, rel=1e-2)
+    long_r, long_g = steady(n=11000, seed=7)               # 3 x 110 ns = 330 ns: bound about 9 per µs
+    reports, _ = analyze(long_r, long_g, StabilitySettings(), 0.05, DT, 110.0)
+    assert all(x.verdict == "ok" for x in reports)
+
+
+def test_rate_upper_is_the_poisson_bound():
+    from mdagent.stability import rate_upper
+
+    assert rate_upper(0) == pytest.approx(2.996, abs=1e-3)
+    assert rate_upper(1) == pytest.approx(4.744, abs=1e-3)
+
+
+def test_a_stability_run_extends_straight_to_the_length_the_rate_goal_needs(tmp_path):
+    from dataclasses import asdict
+
+    from mdagent.agent import Decision, Goal, LoopSettings, RunState
+    from mdagent.policy import allocation_next
+    from mdagent.simulate import MDSettings
+
+    r, g = steady(n=200)                                    # 3 x 2 ns: precise and steady, far too short to be "stable"
+    reports, _ = analyze(r, g, StabilitySettings(), 0.05, DT, 2.0, burn_in="none")
+    state = RunState(pdb="x", target_description="t", target=[], n_replicas=3, base_seed=1, md=MDSettings(),
+                     loop=LoopSettings(first_ns=1.0, max_ns=2000.0), rounds_ns=[1.0, 1.0],
+                     goal=asdict(Goal(quantity="structure_stability", allocation="projection")))
+    state.notes["allocation"] = {"looks": 1, "tests": 0, "counting": 2}
+    state.save(tmp_path)
+    decisions = [Decision(x.label, "extend", "") for x in reports]
+    more = allocation_next(tmp_path, state, reports, decisions)
+    # About 300 ns in all over 3 replicas (plus 5 %), not one more small step.
+    assert 2.0 + more == pytest.approx(300 / 3 * 1.05, rel=0.05)

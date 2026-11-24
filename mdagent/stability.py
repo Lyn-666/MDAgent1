@@ -45,6 +45,7 @@ class StabilitySettings:
     drift_factor: float = 3.0        # steady state: drift plus its half-width at most this x tolerance_nm
     cluster_cutoff_nm: float = 0.15  # GROMOS clustering cutoff (clustering.py)
     min_ca: int = 5                  # fewer residues than this: use all heavy atoms of the region
+    max_departure_rate_per_us: float = 10.0   # stop only when the 95 % upper bound of the departure rate is this low
 
     @classmethod
     def from_dict(cls, d: dict | None) -> "StabilitySettings":
@@ -127,8 +128,17 @@ def drift(values: list[np.ndarray], z: float, tolerance_nm: float, factor: float
             "limit_nm": factor * tolerance_nm, "per_replica_nm": d_i}
 
 
+def rate_upper(k: int, confidence: float = 0.95) -> float:
+    """Upper confidence bound of a Poisson mean after seeing k events: 3.0 for k = 0, 4.74 for k = 1, ..."""
+    from scipy.stats import chi2
+
+    return 0.5 * float(chi2.ppf(confidence, 2 * k + 2))
+
+
 def native(rmsd: list[np.ndarray], s: StabilitySettings, dt_ns: float) -> dict:
-    """Time fraction native-like (RMSD below the cutoff, with hysteresis) and the departures."""
+    """Time fraction native-like (RMSD below the cutoff, with hysteresis), the departures, and the 95 % upper bound
+    of the departure rate (Poisson). needed_total_ns: the watched time (all replicas) at which that bound reaches
+    s.max_departure_rate_per_us, if no further departure happens."""
     from .observables import two_state
 
     fractions, departures, watched = [], [], 0.0
@@ -140,8 +150,12 @@ def native(rmsd: list[np.ndarray], s: StabilitySettings, dt_ns: float) -> dict:
         watched += len(v) * dt_ns
     out = {"fraction_per_replica": fractions, "fraction": float(np.nanmean(fractions)) if fractions else float("nan"),
            "departures_per_replica": departures, "watched_ns": watched}
-    if sum(departures) == 0 and watched > 0:
-        out["departure_rate_upper_per_us"] = 3.0 / watched * 1000.0
+    k = sum(departures)
+    if watched > 0:
+        out["departure_rate_per_us"] = k / watched * 1000.0
+        out["departure_rate_upper_per_us"] = rate_upper(k) / watched * 1000.0
+    out["max_departure_rate_per_us"] = s.max_departure_rate_per_us
+    out["needed_total_ns"] = rate_upper(k) / s.max_departure_rate_per_us * 1000.0
     return out
 
 
@@ -205,6 +219,13 @@ def analyze(rmsd: list[np.ndarray], rg: list[np.ndarray], s: StabilitySettings, 
                                         f"{dr['limit_nm']:.3f} nm)")
         elif half > s.tolerance_nm:
             verdict, why = "imprecise", f"steady, but the interval half-width is {half:.3f} nm (asked {s.tolerance_nm:g} nm)"
+        elif name == "RMSD" and nat.get("departure_rate_upper_per_us", float("inf")) > s.max_departure_rate_per_us:
+            # Precise means say nothing about longer times. "Stable" needs the structure watched long enough that
+            # leaving it would have been seen: the 95 % bound of the departure rate must reach the goal.
+            verdict, why = "too_short", (
+                f"steady and precise, but watched only {nat['watched_ns']:.3g} ns in all: the departure rate is at "
+                f"most {nat.get('departure_rate_upper_per_us', float('inf')):.3g} per µs (95 %), the goal is at most "
+                f"{s.max_departure_rate_per_us:g} per µs, which needs about {nat['needed_total_ns']:.3g} ns in all")
         else:
             verdict, why = "ok", "steady and precise enough"
         reason = f"{name} {m['mean']:.3f} ± {half:.3f} nm (interval half-width); {why}."
@@ -216,7 +237,8 @@ def analyze(rmsd: list[np.ndarray], rg: list[np.ndarray], s: StabilitySettings, 
                             standard_error={"mean": m["se"]}, halfwidth={"mean": half},
                             replicas_differ=bool(real), error_from_replicas=m["between"] > m["within"],
                             error_within=m["within"], error_between=m["between"], burn_in_ns=t0 * dt_ns,
-                            extra={"unit": "nm", "drift": dr, "selection": selection})
+                            extra={"unit": "nm", "drift": dr, "selection": selection,
+                                   **({"rate_needs_total_ns": nat["needed_total_ns"]} if name == "RMSD" else {})})
         reports.append(rep)
         details["items"][name] = {**m, "halfwidth_nm": half, "drift": dr, "verdict": verdict}
     details["landscape"] = landscape(kept_r, kept_g, temperature_k)
@@ -373,7 +395,8 @@ def format_report(reports: list, details: dict | None = None) -> str:
         line = (f"Native-like (RMSD below {details['settings']['rmsd_cutoff_nm']:g} nm): "
                 f"{nat['fraction']:.0%} of the kept time; departures per replica {nat['departures_per_replica']}.")
         if "departure_rate_upper_per_us" in nat:
-            line += (f" No departure in {nat['watched_ns']:.3g} ns: the rate is at most "
-                     f"{nat['departure_rate_upper_per_us']:.3g} per µs (95 %).")
+            line += (f" {sum(nat['departures_per_replica'])} departures in {nat['watched_ns']:.3g} ns: the rate is at "
+                     f"most {nat['departure_rate_upper_per_us']:.3g} per µs (95 %; goal at most "
+                     f"{nat.get('max_departure_rate_per_us', 10):g}).")
         lines.append(line)
     return "\n".join(lines)

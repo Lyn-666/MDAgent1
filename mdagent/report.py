@@ -201,12 +201,20 @@ def _stability_section(run_dir: Path, state: dict, T) -> list:
                     f"(per replica: {', '.join(f'{f:.0%}' for f in nat.get('fraction_per_replica', []) if f is not None)}); "
                     f"departures: {nat.get('departures_per_replica')}.")]
         if nat.get("departure_rate_upper_per_us") is not None:
-            L.append(T(f"所有轨迹合计 {nat.get('watched_ns', 0):.3g} ns 里没有一次离开。这不能证明它永远不离开："
-                       f"按 95% 置信上限，离开的速率不超过每 µs {nat['departure_rate_upper_per_us']:.3g} 次。想把这个上限压低，"
-                       "就要跑得更久。",
-                       f"No departure in {nat.get('watched_ns', 0):.3g} ns of all replicas together. That does not "
-                       f"prove it never leaves: at 95 % confidence the departure rate is at most "
-                       f"{nat['departure_rate_upper_per_us']:.3g} per µs. A lower bound needs a longer run."))
+            k = sum(nat.get("departures_per_replica") or [])
+            goal_rate = nat.get("max_departure_rate_per_us", 10.0)
+            upper = nat["departure_rate_upper_per_us"]
+            met = upper <= goal_rate
+            seen_zh = "没有一次离开" if k == 0 else f"离开了 {k} 次"
+            seen_en = "No departure" if k == 0 else f"{k} departure(s)"
+            L.append(T(f"所有轨迹合计 {nat.get('watched_ns', 0):.3g} ns 里{seen_zh}。按 95% 置信上限，离开的速率不超过每 µs "
+                       f"{upper:.3g} 次；目标是不超过每 µs {goal_rate:g} 次，"
+                       + ("已经达到。" if met else "还没有达到，要跑得更久。")
+                       + "这个上限说的是离开有多快，不能证明结构永远不离开。",
+                       f"{seen_en} in {nat.get('watched_ns', 0):.3g} ns of all replicas together. At 95 % confidence "
+                       f"the departure rate is at most {upper:.3g} per µs; the goal is at most {goal_rate:g} per µs, "
+                       + ("which is met. " if met else "which is not met yet: it needs a longer run. ")
+                       + "The bound says how fast a departure could be; it does not prove the structure never leaves."))
     L += ["", T("RMSD 和 Rg 随时间的变化（阴影部分没有算进结果）：", "RMSD and Rg against time (the shaded start was left out):"),
           "", "![RMSD and Rg](stability/rmsd_rg.svg)", ""]
     if (run_dir / "stability" / "fes_rmsd_rg.svg").exists():
@@ -368,6 +376,9 @@ def write(run_dir: Path) -> list[Path]:
                        "replica(s)."))
         elif quantity == "structure_stability":
             tol = goal.get("stability_tolerance_nm", 0.02)
+            L.append(T(f"- 稳定的标准：离开起始结构的速率（95% 上限）不超过每 µs {goal.get('max_departure_rate_per_us', 10.0):g} 次。",
+                       f"- What counts as stable: the rate of leaving the start structure is at most "
+                       f"{goal.get('max_departure_rate_per_us', 10.0):g} per µs (95 % upper bound)."))
             L.append(T(f"- 要求的精度：RMSD 和 Rg 平均值的区间半宽不超过 {tol:g} nm；稳态：后半段和前半段平均值之差加上它的区间半宽，"
                        f"不超过 {3 * tol:g} nm。RMSD 超过 {goal.get('rmsd_cutoff_nm', 0.3):g} nm 算离开起始结构。",
                        f"- Requested precision: interval half-width of the mean RMSD and Rg at most {tol:g} nm; steady "
@@ -454,12 +465,15 @@ def write(run_dir: Path) -> list[Path]:
             if len(steady) == len(results):
                 per = sum(state.get("rounds_ns", []))
                 total = per * state.get("n_replicas", 0)
+                goal_rate = goal.get("max_departure_rate_per_us", 10.0)
                 L.append(T(f"在模拟过的时间里（每条 {per:g} ns，所有重复合计 {total:g} ns），RMSD 和 Rg 都达到了稳态，平均值"
-                           "达到了要求的精度。这说明结构在这个时间尺度上稳定；它不能说明结构在更长的时间里不会离开（见下面的离开速率上限）。",
+                           f"达到了要求的精度，而且离开起始结构的速率（95% 上限）不超过每 µs {goal_rate:g} 次。在这个标准下，"
+                           "结构是稳定的。它不能排除更慢的变化：想排除更慢的离开，要设更低的速率上限，并跑得更久。",
                            f"Within the time simulated ({per:g} ns per replica, {total:g} ns in all), RMSD and Rg both "
-                           "reached a steady state and their means reached the requested precision. This shows the "
-                           "structure is stable on this time scale; it does not show that the structure stays on longer "
-                           "time scales (see the upper bound on the departure rate below)."))
+                           "reached a steady state, their means reached the requested precision, and the rate of leaving "
+                           f"the start structure is at most {goal_rate:g} per µs (95 % upper bound). By this standard the "
+                           "structure is stable. Slower changes are not ruled out: that needs a lower rate goal and a "
+                           "longer run."))
             else:
                 L.append(T(f"{', '.join(r['label'] for r in results if not r['met'])} 还没有确认达到稳态和要求的精度"
                            "（判断写在表里）。下面的平均值只能作为粗略的参考，不能作为结论。",
@@ -585,7 +599,9 @@ def write(run_dir: Path) -> list[Path]:
             hint = {"stalled": T("采样停滞：试别的方法，或者偏置和它耦合的运动。", "stalled: try another method, or bias the motion it is coupled to."),
                     "not_yet": T("还不够精确：加长或加重复。", "not precise yet: run longer or add replicas."),
                     "unreliable": T("权重退化：加长增强采样。", "degenerate weights: run enhanced sampling longer."),
-                    "imprecise": T("还不够精确：加长或加重复。", "not precise yet: run longer or add replicas.")}.get(
+                    "imprecise": T("还不够精确：加长或加重复。", "not precise yet: run longer or add replicas."),
+                    "too_short": T("观察时间还不够长，离开速率的上限还没达到目标：加长。",
+                                   "watched too briefly for the departure-rate goal: run longer.")}.get(
                 r["verdict"], T("没有采样充分：加长、加重复或换方法。", "not sampled well: run longer, add replicas or change method."))
             L.append(f"- {r['label']}：{hint}" if zh else f"- {r['label']}: {hint}")
         path = run_dir / f"report.{lang}.md"

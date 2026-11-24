@@ -97,6 +97,9 @@ class RunPlan(BaseModel):
                                                       "precision for the mean RMSD/Rg in nm. Default 0.02.")
     rmsd_cutoff_nm: Optional[float] = Field(None, description="Only for 'stability': the RMSD (nm) above which the "
                                                               "structure counts as departed or unfolded. Default 0.3.")
+    max_departure_rate_per_us: Optional[float] = Field(None, description="Only for 'stability', if the user says how "
+                                                       "long the structure must stay: 'stable for T' means 1/T per µs "
+                                                       "(T = 1 µs -> 1, T = 100 ns -> 10). Default 10.")
     cluster_cutoff_nm: Optional[float] = Field(None, description="RMSD cutoff (nm) of the conformational clustering. "
                                                                  "Default 0.15.")
     cluster: Optional[bool] = Field(None, description="True if the user wants conformational clusters for a run that "
@@ -226,6 +229,7 @@ FLAGS = [  # RunPlan field -> command line option
     ("protonation", "--protonation"), ("ion_conc", "--ion-conc"), ("cation", "--cation"),
     ("temperature_k", "--temperature"), ("stability_tolerance_nm", "--stability-tolerance"),
     ("rmsd_cutoff_nm", "--rmsd-cutoff"), ("cluster_cutoff_nm", "--cluster-cutoff"),
+    ("max_departure_rate_per_us", "--max-departure-rate"),
     ("hold_ps", "--hold-ps"), ("seen_in", "--seen-in"),
     ("box_shape", "--box-shape"), ("padding_nm", "--padding-nm"), ("replicas", "--replicas"),
     ("first_ns", "--first-ns"), ("extend_ns", "--extend-ns"), ("max_ns", "--max-ns"),

@@ -239,6 +239,7 @@ def _goal_from_args(args):
                          stability_tolerance_nm=getattr(args, "stability_tolerance", 0.02),
                          rmsd_cutoff_nm=getattr(args, "rmsd_cutoff", 0.3),
                          cluster_cutoff_nm=getattr(args, "cluster_cutoff", 0.15),
+                         max_departure_rate_per_us=getattr(args, "max_departure_rate", 10.0),
                          cluster=bool(getattr(args, "cluster", False)))
     if args.allow is None and goal.allocation == "projection" and args.mode == "auto":
         # The agent plans within the limits: adding replicas up to --max-replicas is part of the plan, not a step
@@ -402,8 +403,10 @@ def cmd_run(args) -> int:
             print("error: adaptive sampling does not support --quantity stability: segments restart from chosen "
                   "frames, so RMSD and Rg means would be biased.", file=sys.stderr)
             return 2
-        if args.stability_tolerance <= 0 or args.rmsd_cutoff <= 0 or args.cluster_cutoff <= 0:
-            print("error: --stability-tolerance, --rmsd-cutoff and --cluster-cutoff must be above 0 (nm).",
+        if (args.stability_tolerance <= 0 or args.rmsd_cutoff <= 0 or args.cluster_cutoff <= 0
+                or args.max_departure_rate <= 0):
+            print("error: --stability-tolerance, --rmsd-cutoff, --cluster-cutoff and --max-departure-rate must be "
+                  "above 0.",
                   file=sys.stderr)
             return 2
     if args.quantity == "chi1" and not (args.residues or args.around_ligand):
@@ -550,7 +553,9 @@ def cmd_run(args) -> int:
             print(f"Goal: structure stability of {state.target_description or 'the protein'}: backbone RMSD from the "
                   f"start and radius of gyration, steady and precise to {goal.stability_tolerance_nm:g} nm "
                   f"(interval half-width); departed above RMSD {goal.rmsd_cutoff_nm:g} nm; clusters at "
-                  f"{goal.cluster_cutoff_nm:g} nm" + (f" ({goal.description})" if goal.description else "") + ".")
+                  f"{goal.cluster_cutoff_nm:g} nm; stable only when the departure rate is at most "
+                  f"{goal.max_departure_rate_per_us:g} per µs (95 % upper bound)"
+                  + (f" ({goal.description})" if goal.description else "") + ".")
         else:
             print(f"Goal: {what}, {state.precision().describe()}"
                   + (f" ({goal.description})" if goal.description else "") + ".")
@@ -731,6 +736,10 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--rmsd-cutoff", type=float, default=0.3,
                    help="--quantity stability: above this RMSD from the start the structure counts as departed "
                         "(nm, default 0.3).")
+    r.add_argument("--max-departure-rate", type=float, default=10.0,
+                   help="--quantity stability: stop only when the 95 %% upper bound of the rate of leaving the start "
+                        "structure is at most this many per µs (default 10: about 300 ns in all without a departure). "
+                        "'Stable for 1 µs' is 1.")
     r.add_argument("--cluster-cutoff", type=float, default=0.15,
                    help="RMSD cutoff of the conformational clustering in the report (nm, default 0.15).")
     r.add_argument("--cluster", action="store_true",

@@ -100,8 +100,9 @@ sampling on them. Runs go on in the background until they finish or the user sto
 Structure stability (target_kind "stability"): when the user asks whether a protein or region stays stable,
 folded or compact, or wants RMSD / radius of gyration followed, RMSD-Rg free energies or conformational clusters,
 MDAgent follows the backbone RMSD from the start and Rg every round, stops when both are steady and precise
-(default 0.02 nm), reports the time spent native-like (RMSD below 0.3 nm) and an upper bound of the unfolding rate
-if nothing unfolds, an RMSD-Rg free-energy surface and GROMOS clusters (0.15 nm) with representative structures.
+(default 0.02 nm) and the structure was watched long enough that the 95 % upper bound of its departure rate is at
+most 10 per µs (about 300 ns in all; "stable for T" sets 1/T per µs in max_departure_rate_per_us), reports the time
+spent native-like (RMSD below 0.3 nm), an RMSD-Rg free-energy surface and GROMOS clusters (0.15 nm).
 Conformational clusters can also be added to any other run (cluster true).
 
 Defaults: 300 K, 0.15 M NaCl, CHARMM36m with TIP3P water, pH 7, a cubic box with 1.0 nm of water around the
