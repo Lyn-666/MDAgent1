@@ -172,11 +172,15 @@ def _stability_section(run_dir: Path, state: dict, T) -> list:
         return []
     items, nat, st = s.get("items", {}), s.get("native", {}), s.get("settings", {})
     L = [T("## 结构稳定性", "## Structure stability"), "",
-         T(f"原子：{_selection_zh(s.get('selection', ''))}。参照：起始结构（`protein.pdb`），每帧先叠合再算 RMSD。每条轨迹开头 "
-           f"{s.get('burn_in_ns', 0):g} ns 被判为还没有平衡，没有算进结果（自动平衡检测）。",
+         T(f"原子：{_selection_zh(s.get('selection', ''))}。参照：起始结构（`protein.pdb`），每帧先叠合再算 RMSD。"
+           + ("每条轨迹开头 " if s.get('burn_in_ns') else "")
+           + (f"{s.get('burn_in_ns', 0):g} ns 被判为还没有平衡，没有算进结果（自动平衡检测）。" if s.get('burn_in_ns') else
+              "自动平衡检测没有发现需要丢掉的开头，所有帧都算进了结果。"),
            f"Atoms: {s.get('selection', '')}. Reference: the starting structure (`protein.pdb`); every frame is "
-           f"superposed before the RMSD. The first {s.get('burn_in_ns', 0):g} ns of each replica were judged not yet "
-           "equilibrated and left out (automated equilibration detection)."), "",
+           "superposed before the RMSD. "
+           + (f"The first {s.get('burn_in_ns', 0):g} ns of each replica were judged not yet equilibrated and left "
+              "out (automated equilibration detection)." if s.get('burn_in_ns') else
+              "Automated equilibration detection found no start to leave out, so every frame counts.")), "",
          T("| 量 | 平均值 ± 区间半宽 | 各条轨迹的平均值 | 后半段 − 前半段 | 稳态 | 判断 |",
            "| Quantity | Mean ± interval half-width | Mean per replica | Second half − first half | Steady | Verdict |"),
          "|---|---|---|---|---|---|"]
@@ -218,9 +222,11 @@ def _cluster_section(run_dir: Path, T) -> list:
         return []
     L = [T("## 构象聚类", "## Conformational clusters"), "",
          T(f"方法：GROMOS（Daura 1999），叠合后的 RMSD 阈值 {c['cutoff_nm']:g} nm，用了平衡后的 {c['frames_used']} 帧"
-           f"（所有轨迹合在一起，每 {c['stride']} 帧取 1 帧）。误差来自各条轨迹之间的差别。代表结构可以用 PyMOL 或 VMD 打开。",
+           + ("（所有轨迹合在一起，用了每一帧）。" if c['stride'] == 1 else f"（所有轨迹合在一起，每 {c['stride']} 帧取 1 帧）。")
+           + "误差来自各条轨迹之间的差别。代表结构可以用 PyMOL 或 VMD 打开。",
            f"Method: GROMOS (Daura 1999), RMSD cutoff {c['cutoff_nm']:g} nm after superposition, {c['frames_used']} "
-           f"equilibrated frames (all replicas, every {c['stride']}th frame). Errors come from the spread between "
+           + ("equilibrated frames (all replicas, every frame). " if c['stride'] == 1 else
+              f"equilibrated frames (all replicas, every {c['stride']}th frame). ") + "Errors come from the spread between "
            "replicas. Open the representative structures in PyMOL or VMD."), "",
          T("| 簇 | 占比 ± 误差 | 出现在哪些轨迹 | 代表结构 |", "| Cluster | Population ± error | Replicas | Representative |"),
          "|---|---|---|---|"]
@@ -262,15 +268,24 @@ def _decision_section(state: dict, T) -> list:
     used = c.aggregate_ns
     L += ["", T(f"**成本：** 生产 {used:g} ns（所有重复相加），加上平衡共 {c.compute_ns:g} ns"
                 + (f"，实际用了 {c.measured_seconds / 3600:.1f} 小时" if c.measured_seconds else "")
-                + f"。用了预算的 {used / budget:.0%}" + (f"，比把预算跑满省了 {1 - used / budget:.0%}" if budget else "")
+                + f"。用了预算的 {_pct(used / budget)}" + (f"，比把预算跑满省了 {_pct(1 - used / budget)}" if budget else "")
                 + "。这个节省是相对预算的，不是相对“达到同样准确度的固定方案”；后者要用实验 A 那样的基准测试才量得出。",
                 f"**Cost:** {used:g} ns of production (all replicas together), {c.compute_ns:g} ns with equilibration"
                 + (f", {c.measured_seconds / 3600:.1f} hours of wall-clock" if c.measured_seconds else "")
-                + f". That is {used / budget:.0%} of the budget" + (f", {1 - used / budget:.0%} less than running it out"
+                + f". That is {_pct(used / budget)} of the budget" + (f", {_pct(1 - used / budget)} less than running it out"
                                                                     if budget else "")
                 + ". The saving is against the budget, not against a fixed plan that reaches the same accuracy; "
                   "that needs a benchmark like experiment A.") if budget else "", ""]
     return L
+
+
+def _pct(x: float) -> str:
+    """A share as a percentage that never rounds a small part to 0 % or a large part to 100 %."""
+    if 0 < x < 0.01:
+        return "<1%"
+    if 0.99 < x < 1:
+        return ">99%"
+    return f"{x:.0%}"
 
 
 def _fmt(pops: dict, errs: dict) -> str:
@@ -437,10 +452,14 @@ def write(run_dir: Path) -> list[Path]:
         elif quantity == "structure_stability":
             steady = [r for r in results if r["met"]]
             if len(steady) == len(results):
-                L.append(T("RMSD 和 Rg 都达到了稳态，平均值达到了要求的精度。下面的平均值可以作为这个力场和条件下的结果，"
-                           "引用时请附上误差。",
-                           "RMSD and Rg both reached a steady state and their means reached the requested precision. The "
-                           "means below can be quoted for this force field and these conditions, with their errors."))
+                per = sum(state.get("rounds_ns", []))
+                total = per * state.get("n_replicas", 0)
+                L.append(T(f"在模拟过的时间里（每条 {per:g} ns，所有重复合计 {total:g} ns），RMSD 和 Rg 都达到了稳态，平均值"
+                           "达到了要求的精度。这说明结构在这个时间尺度上稳定；它不能说明结构在更长的时间里不会离开（见下面的离开速率上限）。",
+                           f"Within the time simulated ({per:g} ns per replica, {total:g} ns in all), RMSD and Rg both "
+                           "reached a steady state and their means reached the requested precision. This shows the "
+                           "structure is stable on this time scale; it does not show that the structure stays on longer "
+                           "time scales (see the upper bound on the departure rate below)."))
             else:
                 L.append(T(f"{', '.join(r['label'] for r in results if not r['met'])} 还没有确认达到稳态和要求的精度"
                            "（判断写在表里）。下面的平均值只能作为粗略的参考，不能作为结论。",
