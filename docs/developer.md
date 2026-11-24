@@ -203,6 +203,9 @@ python -m mdagent resume --run runs/181L --max-ns 40
 # Show the latest sorted diagnosis.
 python -m mdagent diagnose --run runs/181L
 
+# Replay every look with only the data it had: which item and replica held the run back.
+python -m mdagent diagnose --run runs/181L --each-round
+
 pytest -q tests                # all tests, about 1 minute
 pytest -q tests -m "not slow"  # tests without MD, about 1 second
 ```

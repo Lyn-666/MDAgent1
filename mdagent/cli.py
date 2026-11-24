@@ -627,6 +627,18 @@ def cmd_diagnose(args) -> int:
     if not state.rounds_ns:
         print("No round has finished yet.")
         return 0
+    if getattr(args, "each_round", False):
+        # Replay the looks: the same diagnosis with the rounds the run had at each look. The last pass uses all
+        # rounds, so files a diagnosis writes (e.g. stability/) end as they were.
+        rounds = list(state.rounds_ns)
+        print("Each look again, with only the data it had (state changes per replica; the rule needs at least "
+              f"{state.loop.min_flips_per_replica} in every replica):")
+        for k in range(1, len(rounds) + 1):
+            state.rounds_ns = rounds[:k]
+            reports = diagnose_run(run, state)
+            items = "; ".join(f"{r.label} {r.verdict} {list(r.transitions)}" for r in reports)
+            print(f"  look {k} at {sum(rounds[:k]):g} ns per replica: {items}")
+        return 0
     # The same diagnosis as the run itself: distances for a distance run, chi1 otherwise.
     print(format_report(diagnose_run(run, state)))
     return 0
@@ -847,6 +859,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     d = sub.add_parser("diagnose", help="Print the ranked diagnosis of a run.")
     d.add_argument("--run", required=True)
+    d.add_argument("--each-round", action="store_true",
+                   help="Diagnose again with only the data each look had (after round 1, 2, ...): the verdict and "
+                        "the state changes per replica of every item at every look. Shows which item and replica "
+                        "held a run back.")
     d.set_defaults(func=cmd_diagnose)
 
     k = sub.add_parser("check", help="Check a structure before a run: reference sequence, tags, chains, "
