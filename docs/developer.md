@@ -1,462 +1,462 @@
-# MDAgent1：开发者和研究说明
+# MDAgent1: developer and research notes
 
-**2026-11-23 起的默认值（用户的决定）：** `mdagent run` 默认 `--allocation projection`（agent 自己决定几条、多长、何时停），上限 `--max-replicas 10`、`--max-ns 2000`（2 µs），权限 `stop_early,add_replicas`，`--burn-in auto`。只有 `--mode guided`、`--sampling adaptive` 或 `--quantity event` 时默认才是按轮的固定方案（3 条、每条最多 20 ns）。下文写的“默认 `rounds`、每条最多 20 ns”指的是这种固定方案。开发者脚本（`scripts/*.sh`）都显式写了 `--allocation rounds`。
+**Defaults from 2026-11-23 (the user's decision):** `mdagent run` uses `--allocation projection` by default (the agent decides how many replicas, how long and when to stop). The limits are `--max-replicas 10` and `--max-ns 2000` (2 µs). The permissions are `stop_early,add_replicas`, and `--burn-in auto`. Only with `--mode guided`, `--sampling adaptive` or `--quantity event` is the default the fixed plan in rounds (3 replicas, at most 20 ns each). Where the text below says "default `rounds`, at most 20 ns per replica", it means this fixed plan. The developer scripts (`scripts/*.sh`) all set `--allocation rounds` explicitly.
 
-这份文件是 2026-11-23 之前的完整 README，保留给开发者和论文使用：所有选项、算法细节、预算对照（`budget`）、实验 A、第 5 步验证、通用决策核心。面向用户的说明在仓库首页的 [README](../README.md)。
+This file is the full README from before 2026-11-23. It is kept for developers and for the paper: all options, algorithm details, the budget comparison (`budget`), Experiment A, step 5 validation and the general decision core. The user-facing guide is the [README](../README.md) on the repository home page.
 
 
-一个 MD agent，要回答的问题是：**给定一个体系、一个要测的量和一个精度要求，用最少的计算量得到同样可靠的结果。**
+An MD agent that answers one question: **given a system, a quantity to measure and a precision requirement, get an equally reliable result with the least compute.**
 
-跑 MD 之前，没人知道该怎么分配时间：5 条轨迹各 100 ns、10 条各 50 ns，还是 1 条 500 ns？也没人知道跑到 200 ns 时数据是不是已经够了。MDAgent 边跑边分析，自己决定下一步把时间花在哪里（加长、加独立重复、换方法），以及什么时候数据已经够了可以停。
+Before an MD run, nobody knows how to divide the time: 5 replicas of 100 ns each, 10 of 50 ns, or 1 of 500 ns? Nobody knows either whether the data at 200 ns is already enough. MDAgent analyzes while it runs. It decides where to spend the next time (extend, add independent replicas, change method) and when the data is enough to stop.
 
-用户给出蛋白 PDB 和关心的区域，agent 自动搭体系、跑 MD，找出这个区域里没有采样好的侧链，普通 MD 采样不到的侧链改用增强采样，去掉偏置势的影响算出各状态的真实比例，并在对话里交付结果和停下的理由。用户也可以指定方法，这时 agent 照做，只在对话里提建议。
+The user gives a protein PDB and a region of interest. The agent builds the system and runs MD automatically. It finds the side chains in the region that are not sampled well. Side chains that plain MD cannot sample go to enhanced sampling. The agent removes the effect of the bias potential, computes the true population of each state, and delivers the results and the stop reasons in the chat. The user can also specify the method. Then the agent follows it and only gives suggestions in the chat.
 
-**"更省"要能验证。** 一个策略只有既更便宜、结果又仍然正确，才算更好。所以程序把计算成本单独记下来（`cost.py`），并且可以把几种预算分配策略放在同一批数据上对比（`budget` 命令，见"用多少计算量：策略对照"）。
+**"Cheaper" must be verifiable.** A strategy is better only when it is cheaper and its result is still correct. So the program records compute cost separately (`cost.py`). It can also compare several budget allocation strategies on the same data (the `budget` command, see "How much compute: comparing strategies (`budget`)").
 
-**你定的是上限。** 用户定好模拟时间和重复数作为上限；agent 每轮结束后诊断，得到用户要的结果就提前停下，再跑也没有收益时也停下，并建议换方法（例如自适应采样，或者对普通 MD 采样不到的侧链用增强采样）。换方法和超过上限都要用户确认。
+**You set the limits.** The user sets the simulation time and the number of replicas as limits. The agent diagnoses after each round. It stops early when it gets the result the user wants. It also stops when more simulation gives no benefit, and then it suggests a different method (for example adaptive sampling, or enhanced sampling for side chains that plain MD cannot sample). A method change and going past the limits both need the user's confirmation.
 
-## 快速上手（给测试者）
+## Quick start (for testers)
 
-**需要：** 一台 Linux 电脑，有 NVIDIA GPU，装好 conda。想用聊天网页的话，还要装好并登录 [Claude Code](https://claude.com/claude-code)（运行 `claude`，按提示登录）或 Codex（运行 `codex login`）。只用命令行就不需要它们。macOS 上程序能运行，但没有 CUDA，只适合很短的测试。Windows 要在 WSL2 里运行。
+**Requirements:** a Linux computer with an NVIDIA GPU and conda. For the chat web page you also need [Claude Code](https://claude.com/claude-code) installed and logged in (run `claude` and follow the prompts) or Codex (run `codex login`). The command line alone does not need them. The program runs on macOS, but without CUDA, so it is only good for very short tests. On Windows, run it in WSL2.
 
-**1. 安装（约 5 分钟）：**
+**1. Install (about 5 minutes):**
 
 ```bash
 git clone https://github.com/Lyn-666/MDAgent1.git && cd MDAgent1
 conda env create -f environment.yml && conda activate mdagent && python -m pip install -e .
-pytest -q tests -m "not slow"     # 快速测试，约 2 分钟，应该全部通过
+pytest -q tests -m "not slow"     # fast tests, about 2 minutes, all should pass
 ```
 
-如果 conda 长时间停在“Collecting package metadata”，看一下 `conda config --show-sources`。里面有 `solver: classic` 时，conda 用的是很慢的旧求解器；在 `conda env create` 后面加上 `--solver=libmamba` 就能只为这次安装换成快的求解器。请用 `python -m pip`，不要直接用 `pip`：直接用时可能运行到系统自带的旧 pip，它会提示“Defaulting to user installation”并安装失败。
+If conda stays at "Collecting package metadata" for a long time, look at `conda config --show-sources`. If it contains `solver: classic`, conda uses the slow old solver. Add `--solver=libmamba` after `conda env create` to use the fast solver for this install only. Use `python -m pip`, not plain `pip`. Plain `pip` can run the old system pip, which says "Defaulting to user installation" and fails.
 
-装好后运行 `python -m openmm.testInstallation`，确认 CUDA 一行写着 “Successfully computed forces”。如果 CUDA 报 `CUDA_ERROR_UNSUPPORTED_PTX_VERSION`，说明 conda 装的 CUDA 组件比显卡驱动新。运行 `nvidia-smi`，看第一行的 “CUDA Version”（新驱动写成 “CUDA UMD Version”，例如 13.3），然后运行 `conda install -c conda-forge cuda-version=13.3 --solver=libmamba`，把版本号换成你看到的。MDAgent 启动时也会用选中的平台先算一个小体系，算不了就停下并给出同样的提示。
+After the install, run `python -m openmm.testInstallation` and check that the CUDA line says "Successfully computed forces". If CUDA reports `CUDA_ERROR_UNSUPPORTED_PTX_VERSION`, the CUDA components from conda are newer than the GPU driver. Run `nvidia-smi` and read "CUDA Version" in the first line (newer drivers write "CUDA UMD Version", for example 13.3). Then run `conda install -c conda-forge cuda-version=13.3 --solver=libmamba` with the version number you see. At startup, MDAgent also computes a small system on the selected platform. If that fails, it stops and gives the same advice.
 
-如果测试或模拟随机出现 “Segmentation fault”，可能是 CPU 有不稳定的核（一些 Intel 13、14 代 CPU 有这个问题）。运行 `python scripts/find_bad_cores.py`，它逐个核做同样的计算，找出算错或崩溃的核，最后给出只用好核的 `taskset -c ...` 命令。
+If tests or simulations crash at random with "Segmentation fault", the CPU may have unstable cores (some Intel 13th and 14th generation CPUs have this problem). Run `python scripts/find_bad_cores.py`. It does the same calculation on each core, finds the cores that compute wrong results or crash, and gives a `taskset -c ...` command that uses only the good cores.
 
-**2. 跑一个几分钟的测试：** 用自带的 T4 溶菌酶（`examples/181L.pdb`），看苯周围的口袋。181L 和它的 UniProt 参考序列有两处差异，所以要加 `--accept-problems`。
+**2. Run a test of a few minutes:** use the included T4 lysozyme (`examples/181L.pdb`) and look at the pocket around benzene. 181L has two differences from its UniProt reference sequence, so add `--accept-problems`.
 
 ```bash
 python -m mdagent run --pdb examples/181L.pdb --around-ligand BNZ --out runs/first_test --accept-problems \
     --replicas 2 --first-ns 0.1 --extend-ns 0.1 --max-ns 0.3 --no-flip-patience-ns 0.25 --enhanced-ns 0.1 --equil-ps 60
 ```
 
-日志第一行写着结果文件夹的完整路径。结束时，日志末尾的 Summary 会列出所有结果文件。
+The first line of the log gives the full path of the result folder. At the end, the Summary at the end of the log lists all result files.
 
-**3. 用对话的方式跑：** 运行 `python -m mdagent start`。程序会依次问你：界面语言、用 Claude 还是 ChatGPT（Codex）、在网页还是终端里对话。然后用中文或英文说要跑什么，例如"用 181L，看苯周围的口袋，开发测试，有问题也继续"。怎么说见下面的“在对话里怎么说”，更多见"开始对话"。
+**3. Run through the chat:** run `python -m mdagent start`. The program asks you in turn: the interface language, Claude or ChatGPT (Codex), and chat in the web page or the terminal. Then say in Chinese or English what to run, for example "Use 181L, look at the pocket around benzene, development test, continue even if there are problems." See "What to say in the chat" below, and "Starting a chat (`start`)" for more.
 
-**4. 反馈问题：** 在 GitHub 上开一个 Issue，选"问题报告"模板，附上日志文件 `runs/<名字>.log`。
+**4. Report problems:** open an Issue on GitHub, choose the "bug report" template, and attach the log file `runs/<name>.log`.
 
-### 在对话里怎么说
+### What to say in the chat
 
-用一两句话说要做什么就行。对话里的语言模型只把你的话填进一张固定的设置表，不会自己运行任何东西。它会给你一张卡片，列出所有设置和对应的命令；你在网页上点按钮、或在终端输入 y 之后，运行才开始。所以请在确认前看一遍卡片。
+Say what you want in one or two sentences. The language model in the chat only fills your words into a fixed settings form. It does not run anything itself. It gives you a card with all settings and the matching command. The run starts only after you click the button in the web page or type y in the terminal. So read the card before you confirm.
 
-一句好的请求包含下面几项。前两项必须说；其余不说就用默认值。
+A good request contains the items below. You must give the first two. For the others, the defaults apply if you say nothing.
 
-- **体系：** PDB 编号（例如 1UBQ，会自动下载）或已有的文件。181L 要加一句“结构检查有问题也继续”。1UBQ 要说“参考序列用 UniProt P0CG48，两端保持带电”。
-- **要看什么：** 侧链构象（配体周围的侧链，或一组残基）；两个原子之间的距离（哪两个原子，多近算“近”）；或者“看到某个变化就停”（例如 Val111 侧链进入 t 状态）。
-- **精度：** 例如“误差不超过 5%”，指各状态比例的标准误差。默认 0.05。
-- **上限：** 几条重复，每条最多多少 ns。默认 3 条，每条最多 20 ns。agent 不会超过你给的上限。
-- **方法：** 不说方法时，agent 自己判断（自动模式）。说“只用普通 MD”之类，agent 就照做，只在对话里提建议。
-- **允许 agent 自己做什么：** 默认只允许提前停。愿意让它自己加长、加重复或换成增强采样时，要明确说出来。说“重复数、长度和停止时间你来决定，最多 8 条、每条最多 50 ns”时，agent 会给出方案：先开 3 条，允许自己加到 8 条（只在各条重复明显不一致时加），每条最多 50 ns，所有结果都达到精度、或者在上限内再跑也没有收益时就停。方案写在卡片和回复里，你确认后才执行。
-- **开发测试：** 说“开发测试”，运行只跑几分钟。
-- **保存位置（可选）：** 例如“结果存到 /data/lynn/md”。
+- **System:** a PDB ID (for example 1UBQ, downloaded automatically) or an existing file. For 181L, add "continue even if the structure check finds problems". For 1UBQ, say "use UniProt P0CG48 as the reference sequence, keep both termini charged".
+- **What to look at:** side-chain conformations (the side chains around a ligand, or a set of residues); a distance between two atoms (which two atoms, and how close counts as "near"); or "stop when you see a certain change" (for example the Val111 side chain enters the t state).
+- **Precision:** for example "error at most 5%". This means the standard error of each state population. The default is 0.05.
+- **Limits:** how many replicas, and at most how many ns each. The default is 3 replicas, at most 20 ns each. The agent does not go past your limits.
+- **Method:** if you name no method, the agent decides (auto mode). If you say "only plain MD" or similar, the agent follows it and only gives suggestions in the chat.
+- **What the agent may do by itself:** by default it may only stop early. If you want it to extend, add replicas or switch to enhanced sampling by itself, say so explicitly. If you say "you decide the number of replicas, the length and when to stop, at most 8 replicas, at most 50 ns each", the agent gives a plan: start with 3 replicas, allow itself to add up to 8 (only when the replicas clearly disagree), at most 50 ns each, and stop when all results reach the precision or when more simulation within the limits gives no benefit. The plan is on the card and in the reply. It runs only after you confirm.
+- **Development test:** say "development test", and the run takes only a few minutes.
+- **Save location (optional):** for example "save the results to /data/me/md".
 
-可以直接复制的例子：
+Examples you can copy:
 
-| 想做什么 | 这样说 |
+| What you want | Say this |
 |---|---|
-| 几分钟的流程测试 | 用 181L，看苯周围的侧链，开发测试，结构检查有问题也继续。 |
-| 侧链构象，带精度和上限 | 下载 1UBQ，参考序列用 UniProt P0CG48，两端保持带电。看 A:16、A:32、A:63 的侧链构象，误差不超过 5%。3 条重复，每条最多 10 ns。 |
-| 允许自己换方法 | 用 181L，看 Val111 的侧链构象，有问题也继续。如果普通 MD 翻转不了，可以自己换增强采样。 |
-| 原子间距离 | 用 1UBQ（UniProt P0CG48，两端带电），看 Lys11 的 NZ 和 Glu34 的 CD 之间的距离，0.45 nm 以内算接近。3 条重复，每条最多 10 ns。 |
-| 看到某个变化就停 | 用 181L，Val111 侧链进入 t 状态并停留 100 ps 就停。每条最多 20 ns，有问题也继续。 |
-| 只用指定方法 | 用 1UBQ（UniProt P0CG48，两端带电），看 A:26 的侧链。只用普通 MD，3 条各 6 ns。 |
-| 骨架 φ/ψ，让 agent 定方案 | 用 181L，估计 A:110–112 的 Ramachandran basin 比例、转变统计和 φ/ψ 自由能面。重复数、长度和停止时间你来决定，最多 8 条、每条最多 1 µs，在保证准确的前提下尽量少算，有问题也继续。你可以决定是否从普通 MD 改成增强采样。 |
+| A workflow test of a few minutes | Use 181L, look at the side chains around benzene, development test, continue even if the structure check finds problems. |
+| Side-chain conformations with precision and limits | Download 1UBQ, use UniProt P0CG48 as the reference sequence, keep both termini charged. Look at the side-chain conformations of A:16, A:32 and A:63, error at most 5%. 3 replicas, at most 10 ns each. |
+| Allow a method change by itself | Use 181L, look at the side-chain conformation of Val111, continue even if there are problems. If plain MD cannot flip it, you may switch to enhanced sampling by yourself. |
+| Distance between atoms | Use 1UBQ (UniProt P0CG48, charged termini), look at the distance between NZ of Lys11 and CD of Glu34, within 0.45 nm counts as near. 3 replicas, at most 10 ns each. |
+| Stop when a change is seen | Use 181L, stop when the Val111 side chain enters the t state and stays for 100 ps. At most 20 ns per replica, continue even if there are problems. |
+| Only the specified method | Use 1UBQ (UniProt P0CG48, charged termini), look at the side chain of A:26. Only plain MD, 3 replicas of 6 ns each. |
+| Backbone φ/ψ, the agent makes the plan | Use 181L, estimate the Ramachandran basin populations, transition statistics and φ/ψ free-energy surface of A:110–112. You decide the number of replicas, the length and when to stop, at most 8 replicas, at most 1 µs each. Use as little compute as possible while keeping the result accurate, and continue even if there are problems. You may decide whether to switch from plain MD to enhanced sampling. |
 
-运行开始以后，在同一个对话里用平常的话问就行，例如“first_test 跑到哪了？”“停止 first_test”“继续 first_test，改用增强采样”“给 first_test 加 2 条重复”“把 first_test 加长到 30 ns”。开始、停止、继续都会先给你一张卡片，确认后才执行。
+After the run starts, ask in plain words in the same chat, for example "How far is first_test?", "Stop first_test", "Continue first_test with enhanced sampling", "Add 2 replicas to first_test", "Extend first_test to 30 ns". Start, stop and continue each show a card first and run only after you confirm.
 
-几点提醒：残基编号用 PDB 文件里的编号，对话不会猜编号，对不上时会反问你；距离用标准原子名（CA、CB、NZ、OH、CD、CG1 等）。新决策核心的影子决定（见“通用决策核心”）不需要在请求里提，每个运行都会自动记下。对话不能运行命令，要在终端里看对比：`python -m mdagent shadow --run runs/<运行名> --live`。
+Some notes: use the residue numbers from the PDB file. The chat does not guess numbers; if they do not match, it asks you. For distances, use standard atom names (CA, CB, NZ, OH, CD, CG1 and so on). You do not need to mention the shadow decisions of the new decision core (see "General decision core (in development)") in your request. Every run records them automatically. The chat cannot run commands. To see the comparison, run in the terminal: `python -m mdagent shadow --run runs/<run name> --live`.
 
-## 工作流程
+## Workflow
 
-1. **读入目标区域。** 可以直接给出残基（如 `A:99-120`），或者给出"某个配体周围 N Å 内的残基"。
-2. **搭体系。** 每项设置都有默认值，用户可以改成别的。见下面的"搭体系的选项"。
-3. **分轮跑 MD。** 几条独立的轨迹同时推进，它们只有随机种子不同。第 1 轮默认每条 1 ns，以后每轮每条加 5 ns；上限很长时，每轮是上限的 1/20（例如上限 1 µs 时每轮 50 ns），所以大约判断 20 次。
-4. **每轮结束后诊断。** 统计每个目标残基的 chi1 二面角在 g+、t、g- 三个状态之间翻转了几次，然后按"卡住程度"排序。
-5. **每轮结束后决定。** agent 对每个残基做出以下决定之一，并写下理由：
+1. **Read the target region.** You can give the residues directly (for example `A:99-120`), or give "the residues within N Å of a ligand".
+2. **Build the system.** Every setting has a default, and the user can change it. See "System setup options" below.
+3. **Run MD in rounds.** Several independent replicas advance together. They differ only in the random seed. By default, round 1 is 1 ns per replica, and each later round adds 5 ns per replica. When the limit is very long, each round is 1/20 of the limit (for example 50 ns per round for a 1 µs limit), so there are about 20 decisions.
+4. **Diagnose after each round.** For each target residue, count how many times the chi1 dihedral flips between the three states g+, t and g-. Then sort the residues by how stuck they are.
+5. **Decide after each round.** For each residue, the agent makes one of the decisions below and writes down the reason:
 
-| 决定 | 条件 |
+| Decision | Condition |
 |---|---|
-| `done` | 每条轨迹都翻转了足够多次，比例的误差也达到了用户要的精度，采样够了。 |
-| `extend` | 普通 MD 还有用：已经看到翻转但次数不够，或者还没跑到放弃的时长。 |
-| `enhanced_sampling` | 跑了很久（默认每条 10 ns）仍然一次都没翻转，或者总预算用完了。普通 MD 回答不了这个问题。 |
-| `skip` | Gly 或 Ala，没有 chi1。 |
+| `done` | Each replica flipped enough times, and the population error reached the precision the user asked for. Sampling is enough. |
+| `extend` | Plain MD still helps: flips were seen but not enough, or the run has not reached the give-up time yet. |
+| `enhanced_sampling` | No flip after a long run (by default 10 ns per replica), or the total budget is used up. Plain MD cannot answer this question. |
+| `skip` | Gly or Ala, which have no chi1. |
 
-只要还有残基是 `extend`，并且没超出预算（默认每条 20 ns），agent 就再跑一轮。否则停止。
+While any residue is `extend` and the budget is not exceeded (by default 20 ns per replica), the agent runs another round. Otherwise it stops.
 
-**诊断结论的含义：**
+**Meaning of the diagnosis labels:**
 
-| 结论 | 含义 |
+| Label | Meaning |
 |---|---|
-| `replicas_disagree` | 不同轨迹停在不同状态，结果取决于看哪一条，说明没有收敛。 |
-| `no_flip` | 所有轨迹都没有翻转。侧链可能被卡住了，也可能本来就只有一个稳定状态，普通 MD 分辨不了这两种情况。 |
-| `rare_flips` | 翻转过，但次数太少，还不能估计各状态的比例。 |
-| `imprecise` | 翻转次数够了，但某个状态比例的误差大于用户要的精度（默认 0.05）。 |
-| `ok` | 每条轨迹都翻转了足够多次，误差也达到了精度。 |
-| `fixed_chi1` | 脯氨酸或形成二硫键的半胱氨酸，chi1 被固定，不判断。 |
+| `replicas_disagree` | Different replicas stay in different states. The result depends on which replica you look at, so it has not converged. |
+| `no_flip` | No replica flipped. The side chain may be stuck, or it may have only one stable state. Plain MD cannot tell these two cases apart. |
+| `rare_flips` | It flipped, but too few times to estimate the state populations. |
+| `imprecise` | It flipped enough times, but the population error of some state is larger than the precision the user asked for (default 0.05). |
+| `ok` | Each replica flipped enough times, and the error reached the precision. |
+| `fixed_chi1` | Proline or a cysteine in a disulfide bond. chi1 is fixed, so it is not judged. |
 
-**排序方法：** 按"平均多久翻转一次"排序，越慢越靠前。这个时间等于总模拟时间除以翻转次数。没有翻转时，只能知道它大于总模拟时间，表里写成 `>`。时间相同时，轨迹之间越不一致的越靠前。
+**Sorting:** residues are sorted by the mean time between flips, slowest first. This time is the total simulation time divided by the number of flips. With no flip, we only know that it is longer than the total simulation time, and the table shows `>`. For equal times, the residue with more disagreement between replicas comes first.
 
-## 完整流程（按顺序）
+## Full workflow (in order)
 
-1. **输入：** PDB 编号（下载到 `structures/<编号>.pdb`）、PDB 文件，或自己准备好的 Amber 体系（`--prmtop`/`--inpcrd`，跳过第 2、3 步，原样使用）。
-2. **结构检查：** 和 UniProt 参考序列比对，找标签、多拷贝、金属、未知残基、长缺口、断链。有问题就停，除非 `--accept-problems`。见下面"结构检查"。
-3. **处理结构（PDBFixer），依次：**
-   1. 只保留选定的链（`--chains`）；删掉链两端有坐标的标签。
-   2. 删掉所有非蛋白分子：晶体水、离子、配体、辅因子、末端帽（ACE、NH2、NME）。
-   3. 链中间缺的残基建模补上；链两端缺的不补。
-   4. 非标准残基换成标准氨基酸（例如 MSE → MET）。
-   5. 补缺失的重原子。
-   6. 删掉原有的氢，按 pH 7（或 PROPKA、或手动指定）重新加氢；His 的氢加在 ND1 还是 NE2 由氢键决定。
-   7. **链的两端（`--termini`，默认 `auto`）：** 结构检查把每条链第一个和最后一个有坐标的残基对到 UniProt 全长序列上。如果真实蛋白在这一端还没结束（例如只解析了一个结构域，或者两端缺了残基），这一端加中性帽：N 端 ACE，C 端 NME（N-甲基酰胺）。如果这一端就是真实蛋白的起点或终点，保留带电末端：N 端 NH₃⁺，C 端 COO⁻。没有参考序列时，按结构两端是否缺残基判断。`--termini charged` 一律带电，`--termini capped` 一律加帽。用 CHARMM 时，帽的原子并入末端残基（CHARMM 的 ACE、CT3 补丁）；用 Amber 时，ACE、NME 是单独的残基。
-   8. 加水盒子（默认立方体，蛋白到每个面至少 1.0 nm，盒子最窄处至少为两倍截断加 10%），先中和电荷，再加 0.15 M NaCl。
-   9. 力场：默认 CHARMM36m + CHARMM TIP3P（截断 1.2 nm，从 1.0 nm 开始平滑减小，无长程色散修正）；也可选 Amber ff14SB + TIP3P 或 ff19SB + OPC（截断 1.0 nm，有长程色散修正）。静电用 PME，含氢的键用刚性约束。
-4. **平衡（每条轨迹 600 ps）：** 骨架 N、CA、C 加 1 kcal/mol/Å² 的约束 → 能量最小化 → NVT 从 5 K 升温到 300 K（100 ps，分 20 步）→ 带约束的 NPT（200 ps）→ 分 20 步撤掉约束（200 ps）→ 无约束的 NPT（100 ps）。积分器 Langevin，步长 2 fs，摩擦 1/ps；压强 1 bar。
-5. **普通 MD，分轮：** 3 条轨迹，第 1 轮每条 1 ns，以后每轮加 5 ns，每条最多 20 ns；每 5 ps 存一帧蛋白坐标。可选自适应采样（`--sampling adaptive`）。
-6. **每轮结束后诊断：** 统计目标区域每个侧链 chi1 的翻转次数，决定"采样够了""续跑"或"交给增强采样"（一直没翻转、而且剩下的预算也不够看到足够的翻转，见下面“一直不变化的项目什么时候放弃”）。
-7. **增强采样：** 对需要的侧链，在 chi1 上做 well-tempered metadynamics（bias factor 10，高斯峰 1.2 kJ/mol，宽 12°，每 1 ps 加一次），2 条，每条最多 20 ns，从普通 MD 的最终状态开始。每跑 1 ns 重新加权一次，算出各状态的比例；结果稳定后停下（见"增强采样"）。
-8. **输出：** 都在 `runs/<名字>/` 里，见下面"运行目录里的文件"。
+1. **Input:** a PDB ID (downloaded to `structures/<ID>.pdb`), a PDB file, or an Amber system you prepared yourself (`--prmtop`/`--inpcrd`, which skips steps 2 and 3 and is used as is).
+2. **Structure check:** compare with the UniProt reference sequence and look for tags, multiple copies, metals, unknown residues, long gaps and chain breaks. If there are problems, stop, unless `--accept-problems`. See "Structure check (PDB file or PDB ID)" below.
+3. **Process the structure (PDBFixer), in this order:**
+   1. Keep only the selected chains (`--chains`). Remove tags with coordinates at the chain ends.
+   2. Remove all non-protein molecules: crystal water, ions, ligands, cofactors, terminal caps (ACE, NH2, NME).
+   3. Model missing residues inside the chain. Do not add missing residues at the chain ends.
+   4. Replace non-standard residues with standard amino acids (for example MSE → MET).
+   5. Add missing heavy atoms.
+   6. Remove the existing hydrogens and add hydrogens again for pH 7 (or by PROPKA, or by manual assignment). Hydrogen bonds decide whether His gets its hydrogen on ND1 or NE2.
+   7. **Chain ends (`--termini`, default `auto`):** the structure check maps the first and the last residue with coordinates of each chain onto the full UniProt sequence. If the real protein continues past this end (for example only one domain was solved, or residues are missing at the ends), this end gets a neutral cap: ACE at the N terminus, NME (N-methylamide) at the C terminus. If this end is the real start or end of the protein, it keeps the charged terminus: NH₃⁺ at the N terminus, COO⁻ at the C terminus. Without a reference sequence, the decision uses whether residues are missing at the structure ends. `--termini charged` makes all ends charged, and `--termini capped` caps all ends. With CHARMM, the cap atoms are merged into the terminal residue (the CHARMM ACE and CT3 patches). With Amber, ACE and NME are separate residues.
+   8. Add a water box (cube by default, at least 1.0 nm from the protein to each face, and the narrowest box width at least twice the cutoff plus 10%). First neutralize the charge, then add 0.15 M NaCl.
+   9. Force field: by default CHARMM36m + CHARMM TIP3P (cutoff 1.2 nm, smooth switch from 1.0 nm, no long-range dispersion correction). Other choices are Amber ff14SB + TIP3P or ff19SB + OPC (cutoff 1.0 nm, with long-range dispersion correction). Electrostatics use PME. Bonds with hydrogen are rigid constraints.
+4. **Equilibration (600 ps per replica):** restraints of 1 kcal/mol/Å² on backbone N, CA and C → energy minimization → NVT heating from 5 K to 300 K (100 ps, in 20 steps) → restrained NPT (200 ps) → restraint removal in 20 steps (200 ps) → unrestrained NPT (100 ps). Langevin integrator, 2 fs time step, friction 1/ps, pressure 1 bar.
+5. **Plain MD in rounds:** 3 replicas. Round 1 is 1 ns per replica, each later round adds 5 ns, at most 20 ns per replica. Protein coordinates are saved every 5 ps. Adaptive sampling is optional (`--sampling adaptive`).
+6. **Diagnose after each round:** count the chi1 flips of each side chain in the target region, and decide "sampling is enough", "continue" or "hand over to enhanced sampling" (no flip so far, and the remaining budget is not enough to see enough flips; see "When to give up on an item that never changes" below).
+7. **Enhanced sampling:** for the side chains that need it, run well-tempered metadynamics on chi1 (bias factor 10, Gaussian height 1.2 kJ/mol, width 12°, one Gaussian every 1 ps), 2 replicas, at most 20 ns each, starting from the final state of plain MD. Every 1 ns, reweight and compute the state populations. Stop when the result is stable (see "Enhanced sampling").
+8. **Output:** everything is in `runs/<name>/`. See "Files in a run folder" below.
 
-## 两种输入
+## Two kinds of input
 
-- **PDB 编号（`--pdb-id 3HTB`）：** MDAgent 从 RCSB PDB 下载结构，存为项目文件夹里的 `structures/3HTB.pdb`，然后像 `--pdb` 一样使用。已经下载过的不会重复下载。只下载不运行：`python -m mdagent fetch 3HTB 181L`，会打印每个文件的位置和内容概况。只有 mmCIF 格式的大结构暂时不支持。`structures/` 不会上传到 GitHub。
-- **蛋白 PDB 文件（`--pdb`）：** MDAgent 自己搭体系，可用下面"搭体系的选项"调整。配体会被删掉，因为 OpenMM 自带的力场没有配体参数。
-- **自己准备好的 Amber 体系（`--prmtop X.parm7 --inpcrd X.rst7`）：** 例如用 tleap 加 GAFF 参数准备的蛋白-配体复合物。MDAgent 原样使用，不增删任何原子，配体和所有参数都保留。文件里必须有周期性盒子（已加水）。非键截断 1.0 nm，PME。Amber 文件里的残基从 1 开始重新编号；用 `python -m mdagent info --prmtop X.parm7` 查看编号，`--residues` 写成 `3-5` 这样不带链名的形式。"搭体系的选项"对这种输入不起作用，用了会给出提示。
+- **PDB ID (`--pdb-id 3HTB`):** MDAgent downloads the structure from RCSB PDB, saves it as `structures/3HTB.pdb` in the project folder, and then uses it like `--pdb`. A structure that is already downloaded is not downloaded again. To download only, without a run: `python -m mdagent fetch 3HTB 181L`. It prints the location and a content overview of each file. Large structures that exist only in mmCIF format are not supported yet. `structures/` is not uploaded to GitHub.
+- **Protein PDB file (`--pdb`):** MDAgent builds the system itself. You can adjust it with "System setup options" below. Ligands are removed, because the OpenMM built-in force fields have no ligand parameters.
+- **An Amber system you prepared yourself (`--prmtop X.parm7 --inpcrd X.rst7`):** for example a protein-ligand complex prepared with tleap and GAFF parameters. MDAgent uses it as is. It adds or removes no atoms, and the ligand and all parameters stay. The file must have a periodic box (already solvated). Nonbonded cutoff 1.0 nm, PME. Residues in Amber files are renumbered from 1. Use `python -m mdagent info --prmtop X.parm7` to see the numbers, and write `--residues` without a chain name, like `3-5`. "System setup options" have no effect on this input. If you use them, the program tells you.
 
-## 结构检查（用 PDB 文件或 PDB 编号时）
+## Structure check (PDB file or PDB ID)
 
-搭体系之前，MDAgent 先检查结构。只有结构"干净"，才会进入下一步；发现问题时，运行停下（退出码 4），并说明怎么处理。单独检查、不搭体系：`python -m mdagent check --pdb-id 4OBE`。
+Before it builds the system, MDAgent checks the structure. Only a "clean" structure goes to the next step. When it finds problems, the run stops (exit code 4) and explains what to do. To check only, without building: `python -m mdagent check --pdb-id 4OBE`.
 
-检查的内容：
+What it checks:
 
-- **和参考序列比对：** PDB 文件里记录了每条链对应的 UniProt 条目和残基范围（DBREF），以及每一处已知差异和原因（SEQADV，例如表达标签、人为突变）。MDAgent 下载 UniProt 序列（包括所有异构体），存在 `structures/uniprot/<编号>.fasta`，逐位比对。文件里说明了原因的差异只记录；没有说明的差异算问题。如果文件里的编号对应明显有误，就按序列重新对齐。
-- **标签：** 标为表达标签等、或者不在参考序列范围内的残基，算作标签。链两端有坐标的标签默认删掉（`--keep-tags` 保留）；夹在链中间的标签算问题。
-- **多条链：** 同一个蛋白的多个拷贝算问题，用 `--chains A` 选一条，或用 `--chains A,B` 明确保留全部。
-- **其他分子：** 水、离子、配体照常删掉。结构性金属（Zn、Fe、Cu 等）算问题，因为删掉可能破坏结构；需要保留时，请自己准备 Amber 体系后用 `--prmtop`。
-- **完整性：** 未知残基、链中间连续缺 5 个以上残基、文件里没有说明的断链，都算问题。短缺口会被建模补上；链末端缺失、交替构象、多个模型只记录。
-- **没有参考序列的文件**（例如自己做的模型）：算问题，可以用 `--uniprot <编号>` 指定参考序列。
+- **Comparison with the reference sequence:** the PDB file records the UniProt entry and residue range of each chain (DBREF), and each known difference with its reason (SEQADV, for example expression tags or engineered mutations). MDAgent downloads the UniProt sequence (including all isoforms), saves it in `structures/uniprot/<ID>.fasta`, and compares position by position. Differences with a reason in the file are only recorded. Differences without a reason are problems. If the numbering mapping in the file is clearly wrong, the program aligns the sequences again.
+- **Tags:** residues marked as expression tags or similar, or outside the range of the reference sequence, count as tags. Tags with coordinates at the chain ends are removed by default (`--keep-tags` keeps them). A tag inside the chain is a problem.
+- **Multiple chains:** multiple copies of the same protein are a problem. Use `--chains A` to choose one, or `--chains A,B` to keep all of them explicitly.
+- **Other molecules:** water, ions and ligands are removed as usual. Structural metals (Zn, Fe, Cu and so on) are a problem, because removing them can break the structure. To keep them, prepare an Amber system yourself and use `--prmtop`.
+- **Completeness:** unknown residues, 5 or more consecutive missing residues inside a chain, and chain breaks not explained in the file are problems. Short gaps are modeled. Missing residues at chain ends, alternate conformations and multiple models are only recorded.
+- **Files without a reference sequence** (for example your own models): a problem. You can give a reference sequence with `--uniprot <ID>`.
 
-确认问题无关紧要时，加 `--accept-problems` 继续。检查报告保存在运行目录的 `structure_check.txt`。
+When you are sure the problems do not matter, add `--accept-problems` to continue. The check report is saved as `structure_check.txt` in the run folder.
 
-注意：`examples/181L.pdb` 和 UniProt P00720 有两处没有说明的差异（R12G、I137R），所以用它测试时要加 `--accept-problems`。
+Note: `examples/181L.pdb` has two unexplained differences from UniProt P00720 (R12G, I137R). So add `--accept-problems` when you test with it.
 
-## 平衡
+## Equilibration
 
-每条轨迹的第一段正式模拟之前，先做平衡，默认共 600 ps（`--equil-ps` 可改）：
+Before the first production segment of each replica, the program equilibrates, by default 600 ps in total (change it with `--equil-ps`):
 
-1. 在蛋白骨架原子（N、CA、C）上加约束（1 kcal/mol/Å²），做能量最小化；
-2. NVT 下从 5 K 升温到目标温度（默认 300 K），占 1/6 的时间；
-3. NPT 下保持约束，占 2/6；
-4. NPT 下分 20 步把约束减到零，占 2/6；
-5. NPT 下无约束，占 1/6。
+1. Restrain the protein backbone atoms (N, CA, C) (1 kcal/mol/Å²) and minimize the energy;
+2. Heat in NVT from 5 K to the target temperature (default 300 K), 1/6 of the time;
+3. Keep the restraints in NPT, 2/6 of the time;
+4. Reduce the restraints to zero in 20 steps in NPT, 2/6 of the time;
+5. Run unrestrained NPT, 1/6 of the time.
 
-约束力只存在于平衡用的模拟里。正式模拟是一个新的模拟，只接收平衡结束时的坐标、速度和盒子，所以三者来自同一时刻，正式模拟里也没有残留的约束力。
+The restraint forces exist only in the equilibration simulation. Production is a new simulation. It receives only the coordinates, velocities and box from the end of equilibration. So all three come from the same moment, and no restraint force remains in production.
 
-## 搭体系的选项
+## System setup options
 
-| 选项 | 默认值 | 说明 |
+| Option | Default | Description |
 |---|---|---|
-| `--forcefield` | `charmm36m` | `charmm36m`：CHARMM36m + CHARMM TIP3P，范德华截断 1.2 nm，从 1.0 nm 开始平滑减小，不加长程色散修正。`amber14`：ff14SB + TIP3P。`amber19`：ff19SB + OPC。每个选项都是一整套匹配好的力场、水模型和截断设置，不能拆开混用。 |
-| `--ph` | 7 | 决定可滴定残基的默认质子化状态。 |
-| `--check-protonation` | 关 | 打开后，先用 PROPKA 根据蛋白环境预测每个 Asp、Glu、Lys、His 的 pKa，再按预测结果设定质子化状态，然后才开始 MD。报告里会列出所有被改变的残基，并标出哪些在目标区域里。 |
-| `--protonation` | 无 | 手动指定，例如 `A:31=HIP,A:70=ASH`。在 PROPKA 之后生效，所以会覆盖 PROPKA 的结果。链两端的残基不能改。 |
-| `--ion-conc` | 0.15 | 盐浓度（M）。体系总是先被中和。 |
-| `--cation` | `Na+` | `Na+` 或 `K+`。阴离子是 Cl⁻。 |
-| `--padding-nm` | 1.0 | 蛋白到水盒子每个面的最小距离。盒子是周期性的，所以蛋白和相邻盒子里的镜像至少隔两倍这个距离。 |
-| `--box-shape` | `cube` | `cube`、`dodecahedron` 或 `octahedron`。菱形十二面体盒子的水比立方体少约 30%，模拟更快。 |
-| `--setup-only` | 关 | 只搭体系，然后停下，方便先检查报告。确认后用 `resume` 开始 MD。 |
+| `--forcefield` | `charmm36m` | `charmm36m`: CHARMM36m + CHARMM TIP3P, van der Waals cutoff 1.2 nm with a smooth switch from 1.0 nm, no long-range dispersion correction. `amber14`: ff14SB + TIP3P. `amber19`: ff19SB + OPC. Each option is a full matched set of force field, water model and cutoff settings. You cannot split and mix them. |
+| `--ph` | 7 | Sets the default protonation states of titratable residues. |
+| `--check-protonation` | off | When on, PROPKA first predicts the pKa of each Asp, Glu, Lys and His from the protein environment. The protonation states follow the predictions, and then MD starts. The report lists all changed residues and marks those in the target region. |
+| `--protonation` | none | Manual assignment, for example `A:31=HIP,A:70=ASH`. It applies after PROPKA, so it overrides the PROPKA result. Residues at the chain ends cannot be changed. |
+| `--ion-conc` | 0.15 | Salt concentration (M). The system is always neutralized first. |
+| `--cation` | `Na+` | `Na+` or `K+`. The anion is Cl⁻. |
+| `--padding-nm` | 1.0 | Minimum distance from the protein to each face of the water box. The box is periodic, so the protein and its image in the next box are at least twice this distance apart. |
+| `--box-shape` | `cube` | `cube`, `dodecahedron` or `octahedron`. A rhombic dodecahedron box has about 30% less water than a cube, so the simulation is faster. |
+| `--setup-only` | off | Only build the system and stop, so you can check the report first. After you confirm, start MD with `resume`. |
 
-**缺失残基：** 程序会逐段列出缺了哪些残基。链两端缺的不补，因为通常是无序区；链中间缺的由 PDBFixer 补上。补的这一段超过 5 个残基、或者离目标区域 4 个残基以内时，会给出警告。如果 PDB 文件没有序列记录（SEQRES），PDBFixer 发现不了缺失；这时程序会检查相邻残基的肽键长度，发现断链时给出警告。
+**Missing residues:** the program lists the missing residues segment by segment. Missing residues at the chain ends are not added, because they are usually disordered regions. PDBFixer adds those inside the chain. The program warns when an added segment is longer than 5 residues or within 4 residues of the target region. If the PDB file has no sequence records (SEQRES), PDBFixer cannot find missing residues. Then the program checks the peptide bond lengths between neighboring residues and warns when it finds a chain break.
 
-搭体系的完整报告会显示在屏幕上，并保存为 `setup_report.txt`。所有选项也记录在 `run.json` 里。
+The full setup report is shown on screen and saved as `setup_report.txt`. All options are also recorded in `run.json`.
 
-**关于速度：** CHARMM 的部分范德华参数在 OpenMM 里要用较慢的方式计算，所以 CHARMM36m 比 Amber 慢一些。
+**Speed:** OpenMM must compute some CHARMM van der Waals parameters in a slower way, so CHARMM36m is somewhat slower than Amber.
 
-## 用法
+## Usage
 
 ```bash
 git clone https://github.com/Lyn-666/MDAgent1.git && cd MDAgent1
 conda env create -f environment.yml && conda activate mdagent && python -m pip install -e .
 
-# 开始。agent 自己决定跑多久，每条轨迹最多 20 ns。
-# 181L 和 UniProt 参考序列有两处差异，所以要加 --accept-problems（见"结构检查"）。
+# Start. The agent decides how long to run, at most 20 ns per replica.
+# 181L has two differences from the UniProt reference sequence, so add --accept-problems (see "Structure check (PDB file or PDB ID)").
 python -m mdagent run --pdb examples/181L.pdb --around-ligand BNZ --out runs/181L --accept-problems
 
-# 先用 PROPKA 检查质子化状态，改用 Amber ff19SB + OPC 和 0.1 M KCl，只搭体系不跑 MD。
+# First check protonation states with PROPKA, use Amber ff19SB + OPC and 0.1 M KCl, only build the system without MD.
 python -m mdagent run --pdb examples/181L.pdb --around-ligand BNZ --out runs/181L_b --accept-problems \
     --check-protonation --forcefield amber19 --ion-conc 0.1 --cation K+ --setup-only
-python -m mdagent resume --run runs/181L_b   # 看过报告后，开始 MD。
+python -m mdagent resume --run runs/181L_b   # After reading the report, start MD.
 
-# 接着跑：可以继续一个中断的运行，也可以给已结束的运行更大的预算。
+# Continue: resume an interrupted run, or give a finished run a larger budget.
 python -m mdagent resume --run runs/181L --max-ns 40
 
-# 查看最新的排序诊断。
+# Show the latest sorted diagnosis.
 python -m mdagent diagnose --run runs/181L
 
-pytest -q tests                # 全部测试，约 1 分钟
-pytest -q tests -m "not slow"  # 不跑 MD 的测试，约 1 秒
+pytest -q tests                # all tests, about 1 minute
+pytest -q tests -m "not slow"  # tests without MD, about 1 second
 ```
 
-常用参数：`--replicas`（轨迹条数，默认 3）、`--first-ns`（第 1 轮长度，默认 1）、`--extend-ns`（以后每轮长度，默认 5）、`--max-ns`（每条轨迹的总预算，默认 20）、`--no-flip-patience-ns`（多久没翻转就放弃普通 MD；默认不用固定时间，而是按剩下的预算判断，见下面）。
+Common options: `--replicas` (number of replicas, default 3), `--first-ns` (length of round 1, default 1), `--extend-ns` (length of each later round, default 5), `--max-ns` (total budget per replica, default 20), `--no-flip-patience-ns` (how long without a flip before plain MD gives up; by default no fixed time is used, and the decision uses the remaining budget, see below).
 
-**一直不变化的项目什么时候放弃：** 一个项目（侧链、距离、骨架残基）从开始就没换过状态时，有两种可能：它被困住了，或者它只有一个稳定状态。数据分不出这两种情况。agent 不用固定的等待时间（那会依赖具体体系），而是问：按目前的数据，转变速率最多可能有多快（没见过转变时，95% 置信上限是 3 ÷ 已跑的总时间）；即使按这个最快的速率，剩下的预算能不能看到目标需要的转变次数（默认每条重复 4 次）？看不到才放弃，原因记为“采样停滞”，并建议换方法。例如 3 条重复、每条上限 20 ns 时，大约在每条 5 ns 时放弃；上限 1000 ns 时，大约在每条 250 ns 时放弃。用户给了 `--no-flip-patience-ns` 时，按用户给的时间。
+**When to give up on an item that never changes:** when an item (a side chain, a distance, a backbone residue) has not changed state since the start, there are two possibilities: it is trapped, or it has only one stable state. The data cannot tell these apart. The agent does not use a fixed waiting time (that would depend on the system). Instead it asks: from the current data, how fast can the transition rate be at most (with no transition seen, the 95% upper confidence limit is 3 ÷ total time run so far)? Even at this fastest rate, can the remaining budget show the number of transitions the target needs (by default 4 per replica)? Only if not does it give up. The reason is recorded as "stalled", and it suggests a different method. For example, with 3 replicas and a limit of 20 ns each, it gives up at about 5 ns per replica. With a limit of 1000 ns, it gives up at about 250 ns per replica. When the user gives `--no-flip-patience-ns`, the agent uses that time.
 
-速度参考：181L 体系约 3.5 万个原子。在一块消费级 GPU 上约每天 470 ns，按默认设置全部跑完约 3 小时。在 4 核 CPU 上约每天 3 ns，只适合测试。
+Speed reference: the 181L system has about 35,000 atoms. On a consumer GPU it runs about 470 ns per day, and a full run with default settings takes about 3 hours. On a 4-core CPU it runs about 3 ns per day, which is only good for tests.
 
-## 运行目录里的文件
+## Files in a run folder
 
-| 文件 | 内容 |
+| File | Content |
 |---|---|
-| `run.json` | 搭体系的选项、MD 设置、目标残基、每轮的长度。续跑时从这里读取。 |
-| `setup_report.txt` | 搭体系的报告：力场、缺失残基、质子化、水盒子、离子和警告。 |
-| `decisions.log` | 每轮的决定和理由，纯文本。 |
-| `status.json` | 最新的诊断和决定，供其他程序读取。 |
-| `replica_<i>_part<k>.dcd` | 第 i 条轨迹第 k 轮的轨迹，只含蛋白原子。 |
-| `replica_<i>_part<k>.state.xml` | 第 k 轮结束时的状态。只有这一轮完整跑完后才会出现。 |
-| `solvated.pdb`、`system.xml`、`protein.pdb` | 搭好的体系和分析用的蛋白结构。 |
+| `run.json` | Setup options, MD settings, target residues, length of each round. `resume` reads from here. |
+| `setup_report.txt` | Setup report: force field, missing residues, protonation, water box, ions and warnings. |
+| `decisions.log` | Decisions and reasons of each round, plain text. |
+| `status.json` | Latest diagnosis and decisions, for other programs to read. |
+| `replica_<i>_part<k>.dcd` | Trajectory of replica i in round k, protein atoms only. |
+| `replica_<i>_part<k>.state.xml` | State at the end of round k. It appears only after this round finishes completely. |
+| `solvated.pdb`, `system.xml`, `protein.pdb` | The built system and the protein structure for analysis. |
 
-如果某一轮中途停止，`resume` 会先补完这一轮。已经跑完的轨迹段不会重跑。
+If a round stops in the middle, `resume` first completes this round. Finished trajectory segments are not run again.
 
-文件保存在跑模拟的那台电脑上。日志第一行写着运行目录的完整路径和电脑名；运行结束时，日志末尾的 Summary 再列出一遍，并说明每类文件是什么。所有 `.dcd` 都只含蛋白原子，拓扑用 `protein.pdb`。
+Files are saved on the computer that runs the simulation. The first line of the log gives the full path of the run folder and the computer name. When the run ends, the Summary at the end of the log lists them again and explains each kind of file. All `.dcd` files contain only protein atoms. Use `protein.pdb` as the topology.
 
-## 测试体系
+## Test systems
 
-`examples/181L.pdb` 是 T4 溶菌酶 L99A 与苯的复合物。口袋里的 Val111 侧链在常规 MD 中很难翻转，这个现象已有文献报道。
+`examples/181L.pdb` is the complex of T4 lysozyme L99A with benzene. The Val111 side chain in the pocket rarely flips in conventional MD. The literature reports this.
 
-## 当前限制
+## Current limitations
 
-- 用 `--pdb` 输入时，配体会被去掉，只模拟蛋白本身。要保留配体，先准备好 Amber 体系，再用 `--prmtop`/`--inpcrd` 输入。
-- PROPKA 只在用户要求时运行，预测的是去掉配体后的蛋白。
-- 只看 chi1，还没有看 chi2。
-- 脯氨酸和形成二硫键的半胱氨酸不做诊断，也不做增强采样，因为它们的 chi1 被环或 S-S 键固定住，不会在几种状态之间翻转。报告里它们的判断是 `fixed_chi1`。
-- 增强采样一次最多给 10 个侧链加偏置势（`--enhanced-max-residues` 可改），选普通 MD 里最慢的那些。同时给很多侧链加偏置势会强行推动整个蛋白，小蛋白可能因此散开。目标区域太大时，先缩小范围。
+- With `--pdb` input, the ligand is removed and only the protein is simulated. To keep the ligand, prepare an Amber system first, then input it with `--prmtop`/`--inpcrd`.
+- PROPKA runs only when the user asks for it, and it predicts for the protein without the ligand.
+- Only chi1 is analyzed, not chi2 yet.
+- Prolines and cysteines in disulfide bonds get no diagnosis and no enhanced sampling, because the ring or the S-S bond fixes their chi1, so it does not flip between states. Their label in the report is `fixed_chi1`.
+- Enhanced sampling biases at most 10 side chains at a time (change it with `--enhanced-max-residues`). It chooses the slowest ones in plain MD. Biasing many side chains at once pushes the whole protein, and a small protein can unfold. If the target region is too large, make it smaller first.
 
-## 增强采样
+## Enhanced sampling
 
-普通 MD 停下后，agent 对被标为 `enhanced_sampling` 的侧链做增强采样（"自己判断"模式下自动开始；"按用户指定"模式下要用户同意）。方法是 well-tempered metadynamics，直接在 OpenMM 里实现，不需要 PLUMED。每个侧链的 chi1 有一个独立的偏置势，所有侧链在同一次模拟里处理。每条增强采样轨迹从普通 MD 的最终状态开始，默认 2 条，每条最多 20 ns。用 `resume --enhanced-ns 30` 可以加长。
+After plain MD stops, the agent runs enhanced sampling on the side chains labeled `enhanced_sampling` (it starts automatically in "agent decides" mode; in "user specifies" mode it needs the user's consent). The method is well-tempered metadynamics, implemented directly in OpenMM, with no need for PLUMED. Each side chain's chi1 has its own bias potential, and all side chains are handled in one simulation. Each enhanced sampling replica starts from the final state of plain MD. By default there are 2 replicas, at most 20 ns each. Extend with `resume --enhanced-ns 30`.
 
-**分析：** 两条增强采样轨迹轮流跑，每条每次跑 1 ns。每轮结束后，agent 去掉偏置势的影响，算出每个侧链在 g+、t、g- 三种状态的真实比例。方法是 Tiwary 和 Parrinello（2015）的随时间重新加权：程序保存了每个 chi1 采样点，用它们可以精确重建任何时刻的偏置势。每条轨迹开头 10% 不用，因为那时偏置势长得最快。误差的算法见下面的"误差怎么算"。
+**Analysis:** the two enhanced sampling replicas run in turns, 1 ns each time. After each round, the agent removes the effect of the bias potential and computes the true population of each side chain in the states g+, t and g-. The method is the time-dependent reweighting of Tiwary and Parrinello (2015). The program saves every chi1 sample point, and with them it can rebuild the bias potential at any moment exactly. The first 10% of each replica is not used, because the bias potential grows fastest then. For the error calculation, see "How errors are computed" below.
 
-**每个侧链的判断：**
+**The judgement for each side chain:**
 
-| 判断 | 条件 |
+| Judgement | Condition |
 |---|---|
-| `reached` | 达到目标：每个状态比例的误差都不超过用户要的精度，各条重复一致，每条重复都在状态之间来回了至少 10 次，权重没有退化，并且每条至少跑了 5 ns。 |
-| `stalled` | 采样停滞：有重复几乎不在状态之间来回。偏置势推不动这个侧链，所以误差再小也不能信，因为所有重复可能都困在同一个状态。 |
-| `unreliable` | 权重退化：有效样本数少于 50，结果只靠少数几帧。 |
-| `not_yet` | 还不够精确，或者各条重复不一致。 |
+| `reached` | Target reached: the error of each state population is at most the precision the user asked for, the replicas agree, each replica moved between states at least 10 times, the weights are not degenerate, and each replica ran at least 5 ns. |
+| `stalled` | Stalled: some replica almost never moves between states. The bias potential cannot push this side chain. So even a small error cannot be trusted, because all replicas may be trapped in the same state. |
+| `unreliable` | Degenerate weights: fewer than 50 effective samples, so the result depends on only a few frames. |
+| `not_yet` | Not precise enough yet, or the replicas disagree. |
 
-和上一轮相比比例变了多少（`change_since_last`）只作为诊断记下来，不作为停下的理由。
+The change in populations since the last round (`change_since_last`) is recorded only as a diagnostic. It is not a reason to stop.
 
-**测试过的情况：** 一个已知比例的模型，重新加权得到 0.21 / 0.69 / 0.10，真实值是 0.20 / 0.70 / 0.10；没有重新加权的时间占比是 0.25 / 0.29 / 0.24。两个互相耦合的侧链（一个的状态改变另一个的比例），各自只有一维的偏置势，得到的比例和真实值的差别都在误差范围内，例如 0.19 ± 0.01 / 0.61 ± 0.02 / 0.20 ± 0.02，真实值是 0.20 / 0.60 / 0.20。
+**Tested cases:** in a model with known populations, reweighting gives 0.21 / 0.69 / 0.10, and the true values are 0.20 / 0.70 / 0.10. Time fractions without reweighting are 0.25 / 0.29 / 0.24. For two coupled side chains (the state of one changes the populations of the other), each with only a one-dimensional bias potential, the populations differ from the true values by less than the error, for example 0.19 ± 0.01 / 0.61 ± 0.02 / 0.20 ± 0.02 against true values 0.20 / 0.60 / 0.20.
 
-输出在运行目录的 `enhanced/` 里：
+Output is in `enhanced/` in the run folder:
 
-| 文件 | 内容 |
+| File | Content |
 |---|---|
-| `replica_<i>_chunk<k>.dcd` | 第 i 条增强采样轨迹第 k 个 1 ns 片段的蛋白轨迹。拓扑用运行目录里的 `protein.pdb`。 |
-| `replica_<i>_chi.npy` | 每个被偏置残基的 chi1（弧度），每 1 ps 一行。 |
-| `replica_<i>_bias.npy` | 每个被偏置残基在 chi1 网格上的最终偏置势（kJ/mol），网格从 -180° 到 180°，361 个点。 |
-| `populations.json` | 重新加权后每个侧链的状态比例和误差、相对自由能和误差（kcal/mol）、每条重复的比例和翻转次数、有效样本数、判断。日志末尾也有表。 |
-| `replica_<i>.state.xml`、`replica_<i>.json` | 续跑用的状态和进度。 |
+| `replica_<i>_chunk<k>.dcd` | Protein trajectory of enhanced sampling replica i, 1 ns segment k. Use `protein.pdb` in the run folder as the topology. |
+| `replica_<i>_chi.npy` | chi1 (radians) of each biased residue, one row every 1 ps. |
+| `replica_<i>_bias.npy` | Final bias potential (kJ/mol) of each biased residue on a chi1 grid from -180° to 180°, 361 points. |
+| `populations.json` | For each side chain after reweighting: state populations and errors, relative free energies and errors (kcal/mol), populations and flip counts of each replica, effective sample size, judgement. The end of the log also has a table. |
+| `replica_<i>.state.xml`, `replica_<i>.json` | State and progress for `resume`. |
 
-残基在 `.npy` 文件里的顺序，与 `run.json` 中 `enhanced.residues` 的顺序相同。
+The order of residues in the `.npy` files is the same as the order of `enhanced.residues` in `run.json`.
 
-**注意：** 增强采样的轨迹和 `replica_<i>_chi.npy` 是在偏置势下采到的，直接数时间占比会得到接近均等的错误比例。要用 `populations.json` 里重新加权后的结果。
+**Note:** the enhanced sampling trajectories and `replica_<i>_chi.npy` are sampled under the bias potential. Counting time fractions directly gives wrong, nearly equal populations. Use the reweighted results in `populations.json`.
 
-## 自适应采样（可选）
+## Adaptive sampling (optional)
 
-加上 `--sampling adaptive` 后，普通 MD 阶段从第 2 轮起，每条轨迹不再接着自己的上一段跑，而是从 AdaptivePy（Shukla 课题组的自适应采样包）挑出的帧重新起跑。默认策略 `least_counts` 会挑"访问最少"区域里的帧。需要先安装：`pip install adaptivepy-sampling`。
+With `--sampling adaptive`, from round 2 of plain MD on, each replica no longer continues from its own last segment. It restarts from frames that AdaptivePy (the adaptive sampling package of the Shukla group) chooses. The default policy `least_counts` chooses frames from the "least visited" regions. Install it first: `pip install adaptivepy-sampling`.
 
-- **特征：** 目标区域里各侧链 chi1 的正弦和余弦。
-- **起点要分散：** 聚类数按每 5 帧一类设定（最多 `--adaptive-clusters` 个）。AdaptivePy 先给出 3 倍于所需的候选帧，agent 再从中选出彼此差别最大的几个作为起点，避免几条轨迹从几乎相同的结构出发。
-- **完整坐标：** 这个模式下每段轨迹每 10 ps 额外保存一帧完整体系（含水），文件名是 `replica_<i>_part<k>.full.dcd`。起点只从这些帧里挑。重新起跑时，按设定温度重新随机分配速度。
-- **判断规则：** 各段轨迹的起点是故意挑得不同的，所以这个模式下 agent 只看所有轨迹段加起来的翻转次数，不再比较各条轨迹是否停在同一个状态。
-- **比例怎么算：** 起点是挑出来的（例如专挑少见的状态），直接数各状态所占的时间会得到错误的比例。所以这个模式用马尔可夫状态模型（`msm.py`）：数各轨迹段里状态之间的转变次数，估计满足细致平衡的转变概率（最大似然），再取这个模型的平衡分布作为比例（Prinz 等 2011；Bowman 等 2009）。两个状态之间的帧算作上一个状态（核心集方法，Buchete 和 Hummer 2008）。误差用对轨迹段重新抽样（bootstrap）来估计，也不小于误差下限。只进不出（或只出不进）的状态算不出比例，结果里会写明，判断为翻转太少。达到要求的翻转次数后，误差还要不超过要求的精度，才算达标。测试里，所有轨迹段都从只占 5% 的状态出发时，直接数时间得到约 28%，模型给出 4.9% ± 0.7%。
-- **记录：** 每一轮挑出的起点记在 `run.json` 的 `starts` 里；AdaptivePy 的输入和输出在 `adaptive/round_<k>/` 里。程序会核对 AdaptivePy 给出的帧编号，对不上就停下报错。
+- **Features:** sine and cosine of chi1 of each side chain in the target region.
+- **Spread-out starts:** the number of clusters is one cluster per 5 frames (at most `--adaptive-clusters`). AdaptivePy first gives 3 times the needed number of candidate frames. The agent then chooses the ones that differ most from each other as starts, so that replicas do not start from almost the same structure.
+- **Full coordinates:** in this mode, each segment also saves one frame of the full system (with water) every 10 ps, in `replica_<i>_part<k>.full.dcd`. Starts are chosen only from these frames. At a restart, velocities are drawn again at random for the set temperature.
+- **Judgement rule:** the starts of the segments are chosen to be different on purpose. So in this mode the agent looks only at the total flip count of all segments. It no longer checks whether the replicas stay in the same state.
+- **How populations are computed:** the starts are chosen (for example only rare states), so counting the time in each state directly gives wrong populations. So this mode uses a Markov state model (`msm.py`). It counts the transitions between states in each segment, estimates transition probabilities that satisfy detailed balance (maximum likelihood), and takes the equilibrium distribution of this model as the populations (Prinz et al. 2011; Bowman et al. 2009). A frame between two states counts as the previous state (the core-set method, Buchete and Hummer 2008). The error comes from resampling the segments (bootstrap), and it is not smaller than the error floor. A state that is only entered and never left (or only left and never entered) has no computable population. The result says so, and the judgement is too few flips. After the required number of flips, the error must also be at most the required precision to pass. In a test where all segments start from a state with only 5% population, counting time directly gives about 28%, and the model gives 4.9% ± 0.7%.
+- **Records:** the starts chosen in each round are in `starts` in `run.json`. The AdaptivePy input and output are in `adaptive/round_<k>/`. The program checks the frame numbers that AdaptivePy gives. If they do not match, it stops with an error.
 
-选项：`--adaptive-policy`（`least_counts` 或 `random`）、`--adaptive-clusters`（聚类数，默认 20）、`--full-save-ps`（完整坐标的保存间隔，默认 10 ps）。
+Options: `--adaptive-policy` (`least_counts` or `random`), `--adaptive-clusters` (number of clusters, default 20), `--full-save-ps` (save interval of full coordinates, default 10 ps).
 
-## 测量什么（结果量）
+## What is measured (quantities)
 
-agent 判断"够不够"的依据，是用户关心的那个量。每个量都先被换成"状态"：每一帧属于哪个状态。然后用同一套方法数状态之间切换了几次、算各状态的比例和误差、判断够不够（见"误差怎么算"和"停下的原因"）。现在支持三种按状态算的量和一种连续量（结构稳定性，没有状态，直接算平均值），另外还可以把目标设成“看到某个变化就停”（见下面）：
+The agent decides "is it enough" from the quantity the user cares about. Each quantity is first turned into "states": which state each frame belongs to. Then one shared method counts the switches between states, computes the population and error of each state, and judges whether it is enough (see "How errors are computed" and "Goal, permissions and stop reasons"). There are now three state-based quantities and one continuous quantity (structural stability, which has no states and uses the mean directly). You can also set the goal to "stop when you see a certain change" (see below):
 
-| 量 | 什么时候用 | 状态 | 怎样指定 | 增强采样 |
+| Quantity | When to use | States | How to specify | Enhanced sampling |
 |---|---|---|---|---|
-| 侧链构象（`--quantity chi1`，默认） | 关心口袋里侧链的构象 | 每个侧链的 chi1：g+、t、g- | `--residues A:99-120` 或 `--around-ligand BNZ` | 有（chi1 上的 metadynamics） |
-| 原子间距离（`--quantity distance`） | 关心口袋开合、两个残基是否接触、通道是否打开 | 每个距离："近"（小于阈值）和"远" | `--distances "A:88:OH-A:111:CG1@0.6"`，多个用分号隔开 | 还没有 |
-| 主链构象区（`--quantity backbone`） | 关心任何残基的 Ramachandran 构象区比例、构象区之间的转变、φ/ψ 自由能面，或一个 β 转角的类型 | `rama`：默认 alpha_R、beta（含 PPII）、alpha_L、other；`turn`：β-I、β-II | `--backbone "rama:A:110-112;turn:A:52"`，或 `--residues A:110-112`（每个残基一个 rama 项目） | 有（每个项目的两个二面角上的 metadynamics） |
-| 结构稳定性（`--quantity stability`） | 关心蛋白或一段区域能不能保持起始结构 | 不是状态，而是两个连续量：相对起始结构的骨架 RMSD 和回转半径 Rg（nm） | 不给残基时是整个蛋白；`--residues A:42-76` 只看一段 | 没有 |
+| Side-chain conformation (`--quantity chi1`, default) | You care about the conformations of side chains in a pocket | chi1 of each side chain: g+, t, g- | `--residues A:99-120` or `--around-ligand BNZ` | Yes (metadynamics on chi1) |
+| Distance between atoms (`--quantity distance`) | You care about a pocket opening and closing, contact between two residues, or a channel opening | For each distance: "near" (below the threshold) and "far" | `--distances "A:88:OH-A:111:CG1@0.6"`, several separated by semicolons | Not yet |
+| Backbone basins (`--quantity backbone`) | You care about the Ramachandran basin populations of any residue, transitions between basins, the φ/ψ free-energy surface, or the type of a β turn | `rama`: by default alpha_R, beta (with PPII), alpha_L, other; `turn`: β-I, β-II | `--backbone "rama:A:110-112;turn:A:52"`, or `--residues A:110-112` (one rama item per residue) | Yes (metadynamics on the two dihedrals of each item) |
+| Structural stability (`--quantity stability`) | You care whether the protein or a region keeps its starting structure | Not states, but two continuous quantities: backbone RMSD relative to the starting structure and radius of gyration Rg (nm) | With no residues, the whole protein; `--residues A:42-76` for one region only | No |
 
-**主链构象区：** 适用于任何蛋白、任何残基。`rama:A:73` 是 73 号残基的 φ/ψ；`turn:A:52` 是第二个残基（i+1）为 52 号的 β 转角，用 ψ(52) 和 φ(53) 区分 I 型和 II 型（两个中心的出处写在 `basins.py`）。只给 `--residues` 时，每个残基变成一个 rama 项目；链的第一个残基没有 φ、最后一个没有 ψ，会被跳过并说明。每个项目给出以下结果，各有自己的精度要求，比例、主要转变速率和自由能面三样都达到才算达标：
+**Backbone basins:** these work for any protein and any residue. `rama:A:73` is φ/ψ of residue 73. `turn:A:52` is the β turn whose second residue (i+1) is residue 52. It uses ψ(52) and φ(53) to tell type I from type II (the sources of the two centres are in `basins.py`). With only `--residues`, each residue becomes one rama item. The first residue of a chain has no φ and the last has no ψ, so they are skipped with a note. Each item gives the results below. Each has its own precision requirement. The item passes only when the populations, the main transition rates and the free-energy surface all pass:
 
-- **构象区比例**，误差不超过 `--precision`（默认 0.05；精度标准见“误差怎么算”）。一帧只有进入构象区的“核心”才算换了构象区，在边界上来回抖动不算。
-- **构象区之间的转变统计**：每对构象区之间的转变次数、速率（次/ns）和平均停留时间（在这个构象区的总时间 ÷ 离开次数），都带误差。主要转变（比例至少 5% 的构象区之间，两个方向）的相对误差不超过 `--rate-rel-error`（默认 0.25，大约要看到 16 次）。
-- **两个主要构象区之间的自由能差**（kT），带误差。
-- **φ/ψ 自由能面**：每 15° 一格，F = −kT ln p，最低处为 0。误差来自各条重复之间的差别，所以至少要 2 条重复。自由能不超过 2 kcal/mol 的格子里，误差不超过 `--fes-error-kcal`（默认 0.5 kcal/mol）。另有一张每 10° 一格的图（`landscape_*.svg`，数据在同名 `.csv`）。
+- **Basin populations**, error at most `--precision` (default 0.05; for the precision standard see "How errors are computed"). A frame counts as a basin change only when it enters the "core" of the basin. Jitter back and forth on a boundary does not count.
+- **Transition statistics between basins:** for each pair of basins, the number of transitions, the rate (per ns) and the mean residence time (total time in this basin ÷ number of exits), all with errors. The relative error of the main transitions (between basins with at least 5% population, both directions) is at most `--rate-rel-error` (default 0.25, which needs about 16 transitions).
+- **Free-energy difference between the two main basins** (kT), with error.
+- **φ/ψ free-energy surface:** 15° bins, F = −kT ln p, lowest point at 0. The error comes from the differences between replicas, so at least 2 replicas are needed. In bins with free energy at most 2 kcal/mol, the error is at most `--fes-error-kcal` (default 0.5 kcal/mol). There is also a map with 10° bins (`landscape_*.svg`, data in the `.csv` with the same name).
 
-**构象区怎么划分：** 划分会影响结论。rama 默认把整张 Ramachandran 图分成四块（alpha_R、beta 含 PPII、alpha_L、other），一帧要离边界至少 `--basin-margin` 度（默认 10°）才算进入，这样甘氨酸常去的区域（φ≈80°，ψ≈180°）也有自己的构象区。也可以用 `--basins` 换成自己的分区，写法是 `名字:φ从,φ到,ψ从,ψ到`，单位是度，多个用分号隔开；同一个名字可以写多次，表示由几块组成。`--rama-basins centres` 改用 alphaR、beta、alphaL 三个中心、离中心 50° 以内算进入（2026-11-22 之前开始的 `rama:` 运行续跑时自动用这种，不会中途换定义）。β 转角总是用两个中心。结果在运行目录的 `backbone/` 里：每个项目一个 `.json`（转变统计、各构象区自由能最低处）、一个 `_fes.csv` 和 `_fes.npz`（自由能面和误差，任何画图程序都能读）。
+**How the basins are defined:** the definition affects the conclusions. By default, rama divides the whole Ramachandran map into four regions (alpha_R, beta with PPII, alpha_L, other). A frame must be at least `--basin-margin` degrees (default 10°) from a boundary to count as entering. So the region that glycine often visits (φ≈80°, ψ≈180°) also has its own basin. You can replace the regions with your own through `--basins`, written as `name:φ from,φ to,ψ from,ψ to` in degrees, several separated by semicolons. The same name can appear several times, which means the basin has several parts. `--rama-basins centres` uses three centres instead (alphaR, beta, alphaL), and within 50° of a centre counts as entering. `rama:` runs started before 2026-11-22 use this automatically when they resume, so the definition does not change in the middle of a run. β turns always use two centres. Results are in `backbone/` in the run folder: one `.json` per item (transition statistics, lowest free-energy point of each basin), and one `_fes.csv` and `_fes.npz` (free-energy surface and errors, readable by any plotting program).
 
-**主链构象区的增强采样：** 普通 MD 里一直不换构象区、而且剩下的预算也不够看到足够转变的项目，可以改用增强采样：给每个项目的两个二面角（rama 是 φ 和 ψ，turn 是 ψ(i+1) 和 φ(i+2)）各加一个一维的 well-tempered metadynamics 偏置势（一次最多 `--enhanced-max-residues` 个项目，默认 10），再用 Tiwary–Parrinello 方法重新加权，算回构象区比例和自由能面（`backbone/<项目>_fes_reweighted.csv`）。有 `switch_method` 权限时 agent 自己换，否则只在对话里建议，你确认后才换。偏置势会改变动力学，所以**转变速率和停留时间只来自普通 MD**；报告里写明这一点。一个项目如果在普通 MD 里一次都没换过构象区，它的速率就给不出来，要更长的普通 MD 才行。用已知答案的模型检查过：三个构象区真实比例 0.70、0.25、0.05，重新加权得到 0.67 ± 0.05、0.25 ± 0.05、0.075 ± 0.015。已经跑完的轨迹段只读一次，存在 `backbone/cache/`，所以很长的运行每轮只读新跑的一段。
+**Enhanced sampling for backbone basins:** an item that never changes basin in plain MD, and whose remaining budget is not enough to see enough transitions, can switch to enhanced sampling. Each of the two dihedrals of the item (φ and ψ for rama, ψ(i+1) and φ(i+2) for turn) gets a one-dimensional well-tempered metadynamics bias potential (at most `--enhanced-max-residues` items at a time, default 10). Tiwary–Parrinello reweighting then gives back the basin populations and the free-energy surface (`backbone/<item>_fes_reweighted.csv`). With the `switch_method` permission, the agent switches by itself. Otherwise it only suggests it in the chat and switches after you confirm. The bias potential changes the dynamics, so **transition rates and residence times come only from plain MD**. The report says so. If an item never changed basin in plain MD, its rates cannot be given, and it needs longer plain MD. Checked with a model of known answers: true populations of three basins 0.70, 0.25, 0.05; reweighting gives 0.67 ± 0.05, 0.25 ± 0.05, 0.075 ± 0.015. Finished trajectory segments are read only once and stored in `backbone/cache/`, so in a very long run each round reads only the new segment.
 
-**结构稳定性（2026-11-23，测试者在 1YRF 上提出）：** 每轮从轨迹算相对起始结构（`protein.pdb`）的骨架 RMSD（先叠合）和回转半径 Rg。原子是区域里的 Cα；区域少于 5 个残基时用重原子。开头没平衡的部分用和其他量同一种自动检测去掉（`uncertainty.joint_equilibration_start_values`，所有重复共用一个起点）。每个量单独判断，两个都“ok”才算达标：
+**Structural stability (2026-11-23, proposed by a tester on 1YRF):** each round computes from the trajectory the backbone RMSD (after superposition) and the radius of gyration Rg relative to the starting structure (`protein.pdb`). The atoms are the Cα atoms of the region. When the region has fewer than 5 residues, heavy atoms are used. The unequilibrated start is removed with the same automated detection as for the other quantities (`uncertainty.joint_equilibration_start_values`, one shared start for all replicas). Each quantity is judged separately, and the item passes only when both are "ok":
 
-- **稳态：** 每条重复的后半段平均值减前半段平均值，再在重复之间平均。前后半段在同一条重复里配对，所以几条重复停在不同水平不会被当成漂移。差值加上它的区间半宽不超过 3 × 精度（默认 0.06 nm）才算稳态，这是等效性检验，不是“看不出差别”。差值本身就超过这个限度，判为 drifting。
-- **精度：** 平均值的区间半宽不超过 `--stability-tolerance`（默认 0.02 nm）。误差取重复内（分块平均）和重复间两者中较大的；重复间差别经卡方检验确实存在时用 t 分布。
-- **独立样本：** 每条重复至少 4 个独立样本（帧数 ÷ 统计无效率），否则判为 rare_flips，不信误差。
+- **Steady state:** for each replica, the mean of the second half minus the mean of the first half, then averaged over replicas. The two halves are paired within the same replica, so replicas that stay at different levels are not taken as drift. The quantity is at steady state only when the difference plus its interval half-width is at most 3 × precision (default 0.06 nm). This is an equivalence test, not "no visible difference". When the difference alone is above this limit, the label is drifting.
+- **Precision:** the interval half-width of the mean is at most `--stability-tolerance` (default 0.02 nm). The error is the larger of the within-replica error (block averaging) and the between-replica error. When a chi-square test shows that the differences between replicas are real, the t distribution is used.
+- **Independent samples:** each replica needs at least 4 independent samples (frames ÷ statistical inefficiency). Otherwise the label is rare_flips, and the error is not trusted.
 
-报告另外给出：RMSD 低于 `--rmsd-cutoff`（默认 0.3 nm，带 ±0.05 nm 缓冲）的时间比例和离开次数；一次都没离开时，给出离开速率的 95% 上限 3/T（T 是所有重复合计的时间）；RMSD–Rg 自由能面（25 × 25 格，误差来自重复之间的差别）。结果在 `stability/`：`summary.json`、`rmsd_rg.csv/.svg`、`fes_rmsd_rg.csv/.svg`。分配规则和其他量共用 `allocation.next_step`：误差按 精度/稳定性容差 换算到同一单位（分配的计算与尺度无关）。代码在 `stability.py`。
+The report also gives: the time fraction with RMSD below `--rmsd-cutoff` (default 0.3 nm, with a ±0.05 nm buffer) and the number of exits; when there is no exit, the 95% upper limit of the exit rate 3/T (T is the total time of all replicas); and the RMSD–Rg free-energy surface (25 × 25 bins, error from differences between replicas). Results are in `stability/`: `summary.json`, `rmsd_rg.csv/.svg`, `fes_rmsd_rg.csv/.svg`. The allocation rule is shared with the other quantities through `allocation.next_step`: errors are converted to one unit by precision/stability tolerance (the allocation calculation does not depend on scale). The code is in `stability.py`.
 
-**构象聚类（`--cluster`，结构稳定性自动做）：** GROMOS 方法（Daura 1999）：平衡后的帧（所有重复合在一起，超过 2500 帧时均匀抽取）两两叠合算 RMSD；邻居（RMSD ≤ `--cluster-cutoff`，默认 0.15 nm）最多的帧当中心，它和邻居成一簇，去掉后重复。报告前 10 簇的占比（误差来自各条重复里占比的差别）、出现在哪些重复、代表结构 `clusters/cluster_<k>.pdb`；数据在 `clusters/clusters.json`。原子和结构稳定性相同。聚类在写报告时做，出错只打印一条说明，不影响报告。代码在 `clustering.py`。
+**Conformational clustering (`--cluster`, automatic for structural stability):** the GROMOS method (Daura 1999). The equilibrated frames (all replicas together, sampled evenly when there are more than 2500 frames) are superposed in pairs to compute RMSD. The frame with the most neighbors (RMSD ≤ `--cluster-cutoff`, default 0.15 nm) is the centre. It forms a cluster with its neighbors, these are removed, and the process repeats. The report gives the fractions of the top 10 clusters (error from the differences in fraction between replicas), the replicas in which they appear, and representative structures `clusters/cluster_<k>.pdb`. The data is in `clusters/clusters.json`. The atoms are the same as for structural stability. Clustering runs when the report is written. If it fails, it prints only a note and does not affect the report. The code is in `clustering.py`.
 
-**还不支持：** 原子间距离的自由能面。
+**Not supported yet:** a free-energy surface for distances between atoms.
 
-**距离的写法：** `链:残基号:原子名-链:残基号:原子名@阈值`，阈值单位是 nm。原子名用标准 PDB 名字，例如 CA、CB、OH、NZ、CG1。Amber 体系没有链名，可以省掉链，例如 `88:OH-111:CG1@0.6`。距离要越过阈值 ±0.05 nm 才算换了状态，在阈值附近来回抖动不算。程序在搭体系前、后各检查一次原子是否存在，找不到就停下并说明原因。在对话里可以直接说"看 Tyr88 的 OH 和 Val111 的 CG1 之间的距离，0.6 nm 以内算接触"。
+**How to write a distance:** `chain:residue number:atom name-chain:residue number:atom name@threshold`, threshold in nm. Atom names are standard PDB names, for example CA, CB, OH, NZ, CG1. Amber systems have no chain names, so you can omit the chain, for example `88:OH-111:CG1@0.6`. The distance must cross the threshold by ±0.05 nm to count as a state change. Jitter around the threshold does not count. The program checks that the atoms exist once before and once after the system build. If it cannot find them, it stops and explains why. In the chat you can say directly "look at the distance between OH of Tyr88 and CG1 of Val111, within 0.6 nm counts as contact".
 
-**距离卡住时：** 距离还没有增强采样方法。普通 MD 一直没有变化、剩下的预算也不够看到变化时，agent 会在对话里说明，并建议加长、加重复，或者改用自适应采样；不会自己换方法。停下的原因记为"采样停滞"。
+**When a distance is stuck:** there is no enhanced sampling method for distances yet. When plain MD shows no change and the remaining budget is not enough to see a change, the agent says so in the chat and suggests extending, adding replicas or switching to adaptive sampling. It does not change the method by itself. The stop reason is recorded as "stalled".
 
-**看到某个变化就停（`--observe`）：** 有时用户不需要比例，只想知道“会不会发生某个变化”，看到了就可以停。写法是“项目=状态”，多个用分号隔开：
+**Stop when a change is seen (`--observe`):** sometimes the user needs no populations and only wants to know "does a certain change happen". When it is seen, the run can stop. Write it as "item=state", several separated by semicolons:
 
-- `--observe "A:111=t"`：111 号侧链的 chi1 进入 t 状态。侧链的状态是 g+、t、g-。
-- `--observe "A:88:OH-A:111:CG1@0.6=far"`：这段距离变“远”。距离的状态是 near 和 far。
+- `--observe "A:111=t"`: chi1 of side chain 111 enters the t state. Side-chain states are g+, t and g-.
+- `--observe "A:88:OH-A:111:CG1@0.6=far"`: this distance becomes "far". Distance states are near and far.
 
-只有从别的状态进入目标状态、并且连续停留至少 `--hold-ps`（默认 100 ps）才算看到，所以起始结构本来的状态和一闪而过的抖动都不算。在 `--seen-in` 条重复（默认 1 条）里看到，就停下，原因记为“达到目标”，对话和报告里写明在哪条重复、第几 ns 看到。项目一直不变化、剩下的预算也不够时，就停下并建议换方法；有变化但还没进入目标状态时，跑到上限后建议加长或改用自适应采样。这类目标不要求比例的精度，报告里的各状态时间只作参考。在对话里可以说“跑 181L，看到 Val111 进入 t 状态就停”。
+It counts as seen only when the item enters the target state from another state and stays there continuously for at least `--hold-ps` (default 100 ps). So the state of the starting structure and short flickers do not count. When it is seen in `--seen-in` replicas (default 1), the run stops with the reason "target reached". The chat and the report say in which replica and at which ns it was seen. When the item never changes and the remaining budget is not enough, the run stops and suggests a different method. When it changes but has not entered the target state yet, the run goes to the limit and then suggests extending or switching to adaptive sampling. This kind of goal needs no population precision. The time in each state in the report is only for reference. In the chat you can say "Run 181L, stop when you see Val111 enter the t state".
 
-## 让 agent 决定跑几条、跑多久、何时停（`--allocation projection`）
+## Letting the agent decide replicas, length and stopping (`--allocation projection`)
 
-这是 agent 的核心能力：用户只说要测什么、要多准，agent 自己决定怎样用最少的计算量做到。在对话里这样说就会用这种方式，例如：
+This is the core ability of the agent: the user only says what to measure and how precisely, and the agent decides how to do it with the least compute. The chat uses this mode when you say, for example:
 
-> 使用 Ubiquitin (1UBQ)，通过 standard unbiased MD 估计残基 8、9、10 和 50 环 D52/G53 转角的 Ramachandran basin populations、transition statistics 和 φ/ψ free-energy landscape。你可以自行决定 replicas 数量、每条模拟长度和停止时间。目标是在保证准确度的前提下最小化总 simulation cost。
+> Use Ubiquitin (1UBQ) and estimate with standard unbiased MD the Ramachandran basin populations, transition statistics and φ/ψ free-energy landscape of residues 8, 9, 10 and the D52/G53 turn in the 50 loop. You may decide the number of replicas, the length of each simulation and when to stop. The goal is to minimize the total simulation cost while keeping the result accurate.
 
-语言模型会把它填成：主链构象区 `rama:A:8-10;turn:A:52`、按成本分配、允许加长、加重复和提前停，但不换成增强采样（因为用户限定了标准无偏 MD）。如果用户只说"指定残基"而没给编号，它会先问是哪些残基，不会猜。
+The language model fills this in as: backbone basins `rama:A:8-10;turn:A:52`, allocation by cost, extend, add replicas and stop early allowed, but no switch to enhanced sampling (because the user limited it to standard unbiased MD). If the user only says "the given residues" and gives no numbers, it first asks which residues. It does not guess.
 
-agent 的做法（规则在 `allocation.py`，实验 A 回放的也是这一份代码）：
+What the agent does (the rule is in `allocation.py`; the Experiment A replay uses the same code):
 
-1. **开始：** 用设定的重复数跑第一段（默认每条 1 ns）。这一次查看只用来规划，不允许停，所以不消耗显著性水平。
-2. **每次查看：** 先自动丢弃开头还没有平衡的部分（`--burn-in auto`，这种方式的默认值）。用的是 Chodera 2016 的自动平衡检测：所有重复从同一个结构出发，所以共用一个起点；只有丢掉开头能让有效样本数至少增加到 1.5 倍、而且每条重复的构象变化中位数至少 20 次时才丢，否则不丢。只看自己的轨迹，丢掉的部分照样算成本，判断“一直不变化”时只算保留下来的时间。再算出每个量的比例、考虑时间相关的误差、按查看次数校准的区间，以及误差中"重复内部"和"重复之间"各占多少。重复之间的差别经卡方检验确实存在时，区间用自由度 n−1 的 t 分布，因为这时误差只来自几条重复的数字，本身估得很不准（3 条重复时，95% 区间的系数是 4.30，不是 1.96）。差别只是偶然偏大时不用 t，因为误差已经取了两者中较大的一个。差别“有迹象”（卡方检验 80% 水平）时，投影就把它算进去，倾向于加重复。只有 3 条重复时差别本身测不准，所以只有连乐观的估计（差别取 95% 置信下限）也达不到精度时才放弃；否则先加重复把差别测准。
-3. **分配：** 在"加长"和"加重复"之间选投影成本最低的组合，直接跳到那个长度，而不是每隔几 ns 看一次。只有重复之间的差别在统计上显著时才加重复，因为每条新重复都要重新平衡。新重复从同一个结构、用新的随机种子起跑，先补跑到同样长度。
-4. **停止：** 所有量都够精确、而且每条重复都在状态之间来回了足够多次时，宣布收敛（STOP）。一个量一次都没变时，agent 按 95% 置信上限估计它最快可能多快变化；只有连这个最乐观的速度也要超出预算才能达到精度时，才把它单独标为证据不足，其余的量继续。查看次数或预算用完、有项目一直不变化、或投影出的成本远超预算时，输出"证据不足"（INSUFFICIENT_EVIDENCE）。这也是一个结论：数据撑不起要求的精度。
-5. **交付：** 报告写明每次查看看到了什么、为什么那样分配、为什么停；每个量单独判断是否收敛；以及用了多少计算量、占预算多少。
+1. **Start:** run the first segment with the set number of replicas (by default 1 ns each). This look is only for planning. It cannot stop, so it uses none of the significance level.
+2. **Each look:** first remove the unequilibrated start automatically (`--burn-in auto`, the default in this mode). This uses the automated equilibration detection of Chodera 2016. All replicas start from the same structure, so they share one start point. The start is removed only when this raises the effective sample size to at least 1.5 times, and the median number of conformational changes per replica is at least 20. Otherwise nothing is removed. Only the agent's own trajectories are used. The removed part still counts as cost, and the "never changes" judgement uses only the kept time. Then the agent computes, for each quantity, the populations, the error with time correlation, the interval calibrated for the number of looks, and how much of the error is "within replicas" and how much is "between replicas". When a chi-square test shows that the differences between replicas are real, the interval uses the t distribution with n−1 degrees of freedom, because then the error comes only from the numbers of a few replicas and is itself very uncertain (with 3 replicas, the factor of the 95% interval is 4.30, not 1.96). When the differences are only large by chance, t is not used, because the error already takes the larger of the two. When there is "a sign" of differences (chi-square test at the 80% level), the projection includes them and prefers adding replicas. With only 3 replicas the differences cannot be measured well. So the agent gives up only when even the optimistic estimate (differences at the 95% lower confidence limit) cannot reach the precision. Otherwise it first adds replicas to measure the differences well.
+3. **Allocation:** choose between "extend" and "add replicas" the combination with the lowest projected cost, and jump directly to that length instead of looking every few ns. Replicas are added only when the differences between replicas are statistically significant, because each new replica needs a new equilibration. A new replica starts from the same structure with a new random seed, and first catches up to the same length.
+4. **Stop:** when all quantities are precise enough and each replica has moved between states enough times, the agent declares convergence (STOP). When a quantity never changed, the agent estimates from the 95% upper confidence limit how fast it can change at most. Only when even this most optimistic rate would need more than the budget to reach the precision does it mark that quantity alone as insufficient evidence. The other quantities continue. When the looks or the budget are used up, an item never changes, or the projected cost is far above the budget, the output is "insufficient evidence" (INSUFFICIENT_EVIDENCE). This is also a conclusion: the data cannot support the required precision.
+5. **Delivery:** the report says what each look saw, why the agent allocated as it did, and why it stopped. It judges convergence for each quantity separately, and gives how much compute was used and what share of the budget.
 
-限制在 `--budget-ns`（所有重复相加的生产时间，默认等于允许的最多重复数 × 每条上限）、`--max-ns`（每条上限，不会超过）和 `--max-replicas`（默认 10）之内。可停的查看最多 `--stop-looks` 次（默认 3）。默认的分配方式仍然是 `rounds`（每轮固定加长），没有改变旧运行的含义。
+The limits are `--budget-ns` (total production time of all replicas, by default the maximum allowed number of replicas × the limit per replica), `--max-ns` (limit per replica, never exceeded) and `--max-replicas` (default 10). There are at most `--stop-looks` looks that can stop (default 3). The default allocation mode is still `rounds` (a fixed extension per round), so the meaning of old runs does not change.
 
-## 目标、权限和停下的原因
+## Goal, permissions and stop reasons
 
-**目标：** 每个运行都在 `run.json` 的 `goal` 里记下用户要什么：
+**Goal:** each run records in `goal` in `run.json` what the user wants:
 
-- **目标量：** 现在支持一种，就是目标区域侧链在 chi1 三种状态的比例。用户的原话也记下来（`--goal`）。
-- **精度：** 任何一个状态比例的误差不能超过这个容差（`--precision`，默认 0.05）。怎么算这个误差由 `--criterion` 决定：
-  - `standard_error`（默认）：直接用标准误差。这是程序一直以来的做法，旧的运行含义不变。
-  - `confidence`：用 1−α 置信区间的半宽，α 平摊到预先知道的判断次数上（Bonferroni）。agent 每轮都看同一批不断增长的数据，看得越多，偶然碰上"看起来已经够精确"的机会越大；平摊 α 就是为这件事付的代价。
-  - `sequence`：用置信序列（Robbins 1970 正态混合），不限判断次数都成立，三者里最宽、最慢。
+- **Target quantity:** one is supported now: the populations of the side chains in the target region in the three chi1 states. The user's own words are also recorded (`--goal`).
+- **Precision:** the error of no state population may exceed this tolerance (`--precision`, default 0.05). `--criterion` decides how this error is computed:
+  - `standard_error` (default): the standard error directly. This is what the program always did, so old runs keep their meaning.
+  - `confidence`: the half-width of the 1−α confidence interval, with α divided over the number of looks known in advance (Bonferroni). The agent looks at the same growing data every round. The more it looks, the more likely it is to see "it looks precise enough" by chance. Dividing α is the price for this.
+  - `sequence`: a confidence sequence (Robbins 1970 normal mixture). It holds for any number of looks. It is the widest and slowest of the three.
 
-  `budget` 命令可以直接量出这三种判据各自的成本和正确率，再决定用哪个。
-- **上限：** 普通 MD 每条最多多少 ns（`--max-ns`）、多少条重复（`--replicas`），增强采样每条最多多少 ns（`--enhanced-ns`）。这些是上限：agent 可以少用，但不会自己超过。
+  The `budget` command can measure the cost and the correctness of each of the three criteria directly, before you choose one.
+- **Limits:** at most how many ns per replica of plain MD (`--max-ns`), how many replicas (`--replicas`), and at most how many ns per replica of enhanced sampling (`--enhanced-ns`). These are limits: the agent can use less, but it does not go past them by itself.
 
-**权限：** agent 不问用户就能做哪些事（`--allow`，逗号分隔，或者 `none`）：
+**Permissions:** what the agent may do without asking the user (`--allow`, comma-separated, or `none`):
 
-| 权限 | 含义 | 现在是否用到 |
+| Permission | Meaning | Used now |
 |---|---|---|
-| `switch_method` | 普通 MD 采样不到时，自己改用增强采样 | 用到 |
-| `stop_early` | 达到目标后，不等预算用完就停下；增强采样里一直推不动时也提前停 | 用到 |
-| `extend` | 没达到目标、但没有卡住时，超出预算继续跑，最多到第一次预算的 2 倍（`--extend-factor`） | 用到 |
-| `add_replicas` | 误差主要来自重复之间的差别时，加独立重复，最多 10 条（`--max-replicas`） | 用到 |
+| `switch_method` | Switch to enhanced sampling by itself when plain MD cannot sample | Yes |
+| `stop_early` | Stop when the target is reached, without waiting for the budget to run out; also stop early when enhanced sampling cannot push an item | Yes |
+| `extend` | When the target is not reached but nothing is stuck, continue past the budget, up to 2 times the first budget (`--extend-factor`) | Yes |
+| `add_replicas` | When the error comes mainly from differences between replicas, add independent replicas, up to 10 (`--max-replicas`) | Yes |
 
-**默认（2026-11-20 起）：** "自己判断"模式只允许 `stop_early`，"按用户指定"模式都不允许。也就是说，agent 会在达到目标或继续跑没有收益时提前停下，但加长、加重复、换方法都只在对话里建议，要用户确认后才做。确认的方式：在对话里说“把 run1 加长到 30 ns”“给 run1 加 2 条重复”“用增强采样继续 run1”“用自适应采样重新跑 run1”，或者用命令 `python -m mdagent resume --run runs/run1 --max-ns 30`（`--replicas 5`、`--enhanced-sampling`）。用户也可以在开始时用 `--allow` 给 agent 更多权限。
+**Defaults (from 2026-11-20):** "agent decides" mode allows only `stop_early`. "User specifies" mode allows nothing. So the agent stops early when the target is reached or when more simulation gives no benefit. But extending, adding replicas and changing the method are only suggested in the chat and happen only after the user confirms. To confirm, say in the chat "Extend run1 to 30 ns", "Add 2 replicas to run1", "Continue run1 with enhanced sampling", "Run run1 again with adaptive sampling", or use the command `python -m mdagent resume --run runs/run1 --max-ns 30` (`--replicas 5`, `--enhanced-sampling`). The user can also give the agent more permissions at the start with `--allow`.
 
-**停下的原因：** 每个阶段停下时，agent 记下一个原因，写进 `run.json`，在对话里告诉用户，日志的 Summary 里也有：
+**Stop reasons:** when each stage stops, the agent records one reason. It writes it to `run.json`, tells the user in the chat, and also puts it in the Summary of the log:
 
-| 原因 | 含义 |
+| Reason | Meaning |
 |---|---|
-| `target_reached` | 达到目标：所有侧链都 `reached`（普通 MD 里是 `ok`）。 |
-| `stalled` | 采样停滞：有侧链在这种方法下不在状态之间来回。普通 MD 里是"一直没翻转，剩下的预算也不够看到足够的翻转"，增强采样里是"偏置势推不动"。 |
-| `not_reachable` | 上限内达不到：有变化，但按目前的速度，要达到目标需要的时间远超过用户定的上限（见下面第 6 条规则）。 |
-| `budget_exhausted` | 预算用完，还没达到目标。 |
-| `failed` | 运行出错。错误写进 `run.json` 和对话；修好后可以继续。 |
+| `target_reached` | Target reached: all side chains are `reached` (`ok` in plain MD). |
+| `stalled` | Stalled: some side chain does not move between states with this method. In plain MD this means "no flip so far, and the remaining budget is not enough to see enough flips". In enhanced sampling it means "the bias potential cannot push it". |
+| `not_reachable` | Not reachable within the limits: there are changes, but at the current rate the time needed to reach the target is far above the user's limits (see rule 6 below). |
+| `budget_exhausted` | The budget is used up and the target is not reached. |
+| `failed` | The run had an error. The error goes to `run.json` and the chat. After a fix, the run can continue. |
 
-"比例不再变化"不算停下的原因：所有重复都困在同一个状态时，比例也不会变。
+"The populations no longer change" is not a stop reason: when all replicas are trapped in the same state, the populations do not change either.
 
-## 每轮之后选下一步（第 4 步）
+## Choosing the next action after each round (step 4)
 
-每轮分析后，agent 按下面的顺序选一个动作（`policy.py`）。没有权限的动作不执行，改成对话里的一条建议。每个选择都记在 `run.json`（`notes.actions`）和 `decisions.log` 里，写明是否执行、为什么。
+After the analysis of each round, the agent chooses one action in the order below (`policy.py`). An action without permission is not done. It becomes a suggestion in the chat instead. Each choice is recorded in `run.json` (`notes.actions`) and `decisions.log`, with whether it was done and why.
 
-普通 MD：
+Plain MD:
 
-1. **都达标：** 停下。没有 `stop_early` 权限时，按计划跑到预算用完。
-2. **有项目一直不变化：** 这个量有增强采样（侧链构象）并且有 `switch_method` 权限时，改用增强采样。没有这个权限但有 `stop_early` 时，这个项目不再用普通 MD 跑（其他项目还需要时照常继续），结束时建议换方法；两个权限都没有时（按用户指定），继续按计划跑到上限。
-3. **有变化但不够精确，误差主要来自重复之间：** 有 `add_replicas` 权限时加 2 条独立重复（最多 10 条），新重复先补跑到和其他重复一样长。文献认为这时多加重复比加长更有效（Knapp 2018；Grossfield 2018）。
-4. **有变化但不够精确，预算用完：** 有 `extend` 权限时超出预算继续，每次一轮，最多到第一次预算的 2 倍；否则停下，原因记为"预算用完"。卡住的项目不算在内：多跑同样的方法帮不了它。
-5. **各重复停在不同状态、从不变化：** 建议从这些状态的帧重新起跑（自适应采样）。只建议，不自动做：从挑出的帧起跑的轨迹，不能直接给出平衡时的比例。
-6. **上限内达不到：** 跑完至少两轮、并且用了上限的四分之一以后，agent 按目前看到的情况估计每个没达标的项目还需要多久：状态变化按各重复的平均速度来（偏乐观），误差按时间的平方根下降。如果所有没达标的项目，连这个乐观的估计都超过上限的 1.5 倍，再跑下去也达不到，就提前停下，原因记为 `not_reachable`，并在对话里说需要多长、建议提高上限或换方法。没有 `stop_early` 权限时只发消息，继续跑到上限。
+1. **All pass:** stop. Without the `stop_early` permission, run as planned until the budget is used up.
+2. **Some item never changes:** if this quantity has enhanced sampling (side-chain conformation) and the `switch_method` permission is given, switch to enhanced sampling. Without this permission but with `stop_early`, this item no longer runs with plain MD (the other items continue as usual if they still need it), and at the end the agent suggests a different method. With neither permission (user specifies), continue as planned to the limit.
+3. **Changes but not precise enough, and the error comes mainly from differences between replicas:** with the `add_replicas` permission, add 2 independent replicas (at most 10). The new replicas first catch up to the length of the others. The literature says that more replicas help more than longer runs in this case (Knapp 2018; Grossfield 2018).
+4. **Changes but not precise enough, and the budget is used up:** with the `extend` permission, continue past the budget, one round at a time, up to 2 times the first budget. Otherwise stop with the reason "budget exhausted". Stuck items do not count here: more of the same method does not help them.
+5. **The replicas stay in different states and never change:** suggest restarting from frames of these states (adaptive sampling). This is only a suggestion and is not done automatically: replicas that start from chosen frames cannot give equilibrium populations directly.
+6. **Not reachable within the limits:** after at least two rounds and after a quarter of the limit is used, the agent estimates from what it saw how long each item that has not passed still needs. State changes follow the mean rate of the replicas (optimistic), and the error falls with the square root of time. If, for all items that have not passed, even this optimistic estimate is above 1.5 times the limit, more simulation cannot reach the target. Then the agent stops early with the reason `not_reachable`, and says in the chat how long it would need and suggests a higher limit or a different method. Without the `stop_early` permission it only sends the message and runs to the limit.
 
-结束时的建议按原因分开：在状态之间有来回、只是太慢或各重复不一致的项目，建议自适应采样；一次都没变化的侧链，建议增强采样（自适应采样只能从已经见过的状态出发，帮不上忙）。
+The final suggestions depend on the reason. For items that move between states but too slowly, or whose replicas disagree, the agent suggests adaptive sampling. For side chains that never changed, it suggests enhanced sampling (adaptive sampling can only start from states already seen, so it cannot help).
 
-增强采样：达标就停（有 `stop_early` 时）；所有没达标的侧链连续 3 轮都推不动就提前停；误差主要来自重复之间时加一条增强采样重复；预算用完、没卡住时，有 `extend` 权限就加长一半，最多到第一次的 2 倍。
+Enhanced sampling: stop when the target is reached (with `stop_early`). Stop early when all side chains that have not passed cannot be pushed for 3 rounds in a row. Add one enhanced sampling replica when the error comes mainly from differences between replicas. When the budget is used up and nothing is stuck, extend by half with the `extend` permission, up to 2 times the first budget.
 
-## 交付：结果报告（第 6 步）
+## Delivery: the result report (step 6)
 
-每个运行结束时（`run` 或 `resume` 跑完），agent 在运行文件夹里写 `report.zh.md` 和 `report.en.md`，并在对话里说明报告在哪里。报告的内容全部来自运行的文件，不由语言模型编写：
+When each run ends (`run` or `resume` finishes), the agent writes `report.zh.md` and `report.en.md` in the run folder and says in the chat where the reports are. All content of the reports comes from the run files. The language model does not write it:
 
-- **问题：** 目标量、用户的原话、要求的精度、agent 可以自己做的事。
-- **模拟了什么：** 输入、力场、离子、水盒子、温度、重复数和长度；用 PDB 输入时说明配体被去掉了。
-- **结论：** 每个项目各状态的比例 ± 标准误差、来自普通 MD 还是增强采样（重新加权）、是否达到要求。达到要求的可以作为这个力场和条件下的平衡比例引用；没达到的只能作参考。
-- **为什么停下：** 每个阶段停下的原因，以及 agent 采取或建议过的每个动作。
-- **可信度和限制：** 包括"从来没有改变状态的项目，误差显示为 0 表示被困住，不表示精确"。
-- **文件和还剩的问题。**
+- **Question:** the target quantity, the user's own words, the required precision, and what the agent may do by itself.
+- **What was simulated:** input, force field, ions, water box, temperature, number of replicas and length. With PDB input, the report says that the ligand was removed.
+- **Conclusions:** for each item, the population of each state ± standard error, whether it comes from plain MD or from enhanced sampling (reweighted), and whether it meets the requirement. Results that meet the requirement can be cited as equilibrium populations for this force field and these conditions. Results that do not are only for reference.
+- **Why it stopped:** the stop reason of each stage, and each action the agent took or suggested.
+- **Reliability and limitations:** including "for an item that never changed state, an error of 0 means it was trapped, not that it is precise".
+- **Files and open questions.**
 
-报告里也写明这次用了多少计算量：所有重复相加的生产时间、平衡时间、合计，以及实际用了多少小时。
+The report also says how much compute was used: the total production time of all replicas, the equilibration time, the sum, and the real hours used.
 
-`python -m mdagent report --run runs/<名字>` 可以重新生成报告。
+`python -m mdagent report --run runs/<name>` writes the report again.
 
-**两个运行给的是不是同一个答案：**
+**Do two runs give the same answer:**
 
 ```bash
-python -m mdagent compare --run runs/<名字> --reference runs/<参考>
+python -m mdagent compare --run runs/<name> --reference runs/<reference>
 ```
 
-判断用的是**等效性检验**：每个项目每个状态，差别加上差别的置信区间半宽，都要落在容差以内（`|差别| + z·合起来的误差 ≤ 容差`，容差默认取被比较那个运行要求的精度，可以用 `--tolerance` 改）。
+The judgement uses an **equivalence test (TOST)**: for each state of each item, the difference plus the half-width of its confidence interval must be within the tolerance (`|difference| + z·combined error ≤ tolerance`; the tolerance defaults to the precision required by the compared run, and you can change it with `--tolerance`).
 
-以前用的是 `|z| ≤ 2`，那是"没证明有差别"，不是"证明了没差别"：数据越少、误差越大，`|z|` 越容易小于 2，于是一个跑得太短的运行会**正因为不精确而显得正确**。短跑要证明的恰恰是相反的事，所以换成了等效性检验。z 仍然打印出来，因为它说明差别偏向哪一边。
+Before, the test was `|z| ≤ 2`. That means "a difference was not proved", not "the absence of a difference was proved". With less data and larger errors, `|z|` is more easily below 2. So a run that is too short **looks correct exactly because it is imprecise**. A short run must prove the opposite, so the test changed to an equivalence test. z is still printed, because it shows in which direction the difference goes.
 
-## 用多少计算量：策略对照（`budget`）
+## How much compute: comparing strategies (`budget`)
 
-这是项目的核心问题所在。要说"更省"，就得和别的分配方式比，而把每种策略都真跑一遍 MD，等于把一次计算全部重做好几次。所以程序改成**回放**：
+This is the core question of the project. To claim "cheaper", you must compare against other ways to allocate compute. Running real MD for each strategy repeats the whole computation several times. So the program uses **replay** instead:
 
-先跑一次高预算的**数据池**（pool）——很多条独立重复，每条都比任何策略需要的长。然后每种策略在这池子上重放一遍：每个判断点上，它只看到自己那几条重复、跑到自己当前长度的那些帧，据此决定加长、再开一条重复还是停下，并且只为自己用掉的部分付费（`cost.py`）。池子是普通的无偏 MD，所以对"只加长、只加独立重复"的策略，回放是精确的；"从挑出的帧重新起跑"（自适应采样）无法回放，那些帧不在池子里，必须真算。
+First, run one high-budget **data pool** (pool): many independent replicas, each longer than any strategy needs. Then each strategy replays on this pool. At each decision point, it sees only its own replicas, and only the frames up to its current length. From these it decides to extend, start one more replica, or stop. It pays only for the part it uses (`cost.py`). The pool is ordinary unbiased MD. So for strategies that only extend and only add independent replicas, the replay is exact. "Restart from selected frames" (adaptive sampling) cannot be replayed: those frames are not in the pool, so they must be really computed.
 
-对照的四种策略：
+The four strategies in the comparison:
 
-| 策略 | 决策规则 |
+| Strategy | Decision rule |
 |---|---|
-| `fixed` | 事先定好的方案：固定条数、固定长度，中途不看数据（基线；用 `--fixed-replicas`、`--fixed-ns` 设成你本来真会写的方案） |
-| `early_stop` | 同样固定条数，但一达到精度就停 |
-| `add_replicas` | 还决定时间花在哪里：误差主要来自重复之间时再开一条，否则加长 |
-| `mdagent` | 本程序的策略（`policy.py`）：提前停；只在重复明显不一致且预算用了不到一半时加重复；项目还在动但预算用完时超出预算继续；项目一次都不变化时提前停，因为普通 MD 再跑多久也答不出来 |
+| `fixed` | A plan set in advance: fixed number of replicas, fixed length, no look at the data during the run (baseline; use `--fixed-replicas`, `--fixed-ns` to set the plan you would really write) |
+| `early_stop` | The same fixed number of replicas, but it stops as soon as it reaches the precision |
+| `add_replicas` | Also decides where to spend time: it starts one more replica when the error comes mainly from differences between replicas, and otherwise extends |
+| `mdagent` | This program's strategy (`policy.py`): stop early; add replicas only when replicas clearly disagree and less than half the budget is used; continue past the budget when an item still changes but the budget is used up; stop early when an item never changes, because plain MD cannot answer it however long it runs |
 
-每种策略的答案最后和一个**独立的参考**比：它没用到的那些池子重复，跑满全长（用已知比例的模型时，直接和真值比）。和整个池子比等于和自己比，因为策略自己的帧也在里面。
+At the end, each strategy's answer is compared with an **independent reference**: the pool replicas that the strategy did not use, at full length (with a model of known populations, the comparison is with the true value). A comparison with the whole pool is a comparison with itself, because the strategy's own frames are in it.
 
-重复的重复数由 `--repeats` 控制：每次换一组重复。一次跑赢说明不了什么，要看的是达到正确答案的比例和各自的成本。
+`--repeats` sets the number of repeats. Each repeat uses a different set of replicas. One win proves nothing. What matters is the fraction of repeats that reach the correct answer, and the cost of each.
 
 ```bash
-# 不需要 GPU：已知比例的两状态模型，10 次重复
+# No GPU needed: two-state model with known populations, 10 repeats
 python -m mdagent budget --synthetic 0.3,0.7 --rate-per-ns 5 --pool-replicas 16 --pool-ns 60 \
     --repeats 10 --fixed-replicas 5 --fixed-ns 40 --parallel 4 --ns-per-day 600
 
-# 用一个跑完的长运行作为数据池
+# Use a finished long run as the data pool
 python -m mdagent budget --run runs/long_1UBQ --repeats 10 --criterion confidence
 ```
 
-结果写进 `budget.json` 和 `budget.md`，表格每行一个策略：
+The results go into `budget.json` and `budget.md`, with one strategy per table row:
 
 ```
 strategy        compute ns  aggregate    wall  replicas  ns each  precise  accurate  proven  worst err   saved
@@ -466,263 +466,263 @@ add_replicas          66.0       60.0    19.8      10.0      6.0    100%      10
 mdagent               51.9       48.0    16.2       3.0      9.0    100%       90%      0%      0.057     74%
 ```
 
-- **compute ns** 是主要成本：所有重复的生产时间，加上每条重复各自的平衡时间。所以"10 条各 10 ns"比"1 条 100 ns"贵，尽管两者加起来都是 100 ns。
-- **wall** 是等待时间，按 `--parallel`（同时能跑几条）折算。GPU 够多时，多开重复反而等得更短，成本却不变——所以这三个数要分开报，不能当成一个指标一起压。
-- **precise** 是策略自己判断"数据够了"；**accurate** 是它的答案真的落在容差以内。只有 accurate 才说明"更省但同样正确"；便宜却不 accurate，就是停得太早。
-- **proven** 是更严格的等效性检验，还要求策略自己的误差足够小才算证明。
-- 上面这组数字来自那个已知比例的模型，不是真实蛋白的结果。
+- **compute ns** is the main cost: the production time of all replicas, plus the equilibration time of each replica. So "10 replicas of 10 ns each" costs more than "1 replica of 100 ns", although both add up to 100 ns.
+- **wall** is the waiting time, scaled by `--parallel` (how many replicas can run at the same time). With enough GPUs, more replicas give a shorter wait at the same cost. So these three numbers are reported separately and are not reduced together as one metric.
+- **precise** means the strategy itself judges that "the data are enough". **accurate** means its answer is really within the tolerance. Only accurate shows "cheaper but equally correct". Cheap but not accurate means it stopped too early.
+- **proven** is the stricter equivalence test (TOST). It also requires the strategy's own error to be small enough to count as proof.
+- The numbers above come from the model with known populations. They are not results for a real protein.
 
-这个模型上已经看到的两件事（上面那张表就是这次的结果，容差 0.05，10 次重复）：
+Two findings on this model so far (the table above is this result, tolerance 0.05, 10 repeats):
 
-1. **提前停确实省，但会停早。** `early_stop` 省下 83% 的计算量，10 次里有 2 次答案超出容差（最大偏差 0.097）。`mdagent` 省下 74%，10 次里 9 次在容差内（最大偏差 0.057），和固定方案一样——它多花的那一点时间买到的就是这个。
-2. **换成更严的判据不一定更准，先得有足够的预算。** 把判据换成 `confidence` 后，各策略都会跑得更久（`early_stop` 从 35 ns 到 62 ns，`mdagent` 从 52 ns 到 122 ns），但在每条 20 ns 的预算下它们根本达不到这个判据，只是以"预算用完"停下，答案并没有变好。更严的判据要配更大的预算才有意义，值不值得必须按体系量过才知道。
+1. **Early stopping does save compute, but it can stop too early.** `early_stop` saves 83% of the compute, but in 2 of 10 repeats the answer is outside the tolerance (maximum deviation 0.097). `mdagent` saves 74% and is within the tolerance in 9 of 10 repeats (maximum deviation 0.057), the same as the fixed plan. The small extra time it spends buys exactly this.
+2. **A stricter criterion is not always more accurate. It first needs enough budget.** With the criterion `confidence`, all strategies run longer (`early_stop` from 35 ns to 62 ns, `mdagent` from 52 ns to 122 ns). But with a budget of 20 ns per replica they cannot reach this criterion. They only stop with "budget exhausted", and the answer does not improve. A stricter criterion is only useful with a larger budget. Whether it is worth it must be measured for each system.
 
-还要注意：同一个数据池的 10 次重复不是 10 次独立实验（换的只是取哪几条重复），所以"10 次里 2 次"说明的是结果对"碰上哪几条重复"有多敏感，不能代替把整个实验重做 10 遍。
+Also note: the 10 repeats on the same data pool are not 10 independent experiments (only the choice of replicas changes). So "2 of 10" shows how sensitive the result is to which replicas it gets. It does not replace running the whole experiment 10 times.
 
-## 实验 A：普通 MD 该跑几条、跑多久、何时停（1UBQ）
+## Experiment A: how many replicas, how long, when to stop (1UBQ)
 
-**问题：** 给定一个 MD 任务和事先定好的精度要求，agent 能不能自己决定跑几条重复、每条跑多久、什么时候停，用最少的计算量得到统计上可靠的结果？这是一个"达到精度要花多少计算量"的基准测试，不是简单的收敛检测。
+**Question:** Given an MD task and a precision requirement set in advance, can the agent decide by itself how many replicas to run, how long each runs and when to stop, and get a statistically reliable result with the least compute? This is a benchmark of "how much compute it takes to reach the precision". It is not simple convergence detection.
 
-**假设 A：** 考虑不确定度的 agent 能动态分配重复和时长并决定何时停止，用比固定方案和常规序贯停止更少的总计算量，达到事先规定的准确度和可靠性。
+**Hypothesis A:** An uncertainty-aware agent can allocate replicas and lengths dynamically and decide when to stop. It reaches the accuracy and reliability set in advance with less total compute than fixed plans and conventional sequential stopping.
 
-### 在线停止和离线检验分开
+### Online stopping and offline checking are separate
 
-这是整个实验最关键的一条。**在线停止判据**只用方法自己跑出来的轨迹：比例、考虑时间相关的误差、校准过的区间、翻转次数。它永远看不到参考答案。**离线成功判据**在实验结束后才用：拿结果和一个独立的内部参考比，检查方法有没有停得太早。如果在线判断偷看了参考，agent 就能靠"靠近正确答案"来提前停，这是参考泄漏。
+This is the most important rule of the experiment. The **online stopping criterion** uses only the trajectories that the method itself runs: populations, errors that take time correlation into account, calibrated intervals, transition counts. It never sees the reference answer. The **offline success criterion** is used only after the experiment ends: it compares the result with an independent internal reference and checks whether the method stopped too early. If the online decision looked at the reference, the agent could stop early because it is "close to the correct answer". This is reference leakage.
 
-参考不用文献里的数值，而用同一个力场、水模型、温度和流程跑出的数据池：留出 6 条重复跑满全长，任何方法都不用它们。文献数值来自不同的力场和条件，会把力场误差错当成采样误差。
+The reference does not use literature values. It uses a data pool run with the same force field, water model, temperature and workflow: 6 replicas are held out and run at full length, and no method uses them. Literature values come from different force fields and conditions. They would mistake force-field error for sampling error.
 
-### 测什么
+### What is measured
 
-测的是主链构象区，每个量单独判断。一个方法可以只凭比例停下，但必须对其他量逐一说明"已收敛"或"未收敛"，说错的会被单独计数。
+The quantity is the backbone basins. Each quantity is judged separately. A method can stop on populations alone, but it must state "converged" or "not converged" for each other quantity. Each wrong statement is counted separately.
 
-| 量 | 在线：方法自己判断够了 | 离线：真的准确 |
+| Quantity | Online: the method itself judges it is enough | Offline: really accurate |
 |---|---|---|
-| 各构象区的比例（主要） | 95% 区间半宽 ≤ 0.05，且每条重复至少翻转 4 次 | max \|p − p*\| ≤ 0.05 |
-| 两个主要构象区之间的自由能差 | 区间半宽 ≤ 0.5 kT | 误差 ≤ 0.5 kT |
-| 两个方向的翻转速率 | 相对误差的区间 ≤ 20% | 相对误差 ≤ 20% |
-| 角度分布图谱 | 两半数据的 JS 散度 ≤ 0.05 bit | 在参考有足够数据的格子上，JS 散度 ≤ 0.05 bit |
+| Population of each basin (main) | 95% interval half-width ≤ 0.05, and each replica has at least 4 transitions | max \|p − p*\| ≤ 0.05 |
+| Free-energy difference between the two main basins | Interval half-width ≤ 0.5 kT | Error ≤ 0.5 kT |
+| Transition rates in both directions | Interval of the relative error ≤ 20% | Relative error ≤ 20% |
+| Angle distribution map | JS divergence between the two halves of the data ≤ 0.05 bit | JS divergence ≤ 0.05 bit on the grid cells where the reference has enough data |
 
-这些阈值是我选的候选值，不是文献标准。翻转次数只作诊断，不作准确度指标，因为它随模拟时间增长。
+These thresholds are candidate values that I chose. They are not literature standards. The transition count is only a diagnostic, not an accuracy metric, because it grows with simulation time.
 
-一帧要进入某个构象区的核心才算到达（rama 默认：离分区边界至少 10°；β 转角和 `--rama-basins centres`：离中心 50° 以内）；在两个核心之间的帧保留上一个构象区。这样来回越过边界不会被算成翻转，速率才有意义。
+A frame counts as arriving in a basin only when it enters the basin's core (rama default: at least 10° from the partition boundary; β-turn and `--rama-basins centres`: within 50° of the centre). Frames between two cores keep the previous basin. So crossing a boundary back and forth does not count as a transition, and the rates have a meaning.
 
-### 两个难度
+### Two difficulty levels
 
-- **A-Easy：** 快速的局部 φ/ψ 构象变化。残基由一个独立的预实验挑选：每条预实验轨迹里构象区都变化至少 4 次的残基才入选，最多 5 个，取其中最慢的。不能用数据池自己的结果来挑。
-- **A-Hard：** 50 环 D52/G53 的 β-I/β-II 转角（ψ(D52)、φ(G53)）。文献里这个翻转在无偏 MD 中约 8 µs 来回 7 次，NMR 测到的时间尺度约 13–15 µs，β-II 只占约 4%（Arasteh 2021，[doi:10.1021/acs.jpclett.1c00778](https://doi.org/10.1021/acs.jpclett.1c00778)；Smith 2016，[doi:10.1073/pnas.1519609113](https://doi.org/10.1073/pnas.1519609113)；Mukhopadhyay 2025，[doi:10.1007/s10858-025-00470-1](https://doi.org/10.1007/s10858-025-00470-1)）。16 × 100 ns 的数据池最多看到一两次翻转，连参考都建不起来。所以 A-Hard 不检验准确度，只检验一件事：方法会不会诚实地说"证据不足"（INSUFFICIENT_EVIDENCE），而不是错误地宣布收敛。要真正检验准确度，需要几十 µs 的参考，按你的 GPU 速度要几个月。
+- **A-Easy:** fast local φ/ψ conformational changes. A separate pilot run selects the residues: a residue qualifies only if its basin changes at least 4 times in every pilot trajectory. At most 5 are taken, the slowest of them. The data pool's own results must not be used for the selection.
+- **A-Hard:** the β-I/β-II turn of D52/G53 in the 50s loop (ψ(D52), φ(G53)). In the literature, this flip happens about 7 times back and forth in about 8 µs of unbiased MD. NMR measures a time scale of about 13–15 µs, and β-II is only about 4% (Arasteh 2021, [doi:10.1021/acs.jpclett.1c00778](https://doi.org/10.1021/acs.jpclett.1c00778); Smith 2016, [doi:10.1073/pnas.1519609113](https://doi.org/10.1073/pnas.1519609113); Mukhopadhyay 2025, [doi:10.1007/s10858-025-00470-1](https://doi.org/10.1007/s10858-025-00470-1)). A 16 × 100 ns data pool sees one or two flips at most and cannot even build a reference. So A-Hard does not test accuracy. It tests only one thing: whether a method honestly says "insufficient evidence" (INSUFFICIENT_EVIDENCE) instead of wrongly declaring convergence. A real accuracy test needs a reference of tens of µs, which takes months at your GPU speed.
 
-### 五种方法
+### Five methods
 
-| 方法 | 重复数 | 长度 | 怎样决定 |
+| Method | Replicas | Length | How it decides |
 |---|---|---|---|
-| 固定方案（Fixed-Long 1 条，Fixed-Parallel 3、4、5、8 条） | 固定 | 固定，从 5 ns 到 100 ns 逐一扫描 | 不做在线决策 |
-| Sequential-CI | 4 或 8，固定 | 每 5 ns 看一次，到达精度就停 | 常规的序贯停止规则，区间按所有查看次数校准 |
-| 预实验后定固定方案（pilot_fixed） | 从 3 条开始 | 预实验 5 ns 后按投影定一次，跑完只判断一次 | 一个细心的使用者不用 agent 时的做法。它用 agent 自己的投影，但只看一次。它把“投影”的价值和“多次查看”的价值分开 |
-| Agent | 从 3 条开始（和对话里的方案一致），最多 8 条 | 按投影跳到需要的长度 | 第一次查看只用来规划、不允许停；之后最多再看 3 次，区间按 3 次校准。每次在"加长"和"加重复"之间选成本最低的组合：只有重复之间的差别在统计上显著时才加重复，因为每条新重复都要重新平衡。投影出的成本超过预算 3 倍时，提前说"证据不足" |
+| Fixed plan (Fixed-Long 1 replica, Fixed-Parallel 3, 4, 5, 8 replicas) | Fixed | Fixed, scanned from 5 ns to 100 ns | No online decisions |
+| Sequential-CI | 4 or 8, fixed | One look every 5 ns, stops when it reaches the precision | Conventional sequential stopping rule, intervals calibrated for all looks |
+| Fixed plan after a pilot (pilot_fixed) | Starts with 3 | After a 5 ns pilot, the plan is set once by projection; after the run, one judgement only | What a careful user does without the agent. It uses the agent's own projection, but looks only once. It separates the value of "projection" from the value of "many looks" |
+| Agent | Starts with 3 (the same as the plan in the chat), at most 8 | Jumps by projection to the length it needs | The first look is only for planning and cannot stop. After that, at most 3 more looks, with intervals calibrated for 3. Each time it chooses the cheapest mix of "extend" and "add replicas": it adds replicas only when the difference between replicas is statistically significant, because each new replica needs a new equilibration. When the projected cost is more than 3 times the budget, it says "insufficient evidence" early |
 
-所有方法都是无偏 MD。新重复一律从同一个准备好的结构、用新的随机种子起跑，不从挑出的帧重新起跑，否则就成了自适应采样（实验 B）。所有方法用同一个估计：每条重复先自动丢弃开头没有平衡的部分（Chodera 2016 的方法，只用这条重复自己的数据；丢掉的部分照样算成本）；重复之间的差别经卡方检验确实存在时，区间用自由度 n−1 的 t 分布。
+All methods are unbiased MD. Each new replica starts from the same prepared structure with a new random seed. No replica restarts from selected frames, because that would be adaptive sampling (experiment B). All methods use the same estimate: each replica first discards the unequilibrated start automatically (burn-in by the method of Chodera 2016, using only that replica's own data; the discarded part still counts as cost). When a chi-square test shows that the difference between replicas is real, the interval uses the t distribution with n−1 degrees of freedom.
 
-**被检验的就是用户真正用到的 agent。** 回放里的 Agent 调用的是 `allocation.next_step`，和日常运行（`--allocation projection`）是同一份代码。实验 A 不是为 agent 单独写的一套规则。
+**The agent under test is the agent that users really use.** The Agent in the replay calls `allocation.next_step`, the same code as daily runs (`--allocation projection`). Experiment A is not a separate set of rules written for the agent.
 
-**Sequential-CI 是最重要的对照。** 如果 agent 不比它省，agent 就只是常规的序贯停止，没有额外价值。
+**Sequential-CI is the most important control.** If the agent does not save compute compared with it, the agent is only conventional sequential stopping and adds no value.
 
-### 报告什么
+### What is reported
 
-**独立单位。** 从同一个数据池里换着取重复做的多次试验，大部分轨迹是共用的，不是独立的实验。所以报告先写明“独立单位”有几个，所有跨试验的区间都按这个数算。三种方式：合成模型上每次试验生成一个新数据池，参考就是真值（完全独立）；`--disjoint` 让每次试验用互不重叠的一组重复（独立，但次数少）；默认共用一个数据池，报告会说明只相当于约 1 个独立单位。
+**Independent units.** Repeated trials that take different replicas from the same data pool share most trajectories. They are not independent experiments. So the report first states how many "independent units" there are, and all intervals across trials use this number. There are three ways: on synthetic models, each trial generates a new data pool and the reference is the true value (fully independent); `--disjoint` gives each trial a non-overlapping set of replicas (independent, but fewer trials); the default shares one data pool, and the report states that this is only about 1 independent unit.
 
-**校准的对象是每个量。** 区间是按每个项目、每个构象区校准的。最重要的指标是“停下时的覆盖率”：方法停下的那一刻，它报告的区间有没有包住参考。按项目单独报告（`per_item`）。“所有项目同时都对”另外报告，但区间不是为它校准的。
+**Calibration is per quantity.** Intervals are calibrated for each item and each basin. The most important metric is "coverage at stop": at the moment a method stops, does its reported interval contain the reference? It is reported per item (`per_item`). "All items correct at the same time" is reported separately, but the intervals are not calibrated for it.
 
-每个方法在每次试验里的：成功率（宣布收敛且准确）、过早停止率（宣布收敛但不准确）、诚实的"证据不足"次数、区间覆盖率、停止时的成本 C_stop、沿它自己的路径第一次变准确并一直保持的成本 C_hit、GPU 小时和等待时间。还有一张成本–准确度曲线（`experiment_A_*_cost_accuracy.svg`，数据在同名 `.csv`）。
+For each method in each trial: success rate (declares convergence and is accurate), premature stop rate (declares convergence but is not accurate), number of honest "insufficient evidence" results, interval coverage, cost at stop C_stop, cost C_hit at which it first becomes accurate along its own path and stays accurate, GPU hours and waiting time. There is also a cost–accuracy curve (`experiment_A_*_cost_accuracy.svg`, data in the `.csv` of the same name).
 
-**判定（事先写定）：** 假设 A 成立需要三条同时满足。
-1. agent 可靠：成功率 ≥ 90%，过早停止率 ≤ 10%。
-2. agent 比每个 Sequential-CI 和“预实验后定固定方案”都好：对方可靠时，同一组重复上配对比较的节省量 95% 区间在 0 以上；对方不可靠时，agent 必须可靠。
-3. agent 比每一族固定方案在同样可靠性下更省。固定方案的成本是它自己要达到 90% 准确所需的最短长度。
+**Verdict (written in advance):** Hypothesis A holds only if all three conditions are met.
+1. The agent is reliable: success rate ≥ 90%, premature stop rate ≤ 10%.
+2. The agent is better than every Sequential-CI and than the "fixed plan after a pilot": when the other method is reliable, the 95% interval of the paired saving on the same replicas is above 0; when the other method is not reliable, the agent must be reliable.
+3. The agent costs less than every family of fixed plans at the same reliability. The cost of a fixed plan is the shortest length it needs to be 90% accurate.
 
-参考本身不够精确时，准确度一律“无法判定”。这时改判**诚实性**（A-Hard 的判定，用户 2026-11-23 定下）：一次试验同时满足三条才算诚实：(1) 输出“证据不足”，而不是宣布收敛；(2) 理由来自数据（项目变化太少，或者按投影要远超预算；日常运行里这类理由会同时建议换方法或提高上限）；(3) 放弃前用掉的计算量不超过预算的一半（`Design.honest_share`）。诚实的试验占比达到可靠性目标（默认 90%）才算通过。报告里有单独的“A-Hard: honesty”一节，每个方法一行。Sequential-CI 这类常规规则只会在预算用完时说证据不足，所以第 (2) 条通不过，这是预期的：它们不解释原因。
+When the reference itself is not precise enough, accuracy is always "undecidable". In that case the verdict is on **honesty** instead (the A-Hard verdict, set by the user on 2026-11-23). A trial counts as honest only if it meets all three conditions: (1) it outputs "insufficient evidence" and does not declare convergence; (2) the reason comes from the data (the item changes too rarely, or the projection is far over the budget; in daily runs, such a reason also comes with a suggestion to change the method or raise the limits); (3) the compute used before giving up is not more than half the budget (`Design.honest_share`). The method passes only if the fraction of honest trials reaches the reliability target (default 90%). The report has a separate section "A-Hard: honesty", with one row per method. Conventional rules such as Sequential-CI say insufficient evidence only when the budget is used up. So they fail condition (2). This is expected: they do not explain the reason.
 
-**要知道的一点：** 第 3 条的固定方案成本，是看完所有试验后才读得出的，事先没人能选中那个长度。在线方法要靠校准过的区间保证可靠，所以原理上要多付约（自己的区间系数 ÷ 固定方案的）² 倍。报告会写明这一点，并另外列出实验者事先会写下的方案（例如 1 × 100 ns，Huang 和 MacKerell 2013 年就是这样验证 CHARMM36 下泛素侧链的，[doi:10.1002/jcc.23354](https://doi.org/10.1002/jcc.23354)）作参考对照。
+**One thing to know:** the fixed-plan cost in condition 3 can be read only after all trials are done. Nobody can choose that length in advance. An online method needs calibrated intervals to be reliable. So in principle it pays about (its own interval factor ÷ that of the fixed plan)² times more. The report states this. It also lists, as a reference control, the plan an experimenter would write in advance (for example 1 × 100 ns; Huang and MacKerell 2013 validated ubiquitin side chains under CHARMM36 in this way, [doi:10.1002/jcc.23354](https://doi.org/10.1002/jcc.23354)).
 
-### 在模型上的干跑（不是 1UBQ 的结果）
+### Dry runs on models (not 1UBQ results)
 
-下面这一段是审稿修改之前的旧设计（4 条起步、不丢弃开头、共用一个数据池，所以“100%”只相当于约 1 个独立单位）。新设计的结果见下一节。
+This section describes the old design from before the review revisions (start with 4 replicas, no burn-in, one shared data pool, so "100%" is only about 1 independent unit). For the results of the new design, see the next section.
 
-先在已知答案的模型上把规则定下来，然后冻结，之后不再用 1UBQ 的数据调。翻转快的两状态模型（70%/30%）上：agent 100% 成功，没有一次过早停止，区间全部覆盖。它比两种 Sequential-CI 都省约 32%，比 4 × 100 ns 省 64%。但它比事后读出的最短可靠方案（4 × 15 ns）贵，所以按第 3 条判为不成立。模仿 A-Hard 的模型（β-II 4%，约 10 µs 翻转一次）上：参考本身全困在 β-I，判定为"无法判定"；三种自适应方法都没有错误地宣布收敛，agent 用 322 ns 放弃，Sequential-CI 用 402 ns 和 805 ns。
+The rules were first set on models with known answers, then frozen. They are not tuned on 1UBQ data afterwards. On a two-state model with fast transitions (70%/30%): the agent succeeded 100% of the time, never stopped too early, and all intervals covered the true value. It saved about 32% compared with both Sequential-CI variants, and 64% compared with 4 × 100 ns. But it cost more than the shortest reliable plan read afterwards (4 × 15 ns), so condition 3 gives the verdict "does not hold". On a model that imitates A-Hard (β-II 4%, about one flip per 10 µs): the reference itself was fully trapped in β-I, so the verdict was "undecidable". None of the three adaptive methods wrongly declared convergence. The agent gave up after 322 ns, Sequential-CI after 402 ns and 805 ns.
 
-不需要 GPU 也可以自己跑这个干跑：
+You can run this dry run yourself without a GPU:
 
 ```bash
 python -m mdagent experiment-a --model "0.7,0.3@8" --trials 20
 ```
 
-### 审稿后的修改（2026-11-23）：更难的合成模型和敏感性分析
+### Revisions after review (2026-11-23): harder synthetic models and sensitivity analysis
 
-为了让测试有可能失败，加了四类已知真值的合成模型（`--family`），每次试验都生成新数据池：`equilibrium`（从平衡态开始，最容易）、`biased_start`（所有重复从一个约 10 ns 才弛豫掉的“晶体”子态开始）、`two_timescale`（两组隐藏状态约每 2 ns 交换一次）、`hidden_slow_start`（约每 10 ns 交换一次，而且所有重复从同一侧开始；前几 ns 看起来已经收敛在 0.8，真值是 0.55）。
+To make it possible for the test to fail, four families of synthetic models with known true values were added (`--family`). Each trial generates a new data pool: `equilibrium` (starts at equilibrium, the easiest), `biased_start` (all replicas start from a "crystal" substate that takes about 10 ns to relax), `two_timescale` (two groups of hidden states exchange about every 2 ns), `hidden_slow_start` (exchange about every 10 ns, and all replicas start on the same side; the first few ns look converged at 0.8, but the true value is 0.55).
 
 ```bash
 python -m mdagent experiment-a --family hidden_slow_start --trials 30
 python -m mdagent experiment-a --sensitivity equilibrium,biased_start,two_timescale,hidden_slow_start --trials 20
 ```
 
-第二条一次只改一个常数（余量、最后一次查看前的余量、放弃倍数、查看次数、起始重复数、最少翻转次数），看结论变不变。结果写在 `runs/experiment_A_model/`。
+The second command changes one constant at a time (margin, margin before the last look, give-up factor, number of looks, starting number of replicas, minimum number of transitions) and checks whether the conclusion changes. The results go into `runs/experiment_A_model/`.
 
-**当前结果（2026-11-23，只是模型，不是真实 MD）：** 每类模型 30 次独立试验，每次 16 条 × 100 ns 的新数据池，预算 800 ns，容差 0.05。规则是最终版本：所有重复共用起点的丢弃规则；重复之间的差别有迹象就加重复。
+**Current results (2026-11-23, models only, not real MD):** 30 independent trials per model family, each with a new data pool of 16 replicas × 100 ns, budget 800 ns, tolerance 0.05. The rules are the final version: a burn-in rule with one start point shared by all replicas; add replicas when there are signs of a difference between replicas.
 
-| 模型 | agent：成功 / 错误停止 / 计算量中位数 | 其他方法 |
+| Model | Agent: success / wrong stop / median compute | Other methods |
 |---|---|---|
-| equilibrium | 93% / 0% / 196 ns | 8 条 Sequential-CI：100% / 0% / 205 ns |
-| biased_start | 70% / 0% / 290 ns | 预实验后定方案：83% / 0% / 302 ns；4 条 Sequential-CI：70% / 0% / 332 ns |
-| two_timescale | 60% / 0% / 476 ns | 8 条 Sequential-CI：83% / 0% / 565 ns |
-| hidden_slow_start | 0% / 0% / 330 ns | 都失败；只有“预实验后定方案”错误停止（7%） |
+| equilibrium | 93% / 0% / 196 ns | Sequential-CI with 8 replicas: 100% / 0% / 205 ns |
+| biased_start | 70% / 0% / 290 ns | Plan after a pilot: 83% / 0% / 302 ns; Sequential-CI with 4 replicas: 70% / 0% / 332 ns |
+| two_timescale | 60% / 0% / 476 ns | Sequential-CI with 8 replicas: 83% / 0% / 565 ns |
+| hidden_slow_start | 0% / 0% / 330 ns | All fail; only the "plan after a pilot" stops wrongly (7%) |
 
-结论：agent 在 120 次独立试验里没有一次错误停止；达不到精度时它说“证据不足”。但它只在最简单的模型上略省一点，“比常规方法更省”的假设 A 仍不成立。`hidden_slow_start` 说明，从同一个结构出发的普通 MD 看不见从没去过的隐藏状态。细节和第一轮的数字见 `docs/architecture.md` 3.4 节。
+Conclusion: in 120 independent trials, the agent never stopped wrongly. When it cannot reach the precision, it says "insufficient evidence". But it saves a little compute only on the simplest model. Hypothesis A, "cheaper than conventional methods", still does not hold. `hidden_slow_start` shows that plain MD from one structure cannot see a hidden state that it never visits. For details and the first-round numbers, see section 3.4 of `docs/architecture.md`.
 
-### 怎么跑
+### How to run it
 
 ```bash
-bash scripts/experiment_A.sh pilot     # 预实验：3 条 × 20 ns（共 60 ns，几个小时）
-bash scripts/experiment_A.sh select    # 挑出 A-Easy 的残基，写进 runs/expA_easy.txt
-bash scripts/experiment_A.sh pool      # 数据池：16 条 × 100 ns（共 1600 ns，按 GPU 速度 2 到 5 天）
-bash scripts/experiment_A.sh analyze   # 回放和判定，几分钟；结果在 runs/expA_pool/experiment_A_easy.md 和 _hard.md
+bash scripts/experiment_A.sh pilot     # Pilot: 3 replicas × 20 ns (60 ns in total, a few hours)
+bash scripts/experiment_A.sh select    # Selects the A-Easy residues and writes them to runs/expA_easy.txt
+bash scripts/experiment_A.sh pool      # Data pool: 16 replicas × 100 ns (1600 ns in total, 2 to 5 days depending on GPU speed)
+bash scripts/experiment_A.sh analyze   # Replay and verdict, a few minutes; results in runs/expA_pool/experiment_A_easy.md and _hard.md
 ```
 
-**写论文要用独立的试验。** 默认的 16 条数据池只相当于约 1 个独立单位。要下结论，用更大的数据池并按互不重叠的组分析，例如 `POOL_REPLICAS=40 HOLDOUT=8 DISJOINT=1`（其余 32 条分成 4 组，每组 8 条）。这要几天的 GPU 时间，由你决定。
+**A paper needs independent trials.** The default 16-replica data pool is only about 1 independent unit. To draw a conclusion, use a larger data pool and analyse it in non-overlapping groups, for example `POOL_REPLICAS=40 HOLDOUT=8 DISJOINT=1` (the other 32 replicas form 4 groups of 8). This takes several days of GPU time. You decide.
 
-**由你决定的设置：** 比例容差 0.05（`POPULATION`）和可靠性 90%（`RELIABILITY`）是候选值，它们决定结论有多严。要在看到结果**之前**定下来。
+**Settings you decide:** the population tolerance 0.05 (`POPULATION`) and the reliability 90% (`RELIABILITY`) are candidate values. They set how strict the conclusion is. Set them **before** you see the results.
 
-## 第 5 步：用真实模拟验证判断
+## Step 5: validating the decisions with real simulations
 
-逻辑测试（`tests/test_stop_reasons.py`、`tests/test_policy.py`）只说明规则按设计执行。第 5 步要在 GPU 上用真实模拟检查 agent 判断得对不对。方案对任何蛋白都适用：
+The logic tests (`tests/test_stop_reasons.py`, `tests/test_policy.py`) show only that the rules run as designed. Step 5 uses real simulations on a GPU to check whether the agent decides correctly. The plan works for any protein:
 
-| 场景 | 要找的例子 | 期望 |
+| Scenario | Example to look for | Expected |
 |---|---|---|
-| 正常达到精度 | 表面上翻转快的侧链；容易形成又断开的盐桥 | 停下的原因是"达到目标"；和更长的独立参考运行比较，`compare` 说一致 |
-| 所有重复都困住 | 埋在里面的慢侧链（只许普通 MD）；很稳定的盐桥 | "采样停滞"，不能判为达标；报告说明误差为 0 表示被困住 |
-| 预算用完未达标 | 精度要求很高、预算很小 | 不许延长时"预算用完"；允许延长时最多跑到 2 倍预算 |
-| 增强采样 | 普通 MD 里不翻转的侧链 | 自动改用增强采样，达到精度后提前停；和不提前停的参考运行一致 |
+| Reaches the precision normally | A surface side chain that flips fast; a salt bridge that easily forms and breaks | The stop reason is "target reached"; compared with a longer independent reference run, `compare` says they agree |
+| All replicas trapped | A slow buried side chain (plain MD only); a very stable salt bridge | "Stalled", must not be judged as target reached; the report explains that an error of 0 means trapped |
+| Budget used up before the target | A very high precision requirement and a very small budget | "Budget exhausted" when extension is not allowed; at most 2 times the budget when extension is allowed |
+| Enhanced sampling | A side chain that does not flip in plain MD | Switches to enhanced sampling automatically and stops early when it reaches the precision; agrees with a reference run that does not stop early |
 
-`scripts/step5_validation.sh` 把这些场景依次跑一遍，最后把每个运行停下的原因和比较结果写进 `runs/val_<蛋白>_summary.txt`。现在有两个测试蛋白：
+`scripts/step5_validation.sh` runs these scenarios one after another. At the end, it writes the stop reason of each run and the comparison results to `runs/val_<protein>_summary.txt`. There are two test proteins now:
 
-- **1UBQ（人泛素，默认）：** 76 个残基，没有配体，体系约 1.7 万个原子。表面侧链 Glu16、Asp32、Lys63；埋在内部的 Val26；表面盐桥 Lys11–Glu34；内部盐桥 Lys27–Asp52。文件里写的 UniProt 编号 P62988 已经失效（拆成了 P0CG47、P0CG48、P62979、P62987），脚本用 `--uniprot P0CG48`。游离的泛素在 Gly76 之后被切开，所以链端用 `--termini charged`。
-- **181L（T4 溶菌酶 L99A）：** 表面侧链 Arg80、Lys135、Lys162；Val111；C 端盐桥 Lys162–Asp159；稳定的盐桥 Arg145–Glu11。
+- **1UBQ (human ubiquitin, default):** 76 residues, no ligand, about 17,000 atoms in the system. Surface side chains Glu16, Asp32, Lys63; buried Val26; surface salt bridge Lys11–Glu34; internal salt bridge Lys27–Asp52. The UniProt ID P62988 in the file is obsolete (it was split into P0CG47, P0CG48, P62979, P62987), so the script uses `--uniprot P0CG48`. Free ubiquitin is cleaved after Gly76, so the chain ends use `--termini charged`.
+- **181L (T4 lysozyme L99A):** surface side chains Arg80, Lys135, Lys162; Val111; C-terminal salt bridge Lys162–Asp159; stable salt bridge Arg145–Glu11.
 
-全部跑完大约要一个晚上，也可以只跑其中几个（`bash scripts/step5_validation.sh 1UBQ budget_chi1 extend_chi1`）。用别的蛋白时，照表格挑对应的例子，在脚本里加一段即可。
+A full run takes about one night. You can also run only some scenarios (`bash scripts/step5_validation.sh 1UBQ budget_chi1 extend_chi1`). For another protein, pick the matching examples from the table and add a section to the script.
 
-这十个场景检查的是"规则是否按设计执行、判断是否正确"，属于回归测试。项目的核心问题（更省的分配方式）要用下面这个实验来回答。
+These ten scenarios check "whether the rules run as designed and decide correctly". They are regression tests. The core question of the project (a cheaper allocation) needs the experiment below.
 
-## 核心实验：同样精度，更少计算量
+## Core experiment: the same precision for less compute
 
-一次高预算的数据池，加上回放，就能比较几种分配方式：
+One high-budget data pool plus replay can compare several allocation methods:
 
 ```bash
-bash scripts/budget_experiment.sh 1UBQ          # 10 条 × 60 ns 的数据池，然后回放（一台 GPU 约一天）
-POOL_REPLICAS=6 POOL_NS=20 bash scripts/budget_experiment.sh 1UBQ    # 先小规模试一次
+bash scripts/budget_experiment.sh 1UBQ          # Data pool of 10 replicas × 60 ns, then replay (about one day on one GPU)
+POOL_REPLICAS=6 POOL_NS=20 bash scripts/budget_experiment.sh 1UBQ    # Try a small version first
 ```
 
-脚本做两件事：先跑一个不做任何决策的数据池（`--allow none`，它是数据，不是策略），再用 `budget` 把四种策略各回放 10 次，并且把三种精度判据（`standard_error`、`confidence`、`sequence`）并排列出来，结果写进 `runs/pool_1UBQ/budget_<判据>.md`。
+The script does two things. First, it runs a data pool that makes no decisions (`--allow none`; it is data, not a strategy). Then `budget` replays each of the four strategies 10 times and lists the three precision criteria (`standard_error`, `confidence`, `sequence`) side by side. The results go into `runs/pool_1UBQ/budget_<criterion>.md`.
 
-数据池要在两个方向上都足够宽裕，因为所有策略都是从里面切出来的：重复数要够（策略用掉几条，剩下的才能当独立参考），长度要超过任何策略可能跑到的预算。参考自身也有误差，这个误差要算进容差里，所以报告会写明它有多大；如果它和容差差不多，就该把数据池加大，而不是相信 `accurate` 那一列。
+The data pool must be large enough in two directions, because all strategies are cut from it. It needs enough replicas (the replicas a strategy does not use serve as the independent reference), and enough length (longer than the budget any strategy can reach). The reference itself also has an error, and this error must count in the tolerance. So the report states its size. If it is close to the tolerance, make the data pool larger instead of trusting the `accurate` column.
 
-要能说"省了 64%"，必须是同一个目标量、同一个精度要求、同一套误差算法，并且跨多次独立重复都成立，而不是挑一次跑赢的结果。
+A claim such as "64% saved" needs the same target quantity, the same precision requirement and the same error method, and it must hold across many independent repeats. It must not be one chosen win.
 
-## 误差怎么算
+## How errors are computed
 
-模拟里相邻的帧是相关的，直接按帧数算的误差会太小。所以每条重复内部用分块平均（Flyvbjerg 和 Petersen 1989）：把轨迹切成连续的块，每块算一次比例，用块之间的差别算误差；块长从 1 帧开始加倍，直到剩不到 8 块，取其中最大的误差，偏保守。增强采样的帧带权重，每块用加权的比例。
+Neighbouring frames in a simulation are correlated. An error computed from the number of frames is too small. So within each replica, block averaging is used (Flyvbjerg and Petersen 1989): the trajectory is cut into consecutive blocks, the population is computed for each block, and the error comes from the differences between blocks. The block length starts at 1 frame and doubles until fewer than 8 blocks remain. The largest of these errors is taken, which is conservative. In enhanced sampling, frames have weights, and each block uses the weighted population.
 
-多条重复合并时，比例取平均；误差取两者中较大的一个：重复内部的误差合起来，或者重复之间的差别除以重复数的平方根。两条重复的差别超过合起来误差的 3 倍（并且超过 0.05）时，记为"重复之间不一致"。
+When several replicas are combined, the population is the mean. The error is the larger of two values: the combined within-replica errors, or the spread between replicas divided by the square root of the number of replicas. When the difference between two replicas is more than 3 times their combined error (and more than 0.05), it is recorded as "replicas disagree".
 
-增强采样还要检查权重：有效样本数（Kish）少于 50 时，结果只靠少数几帧，记为 `unreliable`。
+Enhanced sampling also checks the weights: when the effective sample size (Kish) is below 50, the result depends on only a few frames and is marked `unreliable`.
 
-**误差下限：** 一个状态从没出现过时，分块平均算出的误差正好是 0，这是假的精确。所以误差不能小于一个下限。普通 MD 用两态跳变过程的公式：比例 p 在 N 次状态转变后的误差约为 2p(1−p)/√N，N 是所有重复的转变次数加重复数。增强采样用 √(p(1−p)/n)，n 是所有重复的有效样本数。两种情况都先给 p 加半次观察的修正，所以从没出现过的状态也会得到一个反映“看到得太少”的误差。采样好的状态，下限和分块误差差不多，不影响判断。
+**Error floor:** when a state never appears, block averaging gives an error of exactly 0. This is false precision. So the error cannot be smaller than a floor. Plain MD uses the formula for a two-state jump process: after N state transitions, the error of population p is about 2p(1−p)/√N, where N is the number of transitions in all replicas plus the number of replicas. Enhanced sampling uses √(p(1−p)/n), where n is the effective sample size of all replicas. In both cases p first gets a correction of half an observation, so a state that never appears also gets an error that reflects "seen too rarely". For well-sampled states, the floor is close to the block error and does not change the decision.
 
-**两个运行是否一致（`compare`）：** 每个状态的比例差不超过两倍合并误差（|z| ≤ 2），或者差别不到 0.01，就算一致。
+**Whether two runs agree (`compare`):** they agree when the population difference of each state is not more than twice the combined error (|z| ≤ 2), or when the difference is less than 0.01.
 
-这些检查能发现采样不足，但不能证明采样充分（Grossfield 等 2018）。所以 agent 还要求每条重复在状态之间来回足够多次。
+These checks can find undersampling, but they cannot prove that sampling is enough (Grossfield et al. 2018). So the agent also requires each replica to move back and forth between states enough times.
 
-**反复判断的代价。** 一看到"够精确了"就停，这是一个序贯决策：agent 每轮都看同一批不断增长的数据，看的次数越多，偶然碰上一次"看起来已经够精确"的机会就越大，于是停下那一刻的 95% 区间其实偏窄。`--criterion` 决定怎么对付这件事（见"目标、权限和停下的原因"）：`confidence` 把 α 平摊到预先知道的判断次数上，`sequence` 用置信序列，不限次数都成立。判断次数是预先知道的，因为它就是预算除以每轮的长度。
+**The cost of repeated decisions.** Stopping as soon as the result "looks precise enough" is a sequential decision. Each round, the agent looks at the same growing data. The more looks, the higher the chance of one look that "seems precise enough" by chance. So the 95% interval at the moment of stopping is really too narrow. `--criterion` sets how to handle this (see "Goal, permissions and stop reasons"): `confidence` splits α over the number of looks known in advance; `sequence` uses a confidence sequence, which holds for any number of looks. The number of looks is known in advance, because it is the budget divided by the length of each round.
 
-## 两种模式：agent 自己判断，或者按用户指定
+## Two modes: the agent decides, or the user specifies
 
-- **自己判断（默认，`--mode auto`）：** 用户没有指定方法，或者说"你自己决定"时用这个模式。用户定的模拟时间和重复数是上限。agent 边跑边分析：达到目标就提前停下；再加长、加重复也没有收益时，也提前停下，并在对话里建议换方法（例如自适应采样或增强采样）。换方法、超过上限加长、多加重复，都要用户确认后才做。
-- **按用户指定（`--mode guided`）：** 用户说了用哪种方法（例如"只跑普通 MD""用自适应采样"）时用这个模式。agent 只跑这种方法，按用户给的时长。跑了很久没有进展时，agent 在对话里发消息，建议换方法，但不暂停、也不自己换。用户在对话里同意后（例如说"停止 X，然后用增强采样继续 X"），才换方法。
+- **The agent decides (default, `--mode auto`):** this mode is used when the user names no method or says "you decide". The simulation time and number of replicas that the user sets are limits. The agent analyses while it runs. It stops early when it reaches the target. It also stops early when more length or more replicas give no gain, and suggests in the chat to change the method (for example adaptive sampling or enhanced sampling). Changing the method, extending past the limit and adding more replicas all need the user's confirmation first.
+- **The user specifies (`--mode guided`):** this mode is used when the user names a method (for example "only run plain MD", "use adaptive sampling"). The agent runs only this method, for the length that the user gives. When there is no progress for a long time, the agent sends a message in the chat that suggests a change of method, but it does not pause and does not change by itself. It changes the method only after the user agrees in the chat (for example "Stop X, then continue X with enhanced sampling").
 
-**运行发来的消息：** 运行在后台遇到需要告诉用户的事，会写一条中英文消息到 `runs/<名字>/messages.jsonl`。网页每 10 秒、终端每 20 秒检查一次，把新消息显示在启动这个运行的对话里，开头写着运行名，例如"[181l_dev] 结果已经可以用了……"。语言模型下次回答时也能看到这些消息。会发消息的时刻有：普通 MD 一直没有进展、普通 MD 结束、改用增强采样、增强采样的结果稳定、结果可以用了、跑满了还没稳定。
+**Messages from runs:** when a run in the background has something to tell the user, it writes a message in Chinese and English to `runs/<name>/messages.jsonl`. The web page checks every 10 seconds and the terminal every 20 seconds. They show new messages in the chat that started the run, with the run name at the start, for example "[181l_dev] The results are ready to use...". The language model also sees these messages the next time it answers. Runs send messages when: plain MD makes no progress for a long time, plain MD ends, the run switches to enhanced sampling, the enhanced sampling result is stable, the results are ready to use, and the run reaches its limit without becoming stable.
 
-## 方法和设置怎么选（文献依据）
+## Choosing methods and settings (literature)
 
-开始时，agent 会按用户的问题推荐方法和设置，下面是依据。"结果"指用户关心的量：口袋侧链的构象比例、口袋形状、结合亲和力等。
+At the start, the agent recommends methods and settings for the user's question. The basis is below. "Result" means the quantity the user cares about: populations of pocket side-chain conformations, pocket shape, binding affinity, and so on.
 
-| 用户的问题 | 推荐方法 | 时长和重复 | 怎样判断够了 | 依据 |
+| The user's question | Recommended method | Length and replicas | How to judge it is enough | Basis |
 |---|---|---|---|---|
-| 口袋里侧链的构象（chi1） | 先跑普通 MD；表面侧链 ps 到 ns 就会翻转。埋在里面、几十 ns 都不翻转的侧链改用增强采样 | 至少 3 条，最好 5 条重复。T4 溶菌酶 L99A 的 Val111：普通 MD 约每 ns 翻转 0.04 次，从某些起点出发 60 ns 一次都不翻转 | 各条轨迹的比例一致；翻转次数足够 | Burley 2019, doi:10.1021/acs.jctc.8b01018；Scouras & Daggett 2011, doi:10.1002/pro.565；Mobley 2007, doi:10.1021/ct700032n |
-| 口袋形状或构象集合 | 多条独立的普通 MD；隐藏口袋要用增强采样 | 5 到 10 条重复，每条 100 ns 量级 | 各条轨迹的聚类比例相近 | Knapp 2018, doi:10.1021/acs.jctc.8b00391；Oleinikovas 2016, doi:10.1021/jacs.6b05425 |
-| 多条短轨迹还是一条长轨迹 | 多条独立重复 | 5 到 10 条；少于 5 条时误差估计不可靠 | 用重复之间的差别作误差 | Wan, Sinclair & Coveney 2021, doi:10.1098/rsta.2020.0082；Grossfield 2018, doi:10.33011/livecoms.1.1.5067 |
-| 普通 MD 很久没有进展 | well-tempered metadynamics，再重新加权 | bias factor 10 左右；重复之间一致即可停 | 状态之间的自由能差随时间不再变化；独立重复一致 | Barducci 2008, doi:10.1103/PhysRevLett.100.020603；Tiwary & Parrinello 2015, doi:10.1021/jp504920s |
-| 想探索很少出现的状态 | 自适应采样（从访问最少的状态重新起跑） | 多轮短轨迹 | 新状态不再出现 | Bowman 2010, doi:10.1021/ct900620b；Hruska 2018, doi:10.1063/1.5053582 |
-| 结合亲和力的数值 | alchemical 自由能计算（MDAgent 不做，推荐 OpenFE 或 FEP+） | 11 到 20 多个 λ 窗口，每个 1 到 5 ns，至少 3 次重复 | 相邻窗口重叠足够；正反方向一致；误差约 1 kcal/mol | Mey 2020, doi:10.33011/livecoms.2.1.18378；Wang 2015, doi:10.1021/ja512751q |
+| Side-chain conformations in a pocket (chi1) | Plain MD first; surface side chains flip in ps to ns. Use enhanced sampling for buried side chains that do not flip in tens of ns | At least 3, preferably 5 replicas. Val111 of T4 lysozyme L99A: about 0.04 flips per ns in plain MD; from some starting points, no flip in 60 ns | Populations agree between trajectories; enough flips | Burley 2019, doi:10.1021/acs.jctc.8b01018; Scouras & Daggett 2011, doi:10.1002/pro.565; Mobley 2007, doi:10.1021/ct700032n |
+| Pocket shape or conformational ensemble | Many independent plain MD runs; cryptic pockets need enhanced sampling | 5 to 10 replicas, each of the order of 100 ns | Cluster populations are similar between trajectories | Knapp 2018, doi:10.1021/acs.jctc.8b00391; Oleinikovas 2016, doi:10.1021/jacs.6b05425 |
+| Many short trajectories or one long trajectory | Many independent replicas | 5 to 10; with fewer than 5, the error estimate is not reliable | Use the spread between replicas as the error | Wan, Sinclair & Coveney 2021, doi:10.1098/rsta.2020.0082; Grossfield 2018, doi:10.33011/livecoms.1.1.5067 |
+| Plain MD makes no progress for a long time | Well-tempered metadynamics, then reweighting | Bias factor about 10; stop when replicas agree | Free-energy differences between states no longer change with time; independent replicas agree | Barducci 2008, doi:10.1103/PhysRevLett.100.020603; Tiwary & Parrinello 2015, doi:10.1021/jp504920s |
+| Explore rarely visited states | Adaptive sampling (restart from the least visited states) | Many rounds of short trajectories | No new states appear | Bowman 2010, doi:10.1021/ct900620b; Hruska 2018, doi:10.1063/1.5053582 |
+| A value of binding affinity | Alchemical free-energy calculation (MDAgent does not do this; it recommends OpenFE or FEP+) | 11 to more than 20 λ windows, 1 to 5 ns each, at least 3 repeats | Enough overlap between neighbouring windows; forward and reverse agree; error about 1 kcal/mol | Mey 2020, doi:10.33011/livecoms.2.1.18378; Wang 2015, doi:10.1021/ja512751q |
 
-说明：MDAgent 现在的默认值是 3 条重复，处在文献建议的下限。结合亲和力的计算里，慢的侧链（例如 Val111）同样会造成误差，所以先用 MDAgent 看清口袋侧链的构象仍然有用（Mobley 2007；Baumann 2021, doi:10.1021/acs.jpcb.0c10263）。
+Note: the current MDAgent default is 3 replicas, at the lower limit of the literature advice. In binding-affinity calculations, slow side chains (for example Val111) also cause errors. So it is still useful to check the pocket side-chain conformations with MDAgent first (Mobley 2007; Baumann 2021, doi:10.1021/acs.jpcb.0c10263).
 
-## 开始对话（`start`）
+## Starting a chat (`start`)
 
 ```bash
 conda activate mdagent
 python -m mdagent start
 ```
 
-程序依次问三件事，按 Enter 就沿用上次的选择（记在 `runs/.chats/start.json`）：
+The program asks three questions in order. Press Enter to keep the last choice (stored in `runs/.chats/start.json`):
 
-1. **界面语言：** 中文或 English。
-2. **语言模型：** Claude（用 Claude Code 的登录）或 ChatGPT（用 Codex 的登录）。电脑上只装了一个时，不再问。
-3. **在哪里对话：** 网页（浏览器打开 `http://localhost:8765`）或终端（就在这个窗口里）。
+1. **Interface language:** Chinese or English.
+2. **Language model:** Claude (with the Claude Code login) or ChatGPT (with the Codex login). When only one is installed on the computer, it does not ask.
+3. **Where to chat:** web page (the browser opens `http://localhost:8765`) or terminal (in this window).
 
-也可以直接指定，跳过提问：`python -m mdagent start --backend codex --ui terminal --lang zh`。
+You can also set them directly and skip the questions: `python -m mdagent start --backend codex --ui terminal --lang zh`.
 
-**流程由程序控制，不由语言模型控制。** 语言模型只做一件事：把你的话填进一张固定的设置表，表里每一项对应 `mdagent run` 的一个选项。它不能运行命令，也看不到你的文件，只看到 PDB 文件的概况和运行列表。之后的每一步都由 MDAgent 自己按固定顺序做：按编号下载 PDB、检查结构、生成命令，等你确认后才在后台启动。网页和终端用的是同一个程序，所以步骤完全一样，对话记录也互通。
+**The program controls the workflow, not the language model.** The language model does only one thing: it fills your words into a fixed settings form (`RunPlan`). Each item of the form matches one option of `mdagent run`. It cannot run commands and cannot see your files. It sees only a summary of the PDB file and the list of runs. MDAgent does every later step itself in a fixed order: it downloads the PDB by ID, checks the structure, makes the command, and starts it in the background only after you confirm. The web page and the terminal use the same program, so the steps are the same and the chat history is shared.
 
-**尽量少用 token：** 每说一句话，只调用一次语言模型（要下载 PDB 时两次）。调用时关掉 Claude Code 的全部工具，也不用它自带的长提示；Codex 用较低的推理强度。运行列表只告诉语言模型每类结果文件有几个，不列出每个文件名。下面这些终端命令完全不用语言模型，不花 token：
+**Use as few tokens as possible:** each sentence you type calls the language model only once (twice when a PDB must be downloaded). The call turns off all Claude Code tools and does not use its long built-in prompt. Codex uses a lower reasoning effort. The list of runs tells the language model only how many result files of each kind there are, and does not list each file name. The terminal commands below do not use the language model at all and cost no tokens:
 
-| 命令 | 作用 |
+| Command | What it does |
 |---|---|
-| `/runs` | 列出这个项目的所有运行：状态、最近的进度、结果文件在哪台电脑的哪个文件夹 |
-| `/last` | 在可以上下翻页的窗口里看上一条回复，按 q 回到对话。回复太长、一屏看不全时用它。 |
-| `/report [运行名]` | 在同样的窗口里看结果报告。不写运行名，就看最近的运行。 |
-| `/new` | 开始一个新对话。不同的案例用不同的对话。 |
-| `/help` | 显示这些命令 |
-| `/quit` | 退出。正在跑的模拟不会停。 |
+| `/runs` | Lists all runs of this project: status, latest progress, and the computer and folder of the result files |
+| `/last` | Shows the last reply in a window you can scroll up and down; press q to go back to the chat. Use it when a reply is too long for one screen. |
+| `/report [run name]` | Shows the result report in the same window. Without a run name, it shows the latest run. |
+| `/new` | Starts a new chat. Use a different chat for each case. |
+| `/help` | Shows these commands |
+| `/quit` | Exits. Running simulations do not stop. |
 
-在终端里，语言模型提出开始、停止或继续一个运行时，MDAgent 会显示设置、结构检查报告和完整命令，然后问"开始运行？[y/N]"。只有输入 y 才会执行。在这个问题上输入 `/runs` 或 `/last`，会先执行命令，再问一次。网页上对应的是一个按钮。
+In the terminal, when the language model proposes to start, stop or continue a run, MDAgent shows the settings, the structure check report and the full command. Then it asks "Start the run? [y/N]". It runs only if you type y. If you type `/runs` or `/last` at this question, it runs the command first and then asks again. On the web page, a button does the same.
 
-**在 tmux 里滚轮滚的是输入记录：** tmux 默认不处理鼠标，会把滚轮变成上下箭头键，于是滚动的是输入过的命令，而不是对话内容。用 `/last` 看上一条回复；或者运行 `tmux set -g mouse on`，让滚轮滚动对话内容（要一直有效，就把 `set -g mouse on` 写进 `~/.tmux.conf`）。
+**In tmux, the scroll wheel scrolls the input history:** by default tmux does not handle the mouse and turns the wheel into up and down arrow keys. So it scrolls through the commands you typed, not the chat. Use `/last` to see the last reply. Or run `tmux set -g mouse on` so that the wheel scrolls the chat (to keep it, write `set -g mouse on` into `~/.tmux.conf`).
 
-## 聊天窗口（`chat`）
+## The chat window (`chat`)
 
 ```bash
 conda activate mdagent
-python -m mdagent chat              # 浏览器打开 http://localhost:8765
+python -m mdagent chat              # The browser opens http://localhost:8765
 ```
 
-一个本地网页，界面有中文和 English 两种语言，右上角可以切换。
+A local web page. The interface has two languages, Chinese and English; switch at the top right.
 
-- **语言模型后台：** `--backend claude`（Claude Code，用你的 Claude 登录）、`--backend codex`（Codex，用你的 ChatGPT 登录）、`--backend api`（需要 `ANTHROPIC_API_KEY`）。默认 `auto`，选第一个已安装的。它们只负责理解你的话并提出建议，不能运行任何命令：Claude Code 的工具全部关闭，Codex 用只读模式。
-- **先确认后执行：** 开始、停止、继续一个运行，都会先显示成一张卡片，上面有设置和完整命令。你点击按钮后才执行。
-- **运行和网页无关：** 每个运行都是独立的进程，有自己的进程组，日志写在 `runs/<名字>.log`。关掉网页、甚至停掉聊天服务（Ctrl+C），模拟都会继续。只有在聊天窗口里说"停止"并点击确认，或者运行完成，它才会结束。
-- **对话：** 左侧是对话列表，点"新对话"开始一个新案例。每个对话有自己的聊天记录和运行列表，保存在 `runs/.chats/` 里，重启聊天服务后仍在。不同的案例用不同的对话，就不会混在一起。
-- **结构检查：** 提出运行方案后，先做结构检查。有问题时不显示运行按钮，而是把检查报告给你看，你可以说"只保留 A 链""保留标签"，或者明确说"有问题也继续"。检查通过时，卡片里可以展开查看报告。
-- **PDB 编号：** 在对话里提到一个 PDB 编号（比如"用 3HTB，看 JZ4 周围的口袋"），agent 会先下载到 `structures/3HTB.pdb`，看过文件里的链和配体，再提出运行方案。
-- **重启聊天服务：** 更新代码后要重启聊天服务，网页才会变。先在原来的终端按 Ctrl+C，或者运行 `pkill -f 'mdagent chat'`，再重新启动。这只停掉聊天服务，不会停掉模拟。如果忘了停旧的，新的会提示端口 8765 已被占用。
-- **指定保存位置：** 在对话里说出文件夹，例如"结果存到 /data/lynn/md"或"存到 ~/results"。运行会保存在这个文件夹下的 `<运行名>/` 里，开始前卡片上会显示完整路径。项目的 `runs/<运行名>` 是指向它的链接（符号链接），所以对话里的进度、消息、停止、继续和下载照常能用。日志 `runs/<运行名>.log` 仍在项目文件夹里。这个文件夹已经有文件时，程序会拒绝，请换一个。不说保存位置时，结果在项目的 `runs/<运行名>/` 里。用命令行时，直接写 `--out <任意路径>`；但这样启动的运行不在 `runs/` 里，对话看不到它。
-- **结果文件在哪里：** 右侧每张运行卡片写着结果文件所在的电脑名和完整路径，下面有"全部下载（zip）"和逐个文件的下载链接。zip 里是 `protein.pdb`、普通 MD 和增强采样的轨迹、chi1 和偏置势数据，保持运行目录里的结构。文件只保存在跑模拟的那台电脑上。如果网页是在另一台电脑上打开的（例如 Mac 通过 SSH 端口转发打开服务器上的 `localhost:8765`），那台电脑上没有这些文件，要用下载链接，或者用 `scp` 从服务器复制。也可以在聊天里问"轨迹在哪"。
-- **进度：** 右侧默认只列出本对话启动的运行，可以切换到"全部"，看这个项目里的所有运行（包括用命令行启动的）。列表每 10 秒刷新一次。也可以直接问"dev5 跑到哪了"。语言模型不自己算结果，只转述运行发来的消息。
-- **谁能看到：** 运行和对话都保存在这台电脑上这个项目文件夹的 `runs/` 里，不会上传到 GitHub。在同一个文件夹里打开聊天窗口的人看到的是同一份对话和运行；别人在自己电脑上克隆仓库，看不到你的。
+- **Language model backend:** `--backend claude` (Claude Code, with your Claude login), `--backend codex` (Codex, with your ChatGPT login), `--backend api` (needs `ANTHROPIC_API_KEY`). The default is `auto`, which selects the first one installed. They only understand your words and make proposals. They cannot run any command: all Claude Code tools are off, and Codex runs in read-only mode.
+- **Confirm before execution:** starting, stopping and continuing a run first appear as a card with the settings and the full command. They run only after you click the button.
+- **Runs do not depend on the web page:** each run is a separate process with its own process group. Its log goes to `runs/<name>.log`. If you close the web page, or even stop the chat server (Ctrl+C), the simulation continues. It ends only when you say "stop" in the chat window and click to confirm, or when the run finishes.
+- **Chats:** the left side has the list of chats. Click "New chat" to start a new case. Each chat has its own history and list of runs, stored in `runs/.chats/`, and they stay after the chat server restarts. Use a different chat for each case so they do not mix.
+- **Structure check:** after a run is proposed, the structure check runs first. If there are problems, the page shows the check report instead of the run button. You can say "keep only chain A", "keep the tag", or say clearly "continue despite the problems". When the check passes, you can expand the report on the card.
+- **PDB ID:** when you mention a PDB ID in the chat (for example "Use 3HTB and look at the pocket around JZ4"), the agent first downloads it to `structures/3HTB.pdb`, looks at the chains and ligands in the file, and then proposes a run.
+- **Restart the chat server:** after a code update, restart the chat server to change the web page. First press Ctrl+C in the original terminal, or run `pkill -f 'mdagent chat'`, then start it again. This stops only the chat server, not the simulations. If you forget to stop the old one, the new one reports that port 8765 is in use.
+- **Choose where to save:** name a folder in the chat, for example "Save the results to /data/me/md" or "Save to ~/results". The run is saved in `<run name>/` inside this folder, and the card shows the full path before it starts. The project's `runs/<run name>` is a link (symbolic link) to it, so progress, messages, stop, continue and download in the chat work as usual. The log `runs/<run name>.log` stays in the project folder. If the folder already has files, the program refuses it; choose another one. If you do not name a location, the results are in the project's `runs/<run name>/`. On the command line, write `--out <any path>`; but a run started this way is not in `runs/`, and the chat cannot see it.
+- **Where the result files are:** each run card on the right shows the computer name and full path of the result files. Below are "Download all (zip)" and a download link for each file. The zip contains `protein.pdb`, the plain MD and enhanced sampling trajectories, and the chi1 and bias potential data, with the same structure as the run folder. The files exist only on the computer that runs the simulation. If you open the web page on another computer (for example a Mac that opens `localhost:8765` of a server through SSH port forwarding), that computer does not have these files. Use the download links, or copy them from the server with `scp`. You can also ask in the chat "Where are the trajectories?".
+- **Progress:** by default the right side lists only the runs started in this chat. You can switch to "All" to see all runs in this project (including runs started from the command line). The list refreshes every 10 seconds. You can also ask "How far has dev5 got?". The language model does not compute results itself. It only passes on the messages from the run.
+- **Who can see it:** runs and chats are stored in `runs/` of this project folder on this computer and are not uploaded to GitHub. Anyone who opens the chat window in the same folder sees the same chats and runs. Others who clone the repository on their own computers cannot see yours.
 
-如果设置了 `ANTHROPIC_API_KEY`，Claude Code 会优先用这个密钥，而不是你的订阅登录。Codex 后台还没有在真实环境里测试过。
+If `ANTHROPIC_API_KEY` is set, Claude Code uses this key instead of your subscription login. The Codex backend has not been tested in a real environment yet.
 
-## 在 Claude Code 里用 `/md`（主要给开发者）
+## Using `/md` in Claude Code (mainly for developers)
 
-这种方式不是 MDAgent 自己的对话程序。它是 Claude Code 本身在工作：我们在 `.claude/commands/` 里写了一份说明，Claude Code 按说明运行命令、读文件、问你确认。所以它会用掉较多的 Claude Code 额度，步骤也靠 Claude Code 遵守说明，而不是由程序保证。一般使用请用上面的 `start`。
+This way is not MDAgent's own chat program. Claude Code itself does the work: we wrote instructions in `.claude/commands/`, and Claude Code follows them to run commands, read files and ask for your confirmation. So it uses more Claude Code quota, and the steps depend on Claude Code following the instructions, not on the program. For normal use, use `start` above.
 
-在自己的电脑上，先激活环境，再在 MDAgent1 文件夹里打开 Claude Code：
+On your own computer, activate the environment first, then open Claude Code in the MDAgent1 folder:
 
 ```bash
 conda activate mdagent
@@ -730,62 +730,62 @@ cd ~/Desktop/MDAgent1
 claude
 ```
 
-然后在 Claude Code 里输入：
+Then type in Claude Code:
 
-- `/md 用 Amber，看苯周围的口袋，先检查质子化，开发测试`：Claude Code 读取 PDB 概况，把要求转成 `mdagent run` 命令，列出设置请你确认，确认后用 `nohup` 在后台启动。
-- `/md-status`：查看进度。运行中途停了时，它会问你要不要续跑。
+- `/md Use Amber, look at the pocket around benzene, check protonation first, development test`: Claude Code reads the PDB summary, turns the request into an `mdagent run` command, lists the settings for you to confirm, and after confirmation starts it in the background with `nohup`.
+- `/md-status`: shows progress. When a run stopped midway, it asks whether to resume it.
 
-模拟在后台运行，关掉 Claude Code 或终端都不会停。命令的内容在 `.claude/commands/` 里。
+The simulation runs in the background. Closing Claude Code or the terminal does not stop it. The text of the commands is in `.claude/commands/`.
 
-## 用一句话描述要求（`ask`，一次性命令）
+## Describing a run in one sentence (`ask`, one-off command)
 
 ```bash
-python -m mdagent ask --pdb examples/181L.pdb --out runs/a "用 CHARMM，看苯周围的口袋，0.1 M KCl，先检查质子化"
+python -m mdagent ask --pdb examples/181L.pdb --out runs/a "Use CHARMM, look at the pocket around benzene, 0.1 M KCl, check protonation first"
 ```
 
-和 `start` 一样，它用 Claude Code 或 Codex 的登录（`--backend claude` 或 `--backend codex`，默认选第一个装好的）。有 Anthropic API 密钥时也可以用 `--backend api`，这时要先 `python -m pip install -e ".[llm]"`。它不是对话：说一句话，程序显示设置和命令，你输入 `y` 后开始。适合写进脚本。
+Like `start`, it uses the Claude Code or Codex login (`--backend claude` or `--backend codex`; the default selects the first one installed). With an Anthropic API key, you can also use `--backend api`; then first run `python -m pip install -e ".[llm]"`. It is not a chat: you give one sentence, the program shows the settings and the command, and it starts after you type `y`. It is suitable for scripts.
 
-语言模型只负责填一张固定的设置表，表里每一项都对应 `mdagent run` 的一个选项。你没提到的项留空，保持默认值。程序会把 PDB 文件的概况告诉 Claude：有哪些链、残基编号范围和配体名称。所以 Claude 不需要猜配体名称；你说的配体在文件里找不到时，它会提问。
+The language model only fills a fixed settings form (`RunPlan`). Each item of the form matches one option of `mdagent run`. Items you do not mention stay empty and keep their default values. The program gives Claude a summary of the PDB file: the chains, the residue number ranges and the ligand names. So Claude does not need to guess ligand names. When a ligand you name is not in the file, it asks.
 
-- 要求不清楚时，Claude 会提出问题，程序不运行。
-- 要求清楚时，设置表被转成一条普通的 `mdagent run` 命令，经过和命令行完全相同的检查。程序显示目标区域、哪些设置改了默认值、完整的命令，等你输入 `y` 才开始运行。加 `--yes` 可以跳过确认。
-- 如果安全分类器拒绝了请求，API 会自动换一个模型重试（server-side fallback）。仍被拒绝时，程序会报错，不会运行。
+- When the request is not clear, Claude asks a question, and the program does not run.
+- When the request is clear, the settings form becomes a normal `mdagent run` command and goes through the same checks as the command line. The program shows the target region, the settings that differ from the defaults and the full command. It starts the run only after you type `y`. Add `--yes` to skip the confirmation.
+- If the safety classifier refuses the request, the API retries automatically with another model (server-side fallback). If it is still refused, the program reports an error and does not run.
 
-## 许可证
+## License
 
-MIT 许可证，见 `LICENSE`。任何人都可以使用、修改和分发这个程序，只要保留版权声明。
+MIT license, see `LICENSE`. Anyone can use, modify and distribute this program, as long as they keep the copyright notice.
 
-## 通用决策核心（开发中）
+## General decision core (in development)
 
-MDAgent 正在改成通用的科学 MD agent。新的决策核心在 `mdagent/core/`：它读任务里每个估计量自己的成功要求，用相互竞争的假设解释为什么还没达到，再在权限和预算内选下一步动作，并把每个决定和它依据的证据写进 `decisions.jsonl`。核心不认识任何观测量、模拟引擎或体系；具体的数值估计在 `mdagent/estimators.py`。正式运行还用原来的流程。新核心现在以“影子模式”跟着每个运行：每跑完一轮普通 MD、每做一次增强采样检查，它都按同样的数据记下自己会怎么做，但不执行。记录在运行目录的 `decisions.core.jsonl`。不想要时，运行前设 `MDAGENT_SHADOW=0`。
+MDAgent is becoming a general scientific MD agent. The new decision core is in `mdagent/core/`. It reads the success requirement of each estimand in the task, uses competing hypotheses to explain why the requirement is not met yet, chooses the next action within the permissions and the budget, and writes each decision with its evidence to `decisions.jsonl`. The core knows no observable, simulation engine or system. The specific numerical estimates are in `mdagent/estimators.py`. Production runs still use the old workflow. The new core now follows each run in "shadow mode": after each round of plain MD and each enhanced sampling check, it records what it would do with the same data, but does not do it. The record is `decisions.core.jsonl` in the run folder. To turn it off, set `MDAGENT_SHADOW=0` before the run.
 
-已经跑完的运行也能比较，不用重新模拟：
+Finished runs can also be compared, without new simulations:
 
 ```bash
 python -m mdagent shadow --run runs/val_1UBQ_reach_chi1 runs/val_1UBQ_trapped_chi1
 ```
 
-它从运行目录里的轨迹和增强采样数据，重建每个过去的决定点，问新核心会怎么做，再和当时实际做的并排列出（相同、停下原因不同、新核心更早停、新核心继续、不同动作），并写出每个决定依据的证据 `decisions.core.replay.jsonl`。对新开始的运行，用 `--live` 比较运行中记下的影子决定。架构评估、计划和评估方法见 [docs/architecture.md](architecture.md)。
+It rebuilds each past decision point from the trajectories and enhanced sampling data in the run folder, asks the new core what it would do, and lists this side by side with what the run really did (same, different stop reason, new core stops earlier, new core continues, different action). It also writes the evidence for each decision to `decisions.core.replay.jsonl`. For newly started runs, use `--live` to compare the shadow decisions recorded during the run. For the architecture assessment, the plan and the evaluation method, see [docs/architecture.md](architecture.md).
 
-## 下一步
+## Next steps
 
-**研究方向：** 第一阶段是普通 MD 的"何时停、几条重复"（已经可以用 `budget` 量出来）。第二阶段是自适应采样的"从哪个状态重新起跑、每条跑多久"：那不能回放，必须真算，并且要注意从挑出的帧起跑的轨迹不能直接给出平衡时的比例。第三阶段是在难度不同的几个蛋白上，用冻结的策略和独立的随机种子做基准测试。1UBQ 的侧链翻转较快，还需要至少再加一个有慢运动、有多个亚稳态的体系。
+**Research direction:** phase one is "when to stop, how many replicas" for plain MD (`budget` can already measure it). Phase two is "which state to restart from, how long each trajectory runs" for adaptive sampling. That cannot be replayed and must be really computed. Also, trajectories that start from selected frames cannot give equilibrium populations directly. Phase three is a benchmark on several proteins of different difficulty, with frozen strategies and independent random seeds. The side chains of 1UBQ flip quite fast, so at least one more system with slow motions and several metastable states is needed.
 
-**公开仓库、邀请更多人测试之前**，还要在 GPU 电脑上完成这些验证：
+**Before the repository is made public and more testers are invited**, these validations must be done on a GPU computer:
 
-1. 用 181L 和默认设置完整跑一次，确认 Val111 被找出来，并且在增强采样里翻转。已通过：Val111 在 3 条 20 ns 的普通 MD 里没有翻转，被送进了增强采样；在增强采样的第 1 条轨迹里，5 ns 内翻转了 373 次，三种状态都去过。
-2. 用 Codex 后台在聊天网页里跑一次开发测试。
-3. 跑一次核心实验（`scripts/budget_experiment.sh`），在真实蛋白上确认：提前停真的更省，而且答案仍然落在容差以内；并据此决定默认判据用哪一个。
+1. Run 181L once completely with default settings, and confirm that Val111 is found and flips in enhanced sampling. Passed: Val111 did not flip in 3 plain MD replicas of 20 ns and was sent to enhanced sampling. In the first enhanced sampling trajectory, it flipped 373 times in 5 ns and visited all three states.
+2. Run a development test with the Codex backend in the chat web page.
+3. Run the core experiment once (`scripts/budget_experiment.sh`) and confirm on a real protein that early stopping really saves compute and that the answer is still within the tolerance. Use the result to decide which criterion is the default.
 
 
-## GPU 上的验证记录
+## GPU validation records
 
-这些记录来自开发者自己的 GPU 电脑，2026-11-23 从项目记忆文件移到这里，去掉了个人信息。
+These records come from the developer's own GPU computers. On 2026-11-23 they were moved here from the project memory file, without personal information.
 
-- **测试机（2026-11-19 起）：** `~/.condarc` 里有 `solver: classic`，conda 卡在 “Collecting package metadata”，加 `--solver=libmamba` 解决；直接用 `pip` 会跑到系统旧 pip，要用 `python -m pip`；CUDA 报 PTX 版本错误（conda 装了 13.5，驱动 610.57 只支持 13.3），装 `cuda-version=13.3` 后 CUDA 可用（1UBQ 约 854 ns/day）；RTX 4090 + Intel CPU，CPU 8 和 9（物理核 16）不稳定（系统日志里 44 次段错误都在这两个 CPU 上），快速测试在 `addSolvent` 里段错误，要用 `taskset -c 0-7,10-31` 运行测试和 `mdagent start`（子进程继承限制）。日志查法见 `docs/developer.md`，`scripts/find_bad_cores.py` 在 README 的“常见问题”里。11-19 在这台电脑上开始跑第 5 步（1UBQ）：reach_chi1 已完成且判断正确：ASP32 普通 MD 达标；LYS63、GLU16 各有一条重复几乎不翻转（每条至少 4 次的规则），普通 MD 用到 20 ns 上限后改用增强采样并达标；LYS63 约 89% 在 g+（+60°），和普通 MD 5 条重复的主要状态一致，说明重新加权正确。LYS63 翻转慢，不适合当“普通 MD 就能达标”的例子。11-20 第 5 步 10 个场景全部跑完（约 20 小时），停下原因都和实际一致（trapped_dist 判为达标是对的：Lys27–Asp52 距离在三条重复里来回 5、4、8 次，主要为“近”，误差 0.012；原以为它不会断开）；发现三个问题：`diagnose` 命令对距离运行误按 chi1 诊断（已修：和运行共用 `agent.diagnose_run`）；从没出现过的状态分块误差为 0，`compare` 因此误报“不一致”（LYS63 g- z=3.5，VAL26 z=inf；已加误差下限，`compare` 差别不到 0.01 也算一致）；`budget_chi1` 普通 MD 预算 2 ns，换增强采样后又用了默认 20 ns（和“用户定的是上限”不符，见上面“核心目的”）。
+- **The test machine (from 2026-11-19):** `~/.condarc` had `solver: classic`, and conda stuck at "Collecting package metadata"; `--solver=libmamba` fixed it. Plain `pip` ran the old system pip, so use `python -m pip`. CUDA reported a PTX version error (conda installed 13.5, but driver 610.57 supports only 13.3); after installing `cuda-version=13.3`, CUDA worked (1UBQ about 854 ns/day). RTX 4090 + Intel CPU. CPUs 8 and 9 (physical core 16) are unstable (all 44 segmentation faults in the system log are on these two CPUs). The fast tests had a segmentation fault in `addSolvent`, so run the tests and `mdagent start` with `taskset -c 0-7,10-31` (child processes inherit the limit). For how to check the logs, see `docs/developer.md`; `scripts/find_bad_cores.py` is in the "Troubleshooting" section of the README. On 11-19, step 5 (1UBQ) started on this computer. reach_chi1 finished and decided correctly: ASP32 reached the target in plain MD; LYS63 and GLU16 each had one replica that almost never flipped (rule: at least 4 per replica), so plain MD used the 20 ns limit, switched to enhanced sampling and reached the target. LYS63 is about 89% in g+ (+60°), which matches the main state in 5 plain MD replicas, so the reweighting is correct. LYS63 flips slowly and is not a good example of "plain MD reaches the target". On 11-20, all 10 scenarios of step 5 finished (about 20 hours), and all stop reasons matched reality (trapped_dist judged as target reached is correct: the Lys27–Asp52 distance went back and forth 5, 4 and 8 times in the three replicas, mostly "near", error 0.012; it was expected not to break). Three problems were found: the `diagnose` command diagnosed distance runs as chi1 by mistake (fixed: it now shares `agent.diagnose_run` with runs); a state that never appears has a block error of 0, so `compare` wrongly reported "disagree" (LYS63 g- z=3.5, VAL26 z=inf; an error floor was added, and `compare` also counts a difference below 0.01 as agreement); in `budget_chi1`, the plain MD budget was 2 ns, but after the switch to enhanced sampling it used the default 20 ns again (this conflicts with the rule that the user's values are limits).
 
-- **骨架 φ/ψ 按预算放弃（2026-11-23，代码 3dd46d8）：** 181L 的 A:110–112（螺旋里的残基）3 条重复、上限每条 1 µs，每轮 50 ns；三个残基一直在 alpha_R、一次没变，151 ns 时规则判断还值得跑（3×849/151≈16.9 ≥ 12），201 ns 时判断不值得（≈11.9 < 12），普通 MD 在每条 201 ns 停下，省下约 80% 预算，和预期一致。用模拟确认过：这种旧运行换到 main 后 `resume --enhanced-sampling` 会把三个残基送进 φ/ψ 增强采样（旧缓存格式会自动重读）。这条记录原来只在旧分支 `claude/compassionate-lamport-1xn8lc` 上，2026-11-24 移到这里。
+- **Backbone φ/ψ gives up by budget (2026-11-23, code 3dd46d8):** A:110–112 of 181L (residues in a helix), 3 replicas, limit 1 µs per replica, 50 ns per round. The three residues stayed in alpha_R and never changed. At 151 ns, the rule judged that it was still worth running (3×849/151≈16.9 ≥ 12); at 201 ns, it judged that it was not (≈11.9 < 12). Plain MD stopped at 201 ns per replica and saved about 80% of the budget, as expected. A simulation confirmed: when such an old run moves to main, `resume --enhanced-sampling` sends the three residues to φ/ψ enhanced sampling (the old cache format is re-read automatically). This record was first only on the old branch `claude/compassionate-lamport-1xn8lc` and was moved here on 2026-11-24.
 
-- **用户怎样打开网页（还没确认）：** 截图里浏览器是 Mac 上的 Chrome，地址是 `localhost:8765`，但运行的进程号是 1749823，macOS 上不会出现这么大的进程号。所以模拟很可能跑在一台 Linux 电脑上，网页经 SSH 端口转发打开，结果文件在那台 Linux 电脑上。
+- **How the user opens the web page (not confirmed yet):** in the screenshot, the browser is Chrome on a Mac and the address is `localhost:8765`, but the run's process ID is 1749823. macOS does not use process IDs this large. So the simulation probably runs on a Linux computer, the web page is opened through SSH port forwarding, and the result files are on that Linux computer.
 
-- **只能在用户电脑上验证的事项：** 网页下载链接经端口转发是否可用（还没验证）；AdaptivePy 的真实调用（已验证可用）；Claude Code 后台（已验证可用）；Codex 后台（还没验证；测试者会用到，公开前要验证）；`start` 加终端模式用 Claude 跑完开发测试（已验证可用）；181L 完整运行在 11-16 00:23 左右、增强采样第 1 条轨迹 5.4 ns 处停了，日志没有报错。已排除重启（11-17 08:47，非正常关机）和 SSH 断开（在 tmux 里跑，KillUserProcesses=no）；系统日志显示整台电脑在 11-16 00:22:54 之后就没有任何记录，直到 11-17 08:47 重启，所以是整机死机（不是程序或内存的问题），原因可能是 GPU、驱动、电源或散热。现在 run/resume 会在日志里记下进程号、开始时间、崩溃或 SIGTERM 时的调用栈，进度行带时间；CHARMM 加帽体系在 GPU 上的长时间运行（还没验证）；第 5 步第一次跑（1UBQ reach_chi1，11-19）：加重复的规则太激进，重复从 3 条加到 10 条（已改：只在重复明显不一致、且预算用了不到一半时加）；后来速度从 646 掉到 4 ns/day，同时一个 python 进程占了 23.4 GB 显存、GPU 使用率 0%，说明 OpenMM 悄悄改用了 CPU（已改：总是明确指定平台，GPU 不能用就报错）；占显存的是不是 MDAgent 自己的进程，还在确认。
+- **Items that can be validated only on the user's computer:** whether web page download links work through port forwarding (not validated yet); real calls of AdaptivePy (validated, works); Claude Code backend (validated, works); Codex backend (not validated yet; testers will use it, so validate it before going public); `start` in terminal mode with Claude through a development test (validated, works); the full 181L run stopped at about 00:23 on 11-16, at 5.4 ns of the first enhanced sampling trajectory, with no error in the log. A reboot (08:47 on 11-17, unclean shutdown) and an SSH disconnect (it ran in tmux, KillUserProcesses=no) are ruled out. The system log has no entries at all after 00:22:54 on 11-16 until the reboot at 08:47 on 11-17, so the whole machine froze (not a program or memory problem); the cause may be the GPU, driver, power supply or cooling. Now run/resume records in the log the process ID, the start time, and the call stack on a crash or SIGTERM, and progress lines have timestamps; long runs of CHARMM capped systems on a GPU (not validated yet); the first step 5 run (1UBQ reach_chi1, 11-19): the rule for adding replicas was too aggressive, and replicas grew from 3 to 10 (changed: add only when replicas clearly disagree and less than half the budget is used); later the speed fell from 646 to 4 ns/day, while one python process used 23.4 GB of GPU memory at 0% GPU use, which shows that OpenMM silently switched to the CPU (changed: always set the platform explicitly, and report an error when the GPU cannot be used); whether the process that used the GPU memory belongs to MDAgent is still being checked.
