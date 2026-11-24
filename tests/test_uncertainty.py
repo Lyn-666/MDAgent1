@@ -122,7 +122,7 @@ def test_compare_counts_tiny_differences_as_the_same(tmp_path):
 
 
 def test_burn_in_does_not_cut_away_the_changes_of_a_replica_that_freezes_later():
-    """HP35, 2026-11-24: a replica changed state often, then stayed in one state. The burn-in rated the frozen tail
+    """Seen in a real run (2026-11-24): a replica changed state often, then stayed in one state. The burn-in rated the frozen tail
     as many independent samples and cut the active half away, leaving 0 changes, so the run kept doubling."""
     import numpy as np
 

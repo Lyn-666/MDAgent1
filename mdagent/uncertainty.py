@@ -295,7 +295,7 @@ def indicator_samples(x: np.ndarray) -> float:
 
     A stretch in which the state never changes holds one stay, so it is one sample of the occupancy, however long.
     g alone calls it uncorrelated (a constant series gives g = 1), so a frozen tail would look like the best data,
-    and automated equilibration detection would cut away the part with the changes (seen on 2026-11-24 in a HP35
+    and automated equilibration detection would cut away the part with the changes (seen on 2026-11-24 in a real
     run: a replica with 50 changes kept only 2). For series that change often the cap does not bind."""
     x = np.asarray(x)
     if len(x) == 0:
