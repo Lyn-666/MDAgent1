@@ -38,11 +38,11 @@ if _missing_packages():   # Say how to fix it, instead of a long traceback.
           + (f"The active conda environment is '{env}'. " if env else "")
           + "Activate the MDAgent environment first, then try again:\n"
             "    conda activate mdagent\n"
-            "If that environment does not exist yet, install it as in README \"安装\" "
+            "If that environment does not exist yet, install it as in the README section \"Install\" "
             "(conda env create -f environment.yml).\n"
             f"MDAgent 无法启动：这个 Python 里没有 {', '.join(_missing_packages())}。"
           + (f"当前的 conda 环境是“{env}”。" if env else "")
-          + "请先运行 conda activate mdagent 再试；如果还没有这个环境，按 README“安装”一节安装。",
+          + "请先运行 conda activate mdagent 再试；如果还没有这个环境，按 README 的 “Install” 一节安装。",
           file=sys.stderr)
     sys.exit(2)
 

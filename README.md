@@ -1,35 +1,29 @@
-# MDAgent：用一句话完成分子动力学模拟
+# MDAgent: molecular dynamics from one sentence
 
-MDAgent 帮你完成分子动力学（MD）模拟，即使你不熟悉 MD。你只要用一句话说明想知道什么，例如“这个口袋里的侧链是什么构象”。agent 会自己完成其余的工作：下载和检查结构、搭水盒子、加离子、跑模拟、边跑边分析，并在答案足够可靠时停下。最后它交给你一份中英文报告。
+Tell MDAgent in one sentence what you want to know, for example *"What conformations do the side chains in this pocket take?"* The agent does the rest: it fetches and checks the structure, builds the solvated system, runs the simulations, analyses them as they run, and stops when the answer is reliable. You get a report in English and Chinese.
 
-它的主要目的是**减少不必要的模拟**。没有经验的人常常不知道该跑多久：跑短了，结果不可靠；跑长了，浪费几天的 GPU 时间。MDAgent 自己决定跑几条轨迹、每条多长：它先跑几条短轨迹，看看结果，再决定加长、加轨迹，还是已经可以停。结果够精确时它就停下，通常远用不完上限。普通 MD 采样不到时，它说明原因，并建议更合适的方法（增强采样或自适应采样）。它不会超过上限：默认最多 10 条轨迹、每条最多 2 µs，你也可以自己定。
+The main goal is to **avoid unnecessary simulation**. If you run too short, the result is unreliable. If you run too long, you waste days of GPU time. MDAgent starts with a few short replicas and looks at the results. Then it decides whether to extend them, add replicas, or stop. It stops as soon as the results are precise enough, which is usually long before the limit. If plain MD cannot answer the question, the agent says why and suggests a better method. It never exceeds your limits. The default limit is 10 replicas of at most 2 µs each.
 
-## 它能回答什么问题
+## What it can answer
 
-| 你想知道 | 例子 | 你会得到 |
+| Question | Example | You get |
 |---|---|---|
-| 侧链的构象 | 配体周围的侧链各处在哪种构象？ | 每个侧链 chi1 三种构象（g+、t、g−）的比例和误差 |
-| 两个原子之间的距离 | 这个盐桥大部分时间是连着还是断开？口袋会不会打开？ | “近”和“远”两种状态的比例和误差 |
-| 主链的构象 | 这几个残基在 Ramachandran 图上各处在哪个区域？会不会转变？ | 各构象区的比例、构象区之间的转变速率和停留时间、φ/ψ 自由能面（带误差的图） |
-| 会不会发生某个变化 | Val111 的侧链会不会转到 t 构象？ | 在哪条轨迹、第几 ns 看到；看到就停 |
-| 结构是否稳定 | 这个小蛋白在 MD 里能不能保持折叠？环区会不会打开？ | 相对起始结构的骨架 RMSD 和回转半径（Rg）：是否达到稳态、平均值和误差、保持起始结构的时间比例、RMSD–Rg 自由能面、构象聚类和每一类的代表结构 |
+| Side-chain conformations | Which rotamers do the side chains around the ligand take? | chi1 populations (g+, t, g−) with errors |
+| A distance between two atoms | Is this salt bridge mostly formed? Does the pocket open? | "near" and "far" populations with errors |
+| Backbone conformations | Which Ramachandran regions do these residues visit? Do they switch? | Basin populations, transition rates and dwell times, φ/ψ free-energy surface with errors |
+| Whether a change happens | Does the Val111 side chain reach the t rotamer? | Which replica saw it, and when. The run stops once it is seen. |
+| Structural stability | Does this small protein stay folded? Does the loop open? | Backbone RMSD and radius of gyration (Rg): steady state, means with errors, time spent near the start structure, RMSD–Rg free-energy surface, conformational clusters with representative structures |
 
-构象聚类也可以加到其他问题上：在句子里说“顺便做构象聚类”。
+You can add conformational clustering to any question: say *"also cluster the conformations"*.
 
-用到的方法：
+**Methods.** Plain MD with independent replicas is the default. When a side chain or backbone conformation does not change for tens of ns, the agent can switch to **enhanced sampling** (well-tempered metadynamics) and reweight the results back to unbiased populations. This works for side chains and backbone, but not yet for distances. **Adaptive sampling** (optional) restarts from the least-visited states. It needs the extra AdaptivePy package. MDAgent does not compute binding free energies. For those, use a dedicated tool such as OpenFE or FEP+.
 
-- **普通 MD：** 默认方法。几条独立轨迹同时跑。
-- **增强采样：** 有的侧链或主链构象在普通 MD 里几十 ns 都不变化。这时 agent 可以改用 well-tempered metadynamics，再把偏置的影响去掉，算回真实的比例。侧链构象和主链构象可以用，原子间距离还不能用。
-- **自适应采样（可选）：** 从访问最少的状态重新起跑，用来探索少见的状态。需要另外安装 AdaptivePy（见“安装”）。
+## Requirements
 
-MDAgent 不计算结合自由能。需要结合亲和力的数值时，请用 OpenFE 或 FEP+ 这类专门的工具。
+- Linux with an NVIDIA GPU and conda. macOS works without GPU acceleration, so it is only good for short tests. On Windows, use WSL2.
+- [Claude Code](https://claude.com/claude-code) (run `claude` and log in) or Codex (run `codex login`). The chat uses your own login. You do not need an API key.
 
-## 需要什么
-
-- 一台 Linux 电脑，有 NVIDIA GPU，装好 conda。macOS 能运行，但没有 GPU 加速，只适合几分钟的测试。Windows 要在 WSL2 里运行。
-- 装好并登录 [Claude Code](https://claude.com/claude-code)（运行 `claude`，按提示登录），或者 Codex（运行 `codex login`）。对话里的语言模型用你自己的登录，不需要 API 密钥。
-
-## 安装（约 5 分钟）
+## Install (about 5 minutes)
 
 ```bash
 git clone https://github.com/Lyn-666/MDAgent1.git && cd MDAgent1
@@ -39,198 +33,178 @@ git clone https://github.com/Lyn-666/MDAgent1.git && cd MDAgent1
 conda env create -f environment.yml && conda activate mdagent && python -m pip install -e .
 ```
 
-然后检查 GPU 能不能用：
+Check that the GPU works. The CUDA line of the output should say "Successfully computed forces".
 
 ```bash
 python -m openmm.testInstallation
 ```
 
-输出里 CUDA 那一行应该写着 “Successfully computed forces”。如果出了问题，看下面的“常见问题”。
-
-想用自适应采样时，再装一个包：
+Optional, for adaptive sampling:
 
 ```bash
 python -m pip install adaptivepy-sampling
 ```
 
-## 第一次使用
-
-**1. 打开 agent：**
+## Quick start
 
 ```bash
 conda activate mdagent && mdagent start
 ```
 
-程序依次问三件事：界面语言（中文或 English）、语言模型（Claude 或 ChatGPT）、在网页还是终端里对话。选网页时，在浏览器里打开 `http://localhost:8765`。
+1. Choose the interface language, the language model (Claude or ChatGPT), and a web or terminal chat. For the web chat, open `http://localhost:8765`.
+2. Say what you want, for example: *"Download 1UBQ (reference sequence UniProt P0CG48, keep charged termini) and look at the backbone conformations of A:8 to A:10."* The part in brackets is specific to 1UBQ, whose PDB file lists an obsolete UniProt entry. Your own system usually does not need it.
+3. The agent checks the structure first. If it finds a problem, it shows you the report and asks what to do. Examples: duplicate chains, or a sequence that does not match the reference. Answer in one sentence, for example *"keep chain A only"* or *"continue anyway"*.
+4. The agent then shows a card with its understanding of the task, all settings, and the command. Nothing runs until you click the button, or type `y` in the terminal.
 
-**2. 用一句话说你想做什么。** 例如：
+The simulation runs in the background, and closing the chat does not stop it. The agent reports its progress and decisions in the chat, and tells you where the report is when it finishes.
 
-> 下载 1UBQ（参考序列用 UniProt P0CG48，两端保持带电），看 A:8 到 A:10 这几个残基的主链构象。
+To check that everything works before a real run, add *"development test"* to your sentence. The run then takes only a few minutes. Example: *"Download 181L, look at the side chain of A:111, development test, continue despite structure problems."*
 
-括号里那句是 1UBQ 特有的：它的 PDB 文件记录的 UniProt 编号已经失效。换成你自己的体系时，通常不需要这句。
+## How to ask
 
-**3. 看一遍方案，再确认。** agent 先检查结构。结构有问题时（例如文件里有好几条相同的链，或参考序列对不上），它会停下，给你看检查报告，说明可以怎么选。你用一句话回答就行，例如“只保留 A 链”“参考序列用 UniProt P0CG48”或“有问题也继续”。检查通过后，它给你一张卡片：上面写着它理解的任务、所有设置和对应的命令。在网页上点按钮，或在终端输入 `y`，模拟才开始。没有你的确认，什么都不会运行。
+You must give two things:
 
-模拟在后台运行。关掉网页或终端，模拟也不会停。agent 会在对话里报告进展和决定，结束时告诉你报告在哪里。
+1. **The system:** a PDB ID (the agent downloads it) or the path to a PDB file.
+2. **The question:** which side chains (for example *"around ligand BNZ"* or *"A:99 to A:120"*), which atom pair, which residues' backbone, or which change to watch for. Use the residue numbers from the PDB file.
 
-想先确认整个流程能跑通，可以在句子里加上“开发测试”，例如“下载 181L，看 A:111 的侧链构象，开发测试，结构检查有问题也继续”。这样运行只需几分钟。
+The agent decides everything else. If your sentence is unclear, for example without residue numbers, it asks you instead of guessing. To run your own fixed plan, give exact numbers, for example *"plain MD only, exactly 3 replicas of 10 ns"*. The agent then follows your plan and only makes suggestions.
 
-## 怎样用一句话说清楚
+**Optional settings:**
 
-**必须说的两件事：**
-
-1. **体系：** 一个 PDB 编号（例如 1UBQ，agent 会自动下载），或者你电脑上一个 PDB 文件的路径。
-2. **想知道什么：** 哪些侧链（例如“配体 BNZ 周围的侧链”，或“A:99 到 A:120”）、哪两个原子之间的距离、哪些残基的主链构象，或者想看到什么变化。残基编号用 PDB 文件里的编号。
-
-**其余的由 agent 决定。** 它先开 3 条短轨迹，看看结果，再决定是加长、加几条轨迹，还是已经可以停。默认上限是 10 条轨迹、每条 2 µs。这只是上限：结果够精确时它就停下，通常只用掉其中一小部分。想限制计算量时，说一句“最多 4 条、每条最多 500 ns”。
-
-**想按自己的方案跑时，把数字说死。** 例如“只用普通 MD，正好跑 3 条，每条 10 ns”。这时 agent 照你的方案跑，只在对话里提建议。
-
-**可以选说的：**
-
-| 内容 | 例子 | 不说时 |
+| Setting | Example | Default |
 |---|---|---|
-| 精度 | “误差不超过 5%” | 0.05（比例的误差） |
-| 上限 | “最多 4 条，每条最多 500 ns” | 10 条，每条最多 2 µs（够了就停） |
-| 方法 | “只用普通 MD”“用自适应采样” | agent 判断该用什么方法，换方法前先问你 |
-| 固定方案 | “正好跑 3 条，每条 10 ns” | agent 自己决定跑几条、多长 |
-| agent 能不能自己换方法 | “普通 MD 不行的话，可以自己换增强采样” | 只建议，等你确认 |
-| 温度 | “在 310 K” | 300 K |
-| 离子 | “0.1 M KCl” | 0.15 M NaCl |
-| 体系设置 | “用 Amber ff19SB”“pH 6”“先用 PROPKA 检查质子化” | CHARMM36m、pH 7 |
-| 保存位置 | “结果存到 /data/me/md” | 项目里的 `runs/<运行名>/` |
-| 结构稳定性的精度 | “RMSD 平均值的误差不超过 0.03 nm” | 0.02 nm（RMSD 和 Rg 平均值的区间半宽） |
-| 什么算离开起始结构 | “RMSD 超过 0.25 nm 算展开” | 0.3 nm |
-| 聚类的阈值 | “聚类阈值 0.2 nm” | 0.15 nm |
+| Precision | "error at most 5 %" | 0.05 (populations) |
+| Limits | "at most 4 replicas of 500 ns" | 10 replicas × 2 µs (stops early when done) |
+| Method | "plain MD only", "use adaptive sampling" | Agent's choice. It asks before switching method. |
+| Permission to switch method | "switch to enhanced sampling if plain MD fails" | Suggest only, and wait for you |
+| Temperature | "at 310 K" | 300 K |
+| Ions | "0.1 M KCl" | 0.15 M NaCl |
+| Force field, pH, protonation | "Amber ff19SB", "pH 6", "check protonation with PROPKA first" | CHARMM36m, pH 7 |
+| Save location | "save results to /data/me/md" | `runs/<run name>/` |
+| Stability precision | "RMSD error at most 0.03 nm" | 0.02 nm |
+| "Left the start structure" | "RMSD above 0.25 nm counts as unfolded" | 0.3 nm |
+| Clustering cutoff | "cluster cutoff 0.2 nm" | 0.15 nm |
 
-**可以直接改着用的例子：**
+**Examples to adapt:**
 
-| 想做什么 | 这样说 |
+- *Side chains:* "Download 3HTB and look at the side chains within 5 Å of ligand JZ4. Switch to enhanced sampling if plain MD fails."
+- *Salt bridge:* "Download 1UBQ (reference UniProt P0CG48, charged termini). Look at the distance between Lys11 NZ and Glu34 CD; within 0.45 nm counts as formed. Error at most 5 %."
+- *Backbone:* "Use my file /data/me/protein.pdb. Estimate the Ramachandran basin populations, transitions and φ/ψ free-energy surface of A:45 to A:48. At most 6 replicas of 200 ns."
+- *Stability:* "Download 1YRF and check the stability of the whole protein: backbone RMSD, radius of gyration, free-energy surface and clusters. At most 3 replicas of 200 ns."
+- *Wait for a change:* "Download 181L. Stop once the Val111 side chain reaches t and stays for 100 ps. At most 20 ns per replica; continue despite structure problems."
+- *Fixed plan:* "Download 1UBQ (reference UniProt P0CG48, charged termini) and look at the side chain of A:26. Plain MD only, exactly 3 replicas of 10 ns."
+
+## How the agent saves compute
+
+- **It checks as it runs.** After each segment, the agent computes every result and its error. The error estimate accounts for correlation between frames, so many frames do not fake precision.
+- **It stops when done.** It stops when every result reaches your precision and every replica has switched states often enough.
+- **It picks the cheaper fix: extend or add replicas.** If the replicas disagree, extending them does not help, so the agent adds replicas. Otherwise it extends the existing ones, because each new replica needs its own equilibration.
+- **It drops the start that has not equilibrated.** Automatic detection removes the initial relaxation from the crystal structure. It does this only when the data clearly support the cut.
+- **It gives up early when it must.** If a change is too slow to observe within your limits, the agent stops and reports *insufficient evidence*. It makes this decision only when even the fastest rate the data allow would not fit. It then suggests another method or larger limits.
+- **It does not wait for items that never change.** If all other results are done and only items that never changed remain, the agent stops plain MD. It then suggests enhanced sampling for those items, or switches to it if you allowed that.
+- **Your limits are ceilings.** The agent may use less, but never more. Extending past the limits or switching method needs your confirmation.
+
+This is the default behaviour. With a fixed plan, adaptive sampling, or a "watch for a change" goal, the agent still checks every segment, but it only suggests extending or adding replicas.
+
+**Insufficient evidence is an answer too.** It means your limits do not give enough data for the precision you asked for. The report says why and what to try next.
+
+**Stability counts as done** when RMSD and Rg no longer drift and their means are precise enough. "No drift" means the second half of each replica agrees with the first half. A structure that never left its start state might still leave later. For that case, the report gives an upper bound, for example *"at most 0.01 departures per µs"*. Only longer runs lower that bound.
+
+**Biased results are corrected.** Enhanced sampling is reweighted (Tiwary–Parrinello) and adaptive sampling goes through a Markov state model before populations are reported. Rates come only from plain MD, because the bias changes the dynamics.
+
+## How long a run takes
+
+Replicas run one after another on one GPU. So the run time is the total simulated time divided by your GPU's speed. For example, 1UBQ (17 k atoms) runs at about 850 ns/day on an RTX 4090, and 181L (35 k atoms) at about 470 ns/day on a consumer GPU.
+
+- Fast questions, such as surface side chains and most backbone conformations, usually finish within hours to a day.
+- Slow changes can take much longer. The default limit of 10 × 2 µs can mean weeks in the worst case.
+- **For a new system, start small.** Add *"at most 3 replicas of 100 ns"*, which is less than a day on a recent GPU. Later you can say *"extend run1 to 500 ns"* or *"add 2 replicas to run1"*.
+
+## During a run
+
+Talk to the agent in the same chat: *"How far is run1?"*, *"stop run1"*, *"continue run1 with enhanced sampling"*, *"add 2 replicas to run1"*, *"extend run1 to 50 ns"*, *"where are run1's trajectories?"*. Starting, stopping and continuing always show a card first.
+
+Terminal commands that do not call the language model: `/runs` lists the runs, `/report` shows the latest report, `/last` shows the previous reply, `/new` starts a new chat, and `/quit` leaves the chat (simulations keep running).
+
+## What you get
+
+Each run has a folder, `runs/<run name>/` by default. The report is `report.en.md` (Chinese: `report.zh.md`). It covers:
+
+- the question and the precision you asked for;
+- what was simulated, and the total compute used;
+- every result with its error, and whether it met your precision;
+- each decision the agent made, and why it stopped;
+- the limitations and the open questions.
+
+The folder also holds:
+
+- the trajectories `replica_<i>_part<k>.dcd`, with protein atoms only; use `protein.pdb` as the topology;
+- the backbone free-energy plots `landscape_*.svg`;
+- the stability results in `stability/` (`rmsd_rg.svg`, `fes_rmsd_rg.svg` and data tables);
+- the clusters in `clusters/`, with one representative structure `cluster_<k>.pdb` per cluster for PyMOL or VMD.
+
+The files stay on the computer that ran the simulation. In the web chat, the run card shows the computer name and full path, with download links.
+
+| Stop reason | Meaning |
 |---|---|
-| 侧链构象 | 下载 3HTB，看配体 JZ4 周围 5 Å 内的侧链构象。普通 MD 不行的话可以自己换增强采样。 |
-| 盐桥会不会断开 | 下载 1UBQ（参考序列用 UniProt P0CG48，两端保持带电），看 Lys11 的 NZ 和 Glu34 的 CD 之间的距离，0.45 nm 以内算连着。误差不超过 5%。 |
-| 主链构象和自由能面 | 用我的文件 /data/me/protein.pdb，估计 A:45 到 A:48 的 Ramachandran 构象区比例、转变统计和 φ/ψ 自由能面。最多 6 条、每条最多 200 ns。 |
-| 结构稳定性 | 下载 1YRF，看整个蛋白的结构稳定性：骨架 RMSD、回转半径、自由能面和构象聚类。最多 3 条、每条最多 200 ns。 |
-| 等一个变化发生 | 下载 181L，看 Val111 的侧链会不会转到 t 构象，看到并停留 100 ps 就停。每条最多 20 ns，结构检查有问题也继续。 |
-| 按你自己的方案跑 | 下载 1UBQ（参考序列用 UniProt P0CG48，两端保持带电），看 A:26 的侧链构象。只用普通 MD，正好跑 3 条，每条 10 ns。 |
+| Target reached | Every result met your precision. You can quote the results for this force field and these conditions. |
+| Insufficient evidence / stalled | This method cannot give a reliable answer within your limits. The report suggests the next step. |
+| Not reachable | Things change, but at this rate the time needed is far beyond your limits. |
+| Budget used up | The limits ran out before the precision was reached. |
+| Failed | The error is in the report and the chat. The run can continue after the fix. |
 
-如果你的话不够清楚（例如没说残基编号），agent 会先问你，不会猜。
+## How the system is built
 
-## agent 怎样节省计算
+You do not need to set any of this, but you should know what happens:
 
-下面几条默认全部生效。只有你把方案说死（例如“正好跑 3 条，每条 10 ns”），或者用自适应采样、或者只想看到某个变化时，agent 才按固定方案一段一段地跑：它仍会边跑边检查，但加轨迹、加长只建议，等你确认。
+- **Structure check.** The agent compares the structure with the UniProt reference sequence. It looks for tags, duplicate chains, metal ions, missing segments and chain breaks. If it finds a problem, it stops and asks you.
+- **Ligands are removed.** The built-in force fields have no ligand parameters. To keep a ligand, prepare a solvated Amber system yourself with tleap. Then give the paths of the `.prmtop` and `.inpcrd` files, and the agent uses them as they are.
+- **Defaults.** CHARMM36m with TIP3P water, pH 7, 0.15 M NaCl, a cubic box with at least 1.0 nm of padding, and 300 K. Each replica is equilibrated for 600 ps, with backbone restraints released step by step. A chain end gets a neutral cap if the real protein continues past it. Otherwise it stays charged.
 
-- **边跑边检查。** 每跑一段，agent 就算一次每个结果的比例和误差。误差的算法考虑了相邻帧之间的相关性，所以不会因为帧多就误以为很精确。
-- **够了就停。** 每个结果都达到你要的精度，而且每条轨迹都在状态之间来回了足够多次时，agent 就停下，不会跑满上限。
-- **在“加长”和“加轨迹”之间选更省的。** 如果几条轨迹给出的结果彼此不一致，再加长也没用，agent 会加新的轨迹；否则它把现有轨迹加长。每条新轨迹都要重新平衡，所以只有必要时才加。
-- **跑不出来就早说。** 有的结构变化太慢，在你的上限内普通 MD 根本看不到足够多次。agent 会估计一下，即使按数据允许的最快速度，剩下的时间也不够，就停下，告诉你“证据不足”，并建议换方法或提高上限。这样你不会白白等几天。
+You can change any of these choices in your sentence. If you ask for a value that is already the default, the agent tells you so.
 
-- **其他都好了，就不为一个“不动”的项目空等。** 有时其他结果都已经够精确，只剩一两个项目从头到尾一次都没变化（例如埋在里面的侧链）。这时 agent 直接停下普通 MD，告诉你是哪几个项目，并建议对它们改用增强采样（侧链和主链构象可以用）。你允许它自己换方法时，它会直接转过去。
-- **丢掉开头没平衡的部分。** 轨迹刚开始时，结构还在从晶体结构弛豫。agent 用自动检测找出这一段，不把它算进结果；只有数据充分时才丢，避免误删。
-- **你定的是上限。** agent 可以少用，但不会自己超过你给的重复数和长度。超过上限、换方法，都要你确认。
+## Troubleshooting
 
-**“证据不足”也是一个结论。** 它的意思是：在你给的上限内，数据撑不起你要的精度。报告会写明原因和建议，例如“这个侧链一次都没翻转，建议改用增强采样”。
-
-**结构稳定性什么时候算“够了”。** 两个条件都要满足：RMSD 和 Rg 已经不再漂移（每条轨迹后半段和前半段的平均值，差别在误差范围内也足够小），而且平均值的误差够小。结构在整个模拟里一直没离开起始结构，并不能证明它永远不离开。所以报告会写出一个上限，例如“离开的速率不超过每 µs 0.01 次”。想把这个上限压低，只能跑得更久。
-
-**偏置方法得到的结果会校正。** 增强采样和自适应采样会故意让模拟去平时不常去的地方。所以 agent 不直接数时间，而是先去掉偏置的影响（增强采样用 Tiwary–Parrinello 重新加权，自适应采样用马尔可夫状态模型），再给出比例。增强采样改变了运动的快慢，所以转变速率只来自普通 MD。
-
-## 一次运行要多久
-
-这取决于体系大小、GPU 速度，以及你要看的变化有多快。几条轨迹在同一块 GPU 上依次跑，所以总时间等于所有轨迹的长度加起来，除以 GPU 每天能跑多少 ns（见下面“速度参考”）。
-
-- 变化快的问题（表面侧链、大多数残基的主链构象），通常几小时到一天就够精确了，agent 会自己停下。
-- 变化慢的问题可能跑很久。默认上限是 10 条 × 2 µs，最坏情况下要几周。
-- **第一次用一个新体系时，建议先限制规模。** 在句子里加上“最多 3 条、每条最多 100 ns”，这样最多跑 300 ns，在一块较新的 GPU 上不到一天。看过报告后，觉得需要，再说“把 run1 加长到 500 ns”或“给 run1 加 2 条轨迹”。
-- agent 每次做决定时都会在对话里说明下一步打算跑多长，你随时可以说“停止 run1”。
-
-## 运行中可以做什么
-
-在同一个对话里用平常的话说就行：
-
-- “run1 跑到哪了？”
-- “停止 run1”
-- “继续 run1，改用增强采样”
-- “给 run1 加 2 条轨迹”“把 run1 加长到 50 ns”
-- “run1 的轨迹在哪？”
-
-开始、停止、继续都会先给你一张卡片，确认后才执行。终端里还有几个不调用语言模型的命令：`/runs` 列出所有运行，`/report` 查看最近的报告，`/last` 翻看上一条回复，`/new` 开新对话，`/quit` 退出（模拟不会停）。
-
-## 你会得到什么
-
-每个运行有一个文件夹，默认是 `runs/<运行名>/`。最重要的是报告 `report.zh.md`（英文版 `report.en.md`），里面写明：
-
-- 你问了什么，要求多精确；
-- 模拟了什么：体系、力场、几条轨迹、各多长、一共用了多少计算量；
-- 每个结果的数值和误差，以及是否达到你要的精度；
-- agent 每一步做了什么决定，为什么停下；
-- 结果的可信度和限制，以及还剩什么问题。
-
-其他文件包括轨迹（`replica_<i>_part<k>.dcd`，只含蛋白原子，拓扑用 `protein.pdb`）、主链构象的自由能面图（`landscape_*.svg`）和数据表。结构稳定性的结果在 `stability/`（RMSD 和 Rg 随时间的图 `rmsd_rg.svg`、RMSD–Rg 自由能面 `fes_rmsd_rg.svg` 和数据表）；构象聚类在 `clusters/`（每一类的代表结构 `cluster_<k>.pdb`，可以用 PyMOL 或 VMD 打开）。文件保存在跑模拟的那台电脑上。网页的运行卡片上写着电脑名和完整路径，也有下载链接。
-
-**停下的原因：**
-
-| 原因 | 意思 |
-|---|---|
-| 达到目标 | 所有结果都达到了你要的精度。可以作为这个力场和条件下的结果引用。 |
-| 证据不足 / 采样停滞 | 在你的上限内，这种方法得不到可靠的答案。报告会建议下一步。 |
-| 上限内达不到 | 有变化，但照现在的速度，需要的时间远超你的上限。 |
-| 预算用完 | 跑满了上限，还没达到精度。 |
-| 运行出错 | 错误写在报告和对话里，修好后可以继续。 |
-
-## 体系是怎样搭的
-
-你不需要设置这些，但应该知道它做了什么：
-
-- **结构检查：** 先把结构和 UniProt 参考序列比对，找标签、多拷贝、金属离子、缺失片段和断链。有问题时 agent 会停下，给你看检查报告，等你决定（例如“只保留 A 链”，或者“有问题也继续”）。
-- **配体会被去掉。** 程序自带的力场没有配体参数，所以用 PDB 输入时只模拟蛋白。需要保留配体时，要自己用 tleap 准备好 Amber 体系（已加水，带周期性盒子），然后在对话里说出 `.prmtop` 和 `.inpcrd` 两个文件的路径，agent 会原样使用。
-- **默认设置：** CHARMM36m 力场和 TIP3P 水，pH 7，0.15 M NaCl，立方水盒子（蛋白到盒子边至少 1.0 nm），300 K。每条轨迹先平衡 600 ps（逐步撤掉对骨架的约束）。链的两端：如果真实蛋白在这里还没结束，就加中性帽；否则保留带电的末端。
-- **速度参考：** 1UBQ（约 1.7 万个原子）在一块 RTX 4090 上每天约 850 ns；181L（约 3.5 万个原子）在一块消费级 GPU 上每天约 470 ns。
-
-影响结论的选择（温度、离子、力场、pH、质子化、末端）都可以在那句话里改。你要求的值正好是默认值时，agent 会直接告诉你“已满足”。
-
-## 常见问题
-
-**运行 `mdagent start` 时报 `No module named 'mdagent'`：** 你移动过、重新克隆过项目文件夹，或者换了文件夹。`mdagent` 命令记着原来文件夹的位置，原文件夹不在了就找不到代码。在现在的项目文件夹里重新安装一次：
+**`No module named 'mdagent'` when running `mdagent start`.** The project folder was moved or cloned again. Reinstall in the current folder:
 
 ```bash
 conda activate mdagent && python -m pip install -e .
 ```
 
-**CUDA 报 `CUDA_ERROR_UNSUPPORTED_PTX_VERSION`：** conda 装的 CUDA 组件比显卡驱动新。运行 `nvidia-smi`，看第一行的 CUDA 版本（例如 13.3），然后运行下面的命令，把版本号换成你看到的：
+**`CUDA_ERROR_UNSUPPORTED_PTX_VERSION`.** The CUDA packages are newer than your driver. Run `nvidia-smi`, read the CUDA version in the first line (for example 13.3), and run this command with your version:
 
 ```bash
 conda install -c conda-forge cuda-version=13.3 --solver=libmamba
 ```
 
-**conda 一直停在 “Collecting package metadata”：** 你的 conda 可能用的是很慢的旧求解器。在 `conda env create` 后面加上 `--solver=libmamba`。
+**conda hangs at "Collecting package metadata".** Add `--solver=libmamba` to `conda env create`.
 
-**安装时提示 “Defaulting to user installation” 并失败：** 请用 `python -m pip`，不要直接用 `pip`。
+**"Defaulting to user installation" and the install fails.** Use `python -m pip`, not `pip`.
 
-**模拟或测试随机出现 “Segmentation fault”：** 可能是 CPU 有不稳定的核（一些 Intel 13、14 代 CPU 有这个问题）。运行下面的命令，它会找出坏核，并给出只用好核的 `taskset -c ...` 命令：
+**Random "Segmentation fault".** Some CPU cores may be unstable, which is a known problem on some Intel 13th and 14th generation CPUs. This script finds the bad cores and prints a `taskset -c ...` command that avoids them:
 
 ```bash
 python scripts/find_bad_cores.py
 ```
 
-**在 tmux 里滚动鼠标，滚的是输入记录：** 用 `/last` 看上一条回复，或者运行 `tmux set -g mouse on`。
+**Scrolling in tmux scrolls the input history.** Use `/last`, or run `tmux set -g mouse on`.
 
-**更新代码后网页没变：** 在原来的终端按 Ctrl+C 停掉对话服务，再运行 `mdagent start`。这只停对话，不停模拟。
+**The web page did not change after an update.** Press Ctrl+C in the chat terminal and run `mdagent start` again. This stops only the chat, not the simulations.
 
-**会用掉很多 Claude 或 ChatGPT 的额度吗？** 不会。你每说一句话，程序只调用一次语言模型。语言模型只负责把你的话翻译成设置，看不到你的文件，也不能运行任何命令。所有模拟和分析都由 MDAgent 自己的程序完成。
+**Does it use a lot of Claude or ChatGPT quota?** No. Each sentence calls the language model once. The model only translates your sentence into settings. It cannot see your files or run commands. All simulation and analysis is done by MDAgent itself.
 
-**我想直接用命令行：** 每张确认卡片上都有完整的 `mdagent run ...` 命令，可以复制下来自己运行。所有选项见 `mdagent run --help` 和 [docs/developer.md](docs/developer.md)。
+**I prefer the command line.** Every confirmation card shows the full `mdagent run ...` command. See `mdagent run --help` and [docs/developer.md](docs/developer.md) for all options.
 
-## 反馈问题
+## Feedback
 
-在 GitHub 上开一个 Issue，选“问题报告”模板。请写明你在对话里说了什么，并附上日志文件 `runs/<运行名>.log`。日志第一行写着 MDAgent 的版本号，报告开头也有。参加测试的步骤见 [TESTING.md](TESTING.md)。
+Open a GitHub issue with the "Problem report" template. Include your sentence and the log `runs/<run name>.log`. Its first line gives the MDAgent version. To join the test, see [TESTING.md](TESTING.md).
 
-## 给开发者
+## For developers
 
-- [docs/developer.md](docs/developer.md)：所有选项、算法细节、预算对照、实验 A 和验证方案。
-- [docs/architecture.md](docs/architecture.md)：架构、评估计划和审稿后的修改。
-- 测试：`pytest -q tests -m "not slow"`（约 3 分钟）；`pytest -q tests`（包括在 CPU 上跑真实 MD，约 15 分钟）。
+- [docs/developer.md](docs/developer.md): all options, algorithms, budget comparisons, experiment A and validation.
+- [docs/architecture.md](docs/architecture.md): architecture, evaluation plan and revisions.
+- Tests: `pytest -q tests -m "not slow"` (about 3 minutes); `pytest -q tests` (includes real MD on the CPU, about 15 minutes).
 
-## 许可证
+## License
 
-MIT 许可证，见 `LICENSE`。
+MIT, see `LICENSE`.
