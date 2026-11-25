@@ -1,4 +1,4 @@
-# Testing MDAgent (version 0.1.0b1, closed beta)
+# Testing MDAgent (version 0.1.0b2, closed beta)
 
 Thank you for helping. MDAgent runs molecular dynamics from one sentence. You say what you want to know. The agent builds the system, runs and analyses the simulations, stops when the answer is reliable, and gives you a report. Its goal is to run no unnecessary simulation.
 
@@ -15,6 +15,13 @@ This test asks three questions:
 - a Linux computer with an NVIDIA GPU and conda;
 - Claude Code or Codex, installed and logged in with your own account;
 - a GitHub account. Send your username to the person who invited you. You need it to accept the invitation and to send feedback.
+
+**New in 0.1.0b2** (if you tested 0.1.0b1, update as in "Update before each test"):
+
+- **Structural stability:** ask whether a protein or a region stays folded. You get backbone RMSD, radius of gyration, an RMSD–Rg free-energy surface and conformational clusters. "Stable" means the structure was watched long enough: by default the rate of leaving the start structure is at most 10 per µs (about 300 ns in total). You can add clustering to any other question too.
+- **Temperature** can be set in your sentence (default 300 K).
+- **Fixed:** the agent could discard the part of a trajectory with the most changes and then run much longer than needed. On a real test run this halved the compute.
+- **Clearer messages:** when the agent runs longer, it now names the item and the replica that hold it back.
 
 ## Step 1: Accept the invitation and install
 

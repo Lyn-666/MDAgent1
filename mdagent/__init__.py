@@ -2,7 +2,7 @@
 
 import warnings
 
-__version__ = "0.1.0b1"   # first test release (closed beta, 2026-11-23)
+__version__ = "0.1.0b2"   # second test release (closed beta, 2026-11-25)
 
 # NMR structures (for example 1ZDD) have a placeholder unit cell in the PDB file. mdtraj warns and
 # ignores it, which is the right thing to do; the warning only confuses users. MDAgent builds its own box.

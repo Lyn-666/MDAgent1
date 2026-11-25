@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mdagent"
-version = "0.1.0b1"
+version = "0.1.0b2"
 description = "MD agent that finds and fixes poorly sampled side chains in a target region"
 requires-python = ">=3.10"
 license = {text = "MIT"}
