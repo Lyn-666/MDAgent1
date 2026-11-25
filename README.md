@@ -1,69 +1,271 @@
-# MDAgent: molecular dynamics from one sentence
+# MDAgent: Molecular Dynamics from a Single Sentence
 
-Tell MDAgent what you want to know, for example, *"Which rotamers do the side chains around this ligand take?"*. It fetches and checks the structure, builds the system, runs the simulations, and analyses them as they run. It stops as soon as the answer is reliable and writes a report.
+**An autonomous, uncertainty-aware agent for molecular dynamics simulations.**
 
-Its main goal is **no wasted simulation**. It starts with 3 short replicas. Then it decides whether to extend them, add replicas, or stop. If plain MD cannot answer within your limits, it says so and suggests another method. It never exceeds your limits. The default limit is 10 replicas × 2 µs.
+Describe what you want to learn about a molecular system in natural language. MDAgent handles structure retrieval, system preparation, simulation execution, trajectory analysis, and scientific reporting — all within your specified computational budget.
 
-## What it answers
+Unlike conventional MD workflows that require predefined simulation lengths and replica counts, MDAgent continuously evaluates simulation progress and statistical uncertainty to determine whether additional sampling is needed.
 
-| Question | You get |
+**The goal is simple: simulate only as much as necessary to answer your scientific question.**
+
+## Key Features
+
+- **Natural language interface** — Describe your scientific question without writing simulation scripts or configuration files.
+- **Automated MD workflow** — Retrieve and validate structures, prepare molecular systems, execute simulations, and analyze trajectories.
+- **Uncertainty-aware decision-making** — Evaluate statistical convergence and sampling adequacy throughout the simulation.
+- **Dynamic resource allocation** — Decide whether to extend existing trajectories, launch additional replicas, or terminate sampling.
+- **Intelligent sampling strategy** — Identify sampling bottlenecks and recommend or initiate alternative sampling methods when permitted.
+- **Budget-aware execution** — Respect user-defined limits on simulation length and replica count.
+- **Transparent scientific reporting** — Document results, uncertainties, methodological decisions, and stopping criteria.
+- **Human-in-the-loop control** — Review simulation plans, monitor progress, and intervene at any time.
+
+## How It Works
+
+MDAgent transforms a natural language scientific question into an iterative, evidence-driven simulation workflow:
+
+1. **Understand** — Interpret the scientific question, identify target observables, and establish sampling requirements.
+2. **Prepare** — Retrieve or load the molecular structure, validate the system, and prepare simulation inputs.
+3. **Plan** — Propose simulation protocols, analysis methods, convergence criteria, and computational limits.
+4. **Simulate** — Launch an initial set of independent MD replicas.
+5. **Analyze** — Monitor target observables, statistical uncertainty, conformational transitions, and sampling progress.
+6. **Decide** — Extend trajectories, allocate additional replicas, recommend alternative sampling methods, or stop.
+7. **Report** — Summarize scientific findings, remaining uncertainties, computational costs, and the rationale behind each decision.
+
+By default, MDAgent starts with three short independent replicas and iteratively allocates additional sampling based on the accumulated evidence.
+
+The default computational limit is 10 replicas, each with a maximum simulation length of 2 µs. Users can override these limits according to their scientific objectives and available resources.
+
+## Supported Scientific Questions
+
+| Scientific Question | Analysis and Output |
 |---|---|
-| Side-chain conformations | chi1 populations (g+, t, g−) with errors |
-| A distance between two atoms (salt bridge, pocket opening) | Populations of the "near" and "far" states |
-| Backbone conformations | Ramachandran basin populations, transition rates, and a φ/ψ free-energy surface |
-| Whether a change happens | When and in which replica it is seen. The run stops once it is seen. |
-| Structural stability | RMSD and radius of gyration: whether they are steady, their means, an RMSD–Rg free-energy surface, and conformational clusters. "Stable" means the structure was watched long enough: by default, at most 10 departures per µs (about 300 ns in total). Say *"stable for 1 µs"* for a stricter check. |
+| Which side-chain conformations are populated? | χ1 rotamer populations (g+, t, g−) with uncertainty estimates. |
+| How does an interatomic distance fluctuate? | Distance distributions and populations of near and far states, applicable to salt bridges, pocket opening, and other structural interactions. |
+| Which backbone conformations are sampled? | Ramachandran basin populations, transition rate estimates, and φ/ψ free-energy surfaces, where sampling is sufficient. |
+| Does a specific conformational transition occur? | The first observed transition time and the corresponding replica. Sampling can terminate once the predefined event is observed. |
+| Does the structure remain stable? | RMSD, radius of gyration, structural stability assessment, RMSD–Rg free-energy surfaces, and conformational clustering. |
 
-Plain MD is the default. When a conformation does not change, the agent can switch to enhanced sampling (metadynamics, with the bias removed afterward). Adaptive sampling is optional. MDAgent does not compute binding free energies.
+For structural stability assessments, MDAgent evaluates both structural fluctuations and the amount of accumulated sampling. By default, the stability criterion corresponds to a target upper departure rate of 10 events per µs, requiring approximately 300 ns of aggregate observation when no departures are detected under the assumed event-rate model.
 
-## Install
+More stringent requirements can be specified directly in natural language, for example:
 
-You need Linux with an NVIDIA GPU, conda, and [Claude Code](https://claude.com/claude-code) or [Codex](https://chatgpt.com/) with your own login. You do not need an API key.
+> Assess structural stability over a 1 µs timescale.
+
+### Supported Sampling Methods
+
+- **Conventional molecular dynamics (MD)** — The default sampling method.
+- **Enhanced sampling** — Metadynamics with reweighting for supported equilibrium observables.
+- **Adaptive sampling** — Optional sampling strategy.
+
+When conventional MD fails to provide sufficient evidence within the allocated budget, MDAgent identifies the sampling limitation and recommends an appropriate alternative when supported.
+
+MDAgent currently does not support binding free-energy calculations.
+
+## Installation
+
+### Requirements
+
+- Linux
+- NVIDIA GPU with CUDA support
+- Conda
+- [Claude Code](https://claude.com/claude-code) or [Codex](https://chatgpt.com/) with an authenticated account
+
+No separate API key is required when using the supported authenticated CLI backends.
+
+### 1. Clone the Repository
 
 ```bash
-git clone https://github.com/Lyn-666/MDAgent1.git && cd MDAgent1
+git clone https://github.com/Lyn-666/MDAgent1.git
+cd MDAgent1
 ```
 
+### 2. Create the Environment
+
 ```bash
-conda env create -f environment.yml && conda activate mdagent && python -m pip install -e .
+conda env create -f environment.yml
+conda activate mdagent
+python -m pip install -e .
 ```
+
+### 3. Verify the Installation
 
 ```bash
 python -m openmm.testInstallation
 ```
 
-The CUDA line of the last command should say "Successfully computed forces".
+Confirm that the CUDA platform reports:
 
-## Example
-
-```bash
-conda activate mdagent && mdagent start
+```text
+Successfully computed forces
 ```
 
-Choose a language, a language model and a web or terminal chat. The web chat is at `http://localhost:8765`. Then type one sentence that names **the system** (a PDB ID or file) and **the question**:
+## Quick Start
 
-- *"Download 3HTB and look at the side chains within 5 Å of ligand JZ4."*
-- *"Use /data/me/protein.pdb. Backbone conformations of A:45 to A:48. At most 3 replicas of 100 ns."*
-- *"Download 1YRF and check whether the whole protein stays folded."*
+Launch MDAgent:
 
-The agent first checks the structure and asks you if something is wrong. Then it shows its plan. Nothing runs until you confirm. The simulation runs in the background, so you can close the chat. Later, ask in the chat: *"How far is run1?"*, *"stop run1"*, *"add 2 replicas to run1"*.
+```bash
+conda activate mdagent
+mdagent start
+```
 
-You can also set these in your sentence: precision, limits, a fixed plan ("exactly 3 replicas of 10 ns"), permission to switch method, temperature (default 300 K), ions (0.15 M NaCl), force field (CHARMM36m), pH (7), and the save folder. If something is unclear, the agent asks instead of guessing.
+Select your preferred language, language model, and interaction interface.
 
-**Tips:**
+MDAgent supports both terminal-based interaction and a local web interface:
 
-- For a new system, add *"at most 3 replicas of 100 ns"*. That is less than a day on a recent GPU.
-- Add *"development test"* to check the whole workflow in a few minutes.
-- Ligands are removed. To keep one, give the paths of a prepared Amber system (`.prmtop` and `.inpcrd`).
+http://localhost:8765
 
-## Results
+To start a simulation, describe your molecular system and scientific question in natural language.
 
-Each run has a folder, `runs/<run name>/`. The report `report.en.md` gives every result with its error, whether it met your precision, each decision the agent made, why it stopped, and the compute it used. The Chinese version is `report.zh.md`. The folder also holds the trajectories (`replica_*.dcd`, with `protein.pdb` as topology), plots and data tables.
+### Example 1: Side-Chain Conformations Near a Binding Site
 
-"Insufficient evidence" is a valid answer. It means your limits did not give enough data for the precision you asked for, and the report suggests what to do next.
+> Download 3HTB and characterize the side-chain rotamer populations of residues within 5 Å of ligand JZ4.
 
-## More
+### Example 2: Backbone Conformational Sampling
 
-- [TESTING.md](TESTING.md): how to join the beta test and send feedback.
-- [docs/developer.md](docs/developer.md): all options, algorithms, and validation.
-- License: MIT.
+> Use /data/me/protein.pdb to investigate the backbone conformations of residues A:45–A:48. Use at most 3 replicas of 100 ns each.
+
+### Example 3: Structural Stability
+
+> Download 1YRF and assess whether the protein remains structurally stable throughout the simulation.
+
+### Example 4: Automated Sampling Strategy
+
+> Investigate the conformational populations of the selected residues using conventional MD. If sampling is insufficient, recommend an alternative sampling strategy before exceeding the computational budget.
+
+MDAgent first validates the molecular structure and requests clarification if necessary. It then presents a proposed simulation plan for your approval.
+
+**No simulation is launched until you confirm the plan.**
+
+Once launched, simulations continue independently of the chat interface. You can return later to monitor or modify the workflow using natural language:
+
+- "What is the current status of run1?"
+- "Show the latest convergence analysis for run1."
+- "Add two replicas to run1."
+- "Stop run1."
+
+## Simulation Configuration
+
+Simulation parameters and scientific requirements can be specified directly in natural language.
+
+| Parameter | Default or Supported Configuration |
+|---|---|
+| Sampling method | Conventional MD |
+| Initial replicas | 3 |
+| Maximum replicas | 10 |
+| Maximum simulation length per replica | 2 µs |
+| Temperature | 300 K |
+| Ionic concentration | 0.15 M NaCl |
+| Force field | CHARMM36m |
+| System preparation pH | 7.0 |
+| Sampling precision | Configurable |
+| Method switching | Subject to user authorization |
+| Output directory | Configurable |
+
+### Fixed Simulation Protocol
+
+You can request a predefined simulation protocol:
+
+> Run exactly 3 independent replicas of 100 ns each using CHARMM36m at 310 K.
+
+### Autonomous Resource Allocation
+
+Alternatively, allow MDAgent to dynamically allocate computational resources:
+
+> Estimate the conformational populations with sufficient statistical precision. Decide how to allocate simulation time and replicas, but do not exceed my computational budget.
+
+### User-Controlled Sampling Strategy
+
+You can explicitly specify whether MDAgent is allowed to change the sampling method:
+
+> Start with conventional MD. If sampling is insufficient, recommend enhanced sampling and ask for my approval before switching methods.
+
+Alternatively:
+
+> Automatically select an appropriate sampling strategy to achieve the requested precision within my computational budget.
+
+When required information is missing or ambiguous, MDAgent requests clarification rather than silently making assumptions.
+
+## When Does MDAgent Stop?
+
+MDAgent terminates sampling when one of the following conditions is met:
+
+- **Target reached:** The requested event or scientific objective has been achieved.
+- **Sufficient evidence:** The predefined statistical precision and sampling requirements have been satisfied.
+- **Sampling stalled:** A sampling bottleneck is detected, and further conventional MD may be inefficient under the current allocation.
+- **Budget exhausted:** The user-defined computational limit has been reached.
+- **User intervention:** The user explicitly requests termination.
+
+The stopping decision is accompanied by a documented scientific justification.
+
+Importantly, MDAgent distinguishes between obtaining a sufficiently supported result and simply completing a predefined simulation length.
+
+## Practical Considerations
+
+- For an initial investigation of a new molecular system, consider specifying a conservative computational budget, such as "at most 3 replicas of 100 ns each."
+- Include "development test" in your request to perform a short end-to-end workflow test.
+- Ligands are removed during default system preparation. Ligand-defined residue selections can be used to identify regions of interest, but simulations that retain ligands require a preparameterized system.
+- To simulate a ligand-containing system, provide prepared Amber topology and coordinate files (`.prmtop` and `.inpcrd`).
+- Actual simulation throughput depends on system size, hardware, and simulation settings.
+
+## Results and Reproducibility
+
+Each simulation run generates a dedicated output directory:
+
+```text
+runs/<run_name>/
+├── report.en.md
+├── report.zh.md
+├── protein.pdb
+├── replica_*.dcd
+└── ...
+```
+
+The scientific report includes:
+
+- Target observables and estimated values.
+- Statistical uncertainties and convergence assessments.
+- Whether the requested scientific and precision criteria were satisfied.
+- Simulation allocation and sampling decisions.
+- The rationale for terminating or continuing sampling.
+- Total computational resources used.
+- Remaining limitations and recommended next steps.
+
+Reports are available in both English and Chinese. Trajectories, structural files, analysis figures, and numerical results are retained for subsequent inspection and independent analysis.
+
+### Insufficient Evidence Is a Valid Result
+
+Not every scientific question can be answered within a finite simulation budget.
+
+If the available trajectories do not provide sufficient statistical or conformational sampling, MDAgent explicitly reports **INSUFFICIENT EVIDENCE** instead of presenting an unsupported conclusion.
+
+The report identifies the unresolved scientific question, explains the sampling limitations, and recommends potential next steps.
+
+## Project Philosophy
+
+Traditional MD workflows often require users to determine simulation lengths and replica counts before knowing how difficult the underlying sampling problem will be.
+
+This can lead to two common problems:
+
+- **Oversampling:** Computational resources are spent on simulations that have already satisfied the scientific objective.
+- **Undersampling:** Simulations terminate at a predefined length despite insufficient statistical evidence or inadequate conformational exploration.
+
+MDAgent takes a different approach: computational resources are allocated iteratively according to the scientific objective, accumulated evidence, and remaining uncertainty.
+
+Rather than asking:
+
+> How long should I run this simulation?
+
+MDAgent asks:
+
+> What additional sampling is necessary to answer this scientific question?
+
+The objective is not merely to automate molecular dynamics, but to make simulation workflows more scientifically informed, computationally efficient, transparent, and reproducible.
+
+## Documentation
+
+- [TESTING.md](TESTING.md) — Beta testing, example workflows, and feedback.
+- [Developer Documentation](docs/developer.md) — Configuration options, algorithms, decision-making mechanisms, and validation procedures.
+
+## License
+
+MDAgent is released under the MIT License.
