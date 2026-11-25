@@ -12,7 +12,7 @@ This test asks three questions:
 
 **You need:**
 
-- a Linux computer with an NVIDIA GPU and conda;
+- a Linux computer with an NVIDIA GPU and conda. The NVIDIA driver must support CUDA 12.6 or newer: `nvidia-smi` shows "CUDA Version: 12.6" or higher in its top line (driver 560 or newer). Step 1 checks this for you;
 - Claude Code or Codex, installed and logged in with your own account;
 - a GitHub account. Send your username to the person who invited you. You need it to accept the invitation and to send feedback.
 
@@ -39,15 +39,25 @@ gh auth login
 
 Choose GitHub.com → HTTPS → Yes (authenticate git with your GitHub credentials) → Login with a web browser. The screen shows an 8-character code and a web address. Open the address in a browser on any computer or phone, log in to GitHub, and enter the code. The server itself does not need a browser.
 
-**3. Download and install:**
+**3. Download the code and check this computer:**
 
 ```bash
 gh repo clone Lyn-666/MDAgent1 && cd MDAgent1
 ```
 
 ```bash
+bash scripts/install.sh --check
+```
+
+This only looks and installs nothing. It shows your GPUs and which CUDA version it will install. If it says the driver is too old, update the NVIDIA driver first (or ask your system administrator). If anything looks wrong, send its output to the person who invited you before you go on.
+
+**4. Install:**
+
+```bash
 bash scripts/install.sh && conda activate mdagent
 ```
+
+It reads your NVIDIA driver and GPU, installs CUDA components that match them, and checks at the end that OpenMM really runs on the GPU.
 
 ## Step 2: Check the installation
 
