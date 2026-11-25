@@ -174,11 +174,11 @@ def _stability_section(run_dir: Path, state: dict, T) -> list:
     L = [T("## 结构稳定性", "## Structure stability"), "",
          T(f"原子：{_selection_zh(s.get('selection', ''))}。参照：起始结构（`protein.pdb`），每帧先叠合再算 RMSD。"
            + ("每条轨迹开头 " if s.get('burn_in_ns') else "")
-           + (f"{s.get('burn_in_ns', 0):g} ns 被判为还没有平衡，没有算进结果（自动平衡检测）。" if s.get('burn_in_ns') else
+           + (f"{_ns(s.get('burn_in_ns', 0))} ns 被判为还没有平衡，没有算进结果（自动平衡检测）。" if s.get('burn_in_ns') else
               "自动平衡检测没有发现需要丢掉的开头，所有帧都算进了结果。"),
            f"Atoms: {s.get('selection', '')}. Reference: the starting structure (`protein.pdb`); every frame is "
            "superposed before the RMSD. "
-           + (f"The first {s.get('burn_in_ns', 0):g} ns of each replica were judged not yet equilibrated and left "
+           + (f"The first {_ns(s.get('burn_in_ns', 0))} ns of each replica were judged not yet equilibrated and left "
               "out (automated equilibration detection)." if s.get('burn_in_ns') else
               "Automated equilibration detection found no start to leave out, so every frame counts.")), "",
          T("| 量 | 平均值 ± 区间半宽 | 各条轨迹的平均值 | 后半段 − 前半段 | 稳态 | 判断 |",
@@ -238,13 +238,17 @@ def _cluster_section(run_dir: Path, T) -> list:
            "replicas. Open the representative structures in PyMOL or VMD."), "",
          T("| 簇 | 占比 ± 误差 | 出现在哪些轨迹 | 代表结构 |", "| Cluster | Population ± error | Replicas | Representative |"),
          "|---|---|---|---|"]
-    for k in c.get("clusters", []):
+    shown = [k for i, k in enumerate(c.get("clusters", [])) if i == 0 or k["population"] >= 0.01]
+    hidden = c.get("n_clusters", 0) - len(shown)
+    rest = 1.0 - sum(k["population"] for k in shown)
+    for k in shown:
         err = k.get("error")
         L.append(f"| {k['cluster']} | {k['population']:.0%}" + (f" ± {err:.0%}" if err is not None else "")
                  + f" | {', '.join(map(str, k['replicas_visiting']))} | `{k.get('pdb', '')}` |")
-    if c.get("rest_population"):
-        L.append(T(f"\n其余 {c['n_clusters'] - len(c['clusters'])} 个小簇合计占 {c['rest_population']:.0%}。",
-                   f"\nThe other {c['n_clusters'] - len(c['clusters'])} small clusters hold {c['rest_population']:.0%} together."))
+    if hidden > 0:
+        L.append(T(f"\n另外还有 {hidden} 个小簇（每个占比都不到 1%），合计占 {_pct(max(rest, 0.0))}。它们的代表结构在 `clusters/` 里。",
+                   f"\n{hidden} more small cluster{'s' if hidden > 1 else ''} (each below 1 %) hold "
+                   f"{_pct(max(rest, 0.0))} together; their representative structures are in `clusters/`."))
     L.append("")
     return L
 
@@ -258,12 +262,12 @@ def _decision_section(state: dict, T) -> list:
     start = notes.get("replicas_at_start", state.get("n_replicas"))
     budget = goal.get("budget_ns") or start * loop.get("max_ns", 0)
     L = [T("## agent 的决策", "## The agent's decisions"), "",
-         T(f"- **开始：** {start} 条重复，每条 {loop.get('first_ns', 0):g} ns。这一次查看只用来规划，不允许停，"
+         T(f"- **开始：** {start} 条重复，每条 {_ns(loop.get('first_ns', 0))} ns。这一次查看只用来规划，不允许停，"
            f"所以不消耗显著性水平。之后最多再看 {goal.get('stop_looks', 3)} 次，区间按这个次数校准。"
-           f"限制：总预算 {budget:g} ns，每条最多 {loop.get('max_ns', 0):g} ns，最多 {goal.get('max_replicas', 10)} 条。",
-           f"- **Start:** {start} replicas of {loop.get('first_ns', 0):g} ns. This look only plans and may not "
+           f"限制：总预算 {_ns(budget)} ns，每条最多 {_ns(loop.get('max_ns', 0))} ns，最多 {goal.get('max_replicas', 10)} 条。",
+           f"- **Start:** {start} replicas of {_ns(loop.get('first_ns', 0))} ns. This look only plans and may not "
            f"stop, so it spends none of alpha. After it, at most {goal.get('stop_looks', 3)} looks, with intervals "
-           f"calibrated for that many. Limits: {budget:g} ns in total, {loop.get('max_ns', 0):g} ns per replica, "
+           f"calibrated for that many. Limits: {_ns(budget)} ns in total, {_ns(loop.get('max_ns', 0))} ns per replica, "
            f"{goal.get('max_replicas', 10)} replicas.")]
     for a in notes.get("actions", []):
         if a.get("phase") == "plain_md":
@@ -274,17 +278,22 @@ def _decision_section(state: dict, T) -> list:
                    f"- **Stop:** {d['decision']}. {d['reason'][0].upper() + d['reason'][1:]}."))
     c = _cost(state)
     used = c.aggregate_ns
-    L += ["", T(f"**成本：** 生产 {used:g} ns（所有重复相加），加上平衡共 {c.compute_ns:g} ns"
+    L += ["", T(f"**成本：** 生产 {_ns(used)} ns（所有重复相加），加上平衡共 {_ns(c.compute_ns)} ns"
                 + (f"，实际用了 {c.measured_seconds / 3600:.1f} 小时" if c.measured_seconds else "")
                 + f"。用了预算的 {_pct(used / budget)}" + (f"，比把预算跑满省了 {_pct(1 - used / budget)}" if budget else "")
                 + "。这个节省是相对预算的，不是相对“达到同样准确度的固定方案”；后者要用实验 A 那样的基准测试才量得出。",
-                f"**Cost:** {used:g} ns of production (all replicas together), {c.compute_ns:g} ns with equilibration"
+                f"**Cost:** {_ns(used)} ns of production (all replicas together), {_ns(c.compute_ns)} ns with equilibration"
                 + (f", {c.measured_seconds / 3600:.1f} hours of wall-clock" if c.measured_seconds else "")
                 + f". That is {_pct(used / budget)} of the budget" + (f", {_pct(1 - used / budget)} less than running it out"
                                                                     if budget else "")
                 + ". The saving is against the budget, not against a fixed plan that reaches the same accuracy; "
                   "that needs a benchmark like experiment A.") if budget else "", ""]
     return L
+
+
+def _ns(x: float) -> str:
+    """A length for people: 75.4925 -> 75.5, 603.94 -> 604, 2000 -> 2000, 0.052425 -> 0.0524."""
+    return f"{x:.0f}" if x >= 100 else f"{x:.3g}"
 
 
 def _pct(x: float) -> str:
@@ -424,9 +433,9 @@ def write(run_dir: Path) -> list[Path]:
                        f"padding {setup.get('padding_nm', '?')} nm. Ligands were removed: the protein was simulated without them."))
         md = state.get("md", {})
         L.append(T(f"- 温度 {md.get('temperature_k', 300):g} K；普通 MD {state.get('n_replicas', '?')} 条重复，"
-                   f"每条 {sum(state.get('rounds_ns', [])):g} ns。",
+                   f"每条 {_ns(sum(state.get('rounds_ns', [])))} ns。",
                    f"- {md.get('temperature_k', 300):g} K; plain MD with {state.get('n_replicas', '?')} replicas of "
-                   f"{sum(state.get('rounds_ns', [])):g} ns each."))
+                   f"{_ns(sum(state.get('rounds_ns', [])))} ns each."))
         es = state.get("enhanced") or {}
         if (run_dir / "enhanced" / "populations.json").exists():
             pj = _load(run_dir / "enhanced" / "populations.json")
@@ -436,11 +445,11 @@ def write(run_dir: Path) -> list[Path]:
                        f"- Enhanced sampling (well-tempered metadynamics on {bias_en}) with {pj.get('n_replicas', '?')} "
                        f"replicas of {pj.get('ns_per_replica', '?')} ns; populations reweighted (Tiwary-Parrinello)."))
         c = _cost(state)
-        L.append(T(f"- 计算量：生产 {c.aggregate_ns:g} ns（所有重复相加），加上 {c.n_replicas} 条重复的平衡 "
-                   f"{c.overhead_ns:g} ns，合计 {c.compute_ns:g} ns"
+        L.append(T(f"- 计算量：生产 {_ns(c.aggregate_ns)} ns（所有重复相加），加上 {c.n_replicas} 条重复的平衡 "
+                   f"{_ns(c.overhead_ns)} ns，合计 {_ns(c.compute_ns)} ns"
                    + (f"，实际用了 {c.measured_seconds / 3600:.1f} 小时。" if c.measured_seconds else "。"),
-                   f"- Cost: {c.aggregate_ns:g} ns of production (all replicas added up) plus {c.overhead_ns:g} ns to "
-                   f"equilibrate {c.n_replicas} replicas, {c.compute_ns:g} ns in total"
+                   f"- Cost: {_ns(c.aggregate_ns)} ns of production (all replicas added up) plus {_ns(c.overhead_ns)} ns to "
+                   f"equilibrate {c.n_replicas} replicas, {_ns(c.compute_ns)} ns in total"
                    + (f", which took {c.measured_seconds / 3600:.1f} hours." if c.measured_seconds else ".")))
         L.append("")
 
@@ -450,7 +459,7 @@ def write(run_dir: Path) -> list[Path]:
         elif events:
             for r in results:
                 seen = (r.get("extra") or {}).get("seen_ns") or []
-                where = [f"{T('重复', 'replica')} {i} {T('在', 'at')} {t:g} ns" for i, t in enumerate(seen) if t is not None]
+                where = [f"{T('重复', 'replica')} {i} {T('在', 'at')} {_ns(t)} ns" for i, t in enumerate(seen) if t is not None]
                 if where:
                     L.append(T(f"- {r['label']}：看到了（{'；'.join(where)}）。",
                                f"- {r['label']}: seen ({'; '.join(where)})."))
@@ -466,10 +475,10 @@ def write(run_dir: Path) -> list[Path]:
                 per = sum(state.get("rounds_ns", []))
                 total = per * state.get("n_replicas", 0)
                 goal_rate = goal.get("max_departure_rate_per_us", 10.0)
-                L.append(T(f"在模拟过的时间里（每条 {per:g} ns，所有重复合计 {total:g} ns），RMSD 和 Rg 都达到了稳态，平均值"
+                L.append(T(f"在模拟过的时间里（每条 {_ns(per)} ns，所有重复合计 {_ns(total)} ns），RMSD 和 Rg 都达到了稳态，平均值"
                            f"达到了要求的精度，而且离开起始结构的速率（95% 上限）不超过每 µs {goal_rate:g} 次。在这个标准下，"
                            "结构是稳定的。它不能排除更慢的变化：想排除更慢的离开，要设更低的速率上限，并跑得更久。",
-                           f"Within the time simulated ({per:g} ns per replica, {total:g} ns in all), RMSD and Rg both "
+                           f"Within the time simulated ({_ns(per)} ns per replica, {_ns(total)} ns in all), RMSD and Rg both "
                            "reached a steady state, their means reached the requested precision, and the rate of leaving "
                            f"the start structure is at most {goal_rate:g} per µs (95 % upper bound). By this standard the "
                            "structure is stable. Slower changes are not ruled out: that needs a lower rate goal and a "
@@ -547,8 +556,8 @@ def write(run_dir: Path) -> list[Path]:
             name = {"plain_md": T("普通 MD", "Plain MD"), "enhanced_sampling": T("增强采样", "Enhanced sampling"),
                     "any": T("运行", "The run")}[phase]
             why = REASONS.get(o.get("reason"), (o.get("reason"), o.get("reason")))[0 if zh else 1]
-            extra = (T(f"，每条 {o['ns_per_replica']:g} ns（预算 {o['budget_ns']:g} ns）",
-                       f", after {o['ns_per_replica']:g} ns per replica (budget {o['budget_ns']:g} ns)")
+            extra = (T(f"，每条 {_ns(o['ns_per_replica'])} ns（预算 {_ns(o['budget_ns'])} ns）",
+                       f", after {_ns(o['ns_per_replica'])} ns per replica (budget {_ns(o['budget_ns'])} ns)")
                      if "ns_per_replica" in o and "budget_ns" in o else "")
             err = f"：{o['error']}" if zh and o.get("error") else (f": {o['error']}" if o.get("error") else "")
             L.append(f"- {name}：{why}{extra}{err}" if zh else f"- {name}: {why}{extra}{err}")

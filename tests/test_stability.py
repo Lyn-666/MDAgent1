@@ -259,3 +259,21 @@ def test_the_end_message_of_a_stability_run_speaks_of_rmsd_rg_and_the_rate(tmp_p
     zh, en = msgs[-1]["zh"], msgs[-1]["en"]
     assert "RMSD 和 Rg 都达到稳态" in zh and "每 µs 5 次" in zh and "比例" not in zh
     assert "8 replicas × 75.5 ns" in en and "departure rate at most 5 per µs" in en
+
+
+def test_the_cluster_table_lists_only_clusters_of_at_least_one_percent(tmp_path):
+    import json as _json
+
+    from mdagent.report import _cluster_section, _ns
+
+    pops = [0.97, 0.012, 0.01, 0.004, 0.002, 0.001, 0.001]
+    clusters = [{"cluster": i + 1, "population": p, "error": 0.0, "replicas_visiting": [0], "pdb": f"clusters/c{i}.pdb"}
+                for i, p in enumerate(pops)]
+    (tmp_path / "clusters").mkdir()
+    (tmp_path / "clusters" / "clusters.json").write_text(_json.dumps(
+        {"cutoff_nm": 0.15, "frames_used": 100, "stride": 49, "n_clusters": 8, "clusters": clusters,
+         "rest_population": 0.0}))
+    text = "\n".join(_cluster_section(tmp_path, lambda zh, en: en))
+    assert "| 3 |" in text and "| 4 |" not in text
+    assert "5 more small clusters (each below 1 %) hold <1%" in text
+    assert _ns(75.4925) == "75.5" and _ns(603.94) == "604" and _ns(2000) == "2000"
