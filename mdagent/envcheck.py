@@ -8,7 +8,7 @@ import openmm
 from openmm import app
 
 GPU_PLATFORMS = ("CUDA", "HIP", "OpenCL")
-REINSTALL = 'conda install -c conda-forge "openmm>=8.6"'
+REINSTALL = 'bash scripts/install.sh (in the MDAgent1 folder)'
 
 
 def available_platforms() -> list[str]:
@@ -48,10 +48,10 @@ def platform_fix(name: str, error: str, names: list[str]) -> str:
     text = f"The {name} platform cannot compute forces: {error}"
     if name == "CUDA" and ("PTX" in error or "CUDA_ERROR_UNSUPPORTED" in error):
         text += ("\nThe CUDA parts that conda installed are newer than the NVIDIA driver on this computer. "
-                 "Run nvidia-smi and read the CUDA version in the top line ('CUDA Version', or 'CUDA UMD Version' in newer drivers, for example 13.3). Then, in the "
-                 "mdagent environment, install CUDA parts that match the driver, for example:\n"
-                 "    conda install -c conda-forge cuda-version=13.3 --solver=libmamba\n"
-                 "and check again with: python -m openmm.testInstallation")
+                 "In the MDAgent1 folder, run:\n"
+                 "    bash scripts/install.sh\n"
+                 "It reads the CUDA version the driver supports (nvidia-smi) and installs matching CUDA parts into the "
+                 "existing environment. Then check again with: python -m openmm.testInstallation")
     others = [p for p in GPU_PLATFORMS if p in names and p != name]
     if others:
         text += (f"\nUntil then, you can run on another GPU platform with --platform {others[0]} "

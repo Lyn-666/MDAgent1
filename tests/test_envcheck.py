@@ -14,7 +14,7 @@ def test_listed_platform_that_fails_stops_the_run(monkeypatch):
     monkeypatch.setattr(envcheck, "try_platform", lambda name: error if name == "CUDA" else None)
     notes, problems = envcheck.check_environment("CUDA")
     assert len(problems) == 1
-    assert "cuda-version=" in problems[0]
+    assert "scripts/install.sh" in problems[0]
     assert "nvidia-smi" in problems[0]
     assert "--platform OpenCL" in problems[0]
 

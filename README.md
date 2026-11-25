@@ -82,10 +82,11 @@ cd MDAgent1
 ### 2. Create the Environment
 
 ```bash
-conda env create -f environment.yml
+bash scripts/install.sh
 conda activate mdagent
-python -m pip install -e .
 ```
+
+The script reads which CUDA version your NVIDIA driver supports and installs matching CUDA components, so OpenMM can use the GPU. It needs a driver that supports CUDA 12.6 or newer. Running it again repairs an existing `mdagent` environment.
 
 ### 3. Verify the Installation
 

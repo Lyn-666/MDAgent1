@@ -46,7 +46,7 @@ gh repo clone Lyn-666/MDAgent1 && cd MDAgent1
 ```
 
 ```bash
-conda env create -f environment.yml && conda activate mdagent && python -m pip install -e .
+bash scripts/install.sh && conda activate mdagent
 ```
 
 ## Step 2: Check the installation
@@ -145,7 +145,7 @@ If the chat is still running, stop it with Ctrl+C and run `mdagent start` again.
 
 ## Troubleshooting
 
+- **CUDA does not work** (for example `CUDA_ERROR_UNSUPPORTED_PTX_VERSION`, or the CUDA line of `python -m openmm.testInstallation` fails): in the MDAgent1 folder, run `bash scripts/install.sh` again. It reads the CUDA version of your NVIDIA driver (`nvidia-smi`) and installs matching CUDA components into the existing environment. If it says your driver is too old, update the NVIDIA driver and run it once more.
 - **`No module named 'mdagent'`:** reinstall in the current folder with `python -m pip install -e .`.
-- **`CUDA_ERROR_UNSUPPORTED_PTX_VERSION`:** your driver is older than the CUDA packages. Run `conda install -c conda-forge cuda-version=X.Y --solver=libmamba`, where X.Y is the CUDA version that `nvidia-smi` shows.
 - **conda hangs at "Collecting package metadata":** add `--solver=libmamba`.
 - **Random segmentation faults:** some CPU cores may be unstable. `python scripts/find_bad_cores.py` finds them and prints a `taskset` command that avoids them.

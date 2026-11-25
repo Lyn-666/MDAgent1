@@ -23,7 +23,7 @@ The user gives a protein PDB and a region of interest. The agent builds the syst
 
 ```bash
 git clone https://github.com/Lyn-666/MDAgent1.git && cd MDAgent1
-conda env create -f environment.yml && conda activate mdagent && python -m pip install -e .
+bash scripts/install.sh && conda activate mdagent
 pytest -q tests -m "not slow"     # fast tests, about 2 minutes, all should pass
 ```
 
@@ -186,7 +186,7 @@ The full setup report is shown on screen and saved as `setup_report.txt`. All op
 
 ```bash
 git clone https://github.com/Lyn-666/MDAgent1.git && cd MDAgent1
-conda env create -f environment.yml && conda activate mdagent && python -m pip install -e .
+bash scripts/install.sh && conda activate mdagent
 
 # Start. The agent decides how long to run, at most 20 ns per replica.
 # 181L has two differences from the UniProt reference sequence, so add --accept-problems (see "Structure check (PDB file or PDB ID)").

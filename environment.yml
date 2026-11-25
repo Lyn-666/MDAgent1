@@ -1,12 +1,12 @@
-# conda env create -f environment.yml && conda activate mdagent && python -m pip install -e .
-# On a Linux computer with an NVIDIA GPU, conda-forge installs OpenMM with CUDA.
+# Install with: bash scripts/install.sh (it adds the CUDA version that matches the NVIDIA driver).
+# OpenMM 8.3 or newer: MDAgent writes protein-only trajectories (DCDReporter atomSubset, new in 8.3).
 name: mdagent
 channels:
   - conda-forge
   - nodefaults
 dependencies:
   - python=3.11
-  - openmm>=8.6
+  - openmm>=8.3
   - pdbfixer
   - mdtraj
   - numpy
