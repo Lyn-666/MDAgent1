@@ -680,6 +680,28 @@ def _post_plain_md_messages(run_dir: Path, state: RunState, decisions: list[Deci
               f"轨迹和结果在 {run_dir.resolve()}。",
               f"The change you asked for was seen, so plain MD stopped early ({state.ns_done:g} ns per replica, "
               f"limit {state.loop.max_ns:g} ns). {seen} Trajectories and results are in {run_dir.resolve()}.", "done")
+    elif not need and state.quantity == "structure_stability":
+        g = state.the_goal()
+        try:
+            nat = json.loads((run_dir / "stability" / "summary.json").read_text()).get("native", {})
+        except (OSError, ValueError):
+            nat = {}
+        upper, watched = nat.get("departure_rate_upper_per_us"), nat.get("watched_ns")
+        bound_zh = (f"所有重复合计观察了 {watched:.0f} ns，离开起始结构的速率（95% 上限）不超过每 µs {upper:.2g} 次"
+                    f"（目标 {g.max_departure_rate_per_us:g}）" if upper is not None and watched else
+                    f"离开起始结构的速率达到目标（不超过每 µs {g.max_departure_rate_per_us:g} 次）")
+        bound_en = (f"{watched:.0f} ns watched in all, departure rate at most {upper:.2g} per µs (95 %; goal "
+                    f"{g.max_departure_rate_per_us:g})" if upper is not None and watched else
+                    f"departure rate within the goal of {g.max_departure_rate_per_us:g} per µs")
+        per = f"{state.ns_done:.0f}" if state.ns_done >= 100 else f"{state.ns_done:.3g}"
+        _once(run_dir, state, "plain_done",
+              f"普通 MD 结束，原因是{why_zh}（{state.n_replicas} 条 × 每条 {per} ns）：RMSD 和 Rg 都达到稳态，平均值的区间半宽"
+              f"不超过 {g.stability_tolerance_nm:g} nm；{bound_zh}。结果和图在 {(run_dir / 'stability').resolve()}，"
+              f"构象聚类在 {(run_dir / 'clusters').resolve()}。",
+              f"Plain MD finished. Stop reason: {why_en} ({state.n_replicas} replicas × {per} ns): RMSD and Rg are "
+              f"steady, the interval half-width of their means is at most {g.stability_tolerance_nm:g} nm; "
+              f"{bound_en}. Results and figures are in {(run_dir / 'stability').resolve()}, clusters in "
+              f"{(run_dir / 'clusters').resolve()}.", "done")
     elif not need:
         _once(run_dir, state, "plain_done",
               f"普通 MD 结束，原因是{why_zh}（每条 {state.ns_done:g} ns）：所有目标都在状态之间来回了足够多次，"

@@ -237,3 +237,25 @@ def test_a_stability_run_extends_straight_to_the_length_the_rate_goal_needs(tmp_
     more = allocation_next(tmp_path, state, reports, decisions)
     # About 300 ns in all over 3 replicas (plus 5 %), not one more small step.
     assert 2.0 + more == pytest.approx(300 / 3 * 1.05, rel=0.05)
+
+
+def test_the_end_message_of_a_stability_run_speaks_of_rmsd_rg_and_the_rate(tmp_path):
+    """The end message must not use the populations template ("every proportion within 0.05")."""
+    import json as _json
+    from dataclasses import asdict
+
+    from mdagent.agent import Decision, Goal, LoopSettings, RunState, _post_plain_md_messages
+    from mdagent.simulate import MDSettings
+
+    state = RunState(pdb="x", target_description="t", target=[], n_replicas=8, base_seed=1, md=MDSettings(),
+                     loop=LoopSettings(first_ns=1.0, max_ns=2000.0), rounds_ns=[1.0, 61.9104, 12.5821],
+                     goal=asdict(Goal(quantity="structure_stability", allocation="projection")))
+    state.save(tmp_path)
+    (tmp_path / "stability").mkdir()
+    (tmp_path / "stability" / "summary.json").write_text(_json.dumps(
+        {"native": {"departure_rate_upper_per_us": 4.96, "watched_ns": 604.0}}))
+    _post_plain_md_messages(tmp_path, state, [Decision("RMSD", "done", ""), Decision("Rg", "done", "")], 0.0)
+    msgs = [_json.loads(x) for x in (tmp_path / "messages.jsonl").read_text().splitlines()]
+    zh, en = msgs[-1]["zh"], msgs[-1]["en"]
+    assert "RMSD 和 Rg 都达到稳态" in zh and "每 µs 5 次" in zh and "比例" not in zh
+    assert "8 replicas × 75.5 ns" in en and "departure rate at most 5 per µs" in en

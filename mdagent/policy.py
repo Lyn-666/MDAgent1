@@ -269,6 +269,11 @@ STEP_ZH = {
 }
 
 
+def _ns(x: float) -> str:
+    """A length for people: 62.9104 -> 62.9, 256 -> 256, 1000 -> 1000, 0.052425 -> 0.0524."""
+    return f"{x:.0f}" if x >= 100 else f"{x:.3g}"
+
+
 def recount_tests(actions: list) -> int:
     """Looks that could have stopped, from the recorded plain MD looks: not the planning look, and not a
     look that only ran longer because the state changes were too few."""
@@ -336,10 +341,10 @@ def allocation_next(run_dir, state, reports, decisions) -> float:
         if need_ns > step.ns + 1e-9:
             step.ns = need_ns
             step.reason = (step.reason.rstrip(". ") + f"; the departure-rate bound needs about {need_total:.3g} ns "
-                           f"watched in all, so every replica runs to {need_ns:g} ns")
+                           f"watched in all, so every replica runs to {_ns(need_ns)} ns")
             rate_note_zh = (f"；要把离开速率的上限压到目标以下，所有重复合计大约要观察 {need_total:.3g} ns，所以每条跑到 "
-                            f"{need_ns:g} ns")
-    what = f"{n} × {ns:g} ns"
+                            f"{_ns(need_ns)} ns")
+    what = f"{n} × {_ns(ns)} ns"
     why_zh = STEP_ZH.get(step.kind, step.reason) + rate_note_zh
     if step.kind == "too_few_changes":
         short = [f"{i.label} {list(i.transitions)}" for i in items
@@ -431,14 +436,14 @@ def allocation_next(run_dir, state, reports, decisions) -> float:
     added = step.replicas - n
     if added > 0:
         state.n_replicas = step.replicas
-    plan = f"{step.replicas} × {step.ns:g} ns"
+    plan = f"{step.replicas} × {_ns(step.ns)} ns"
     record(run_dir, state, Action("plain_md", "add_replicas" if added > 0 else "extend", True,
                                   f"Look {look}{' (planning only)' if step.planning else ''} at {what}: {step.reason}. "
                                   f"Next: {plan}.", ns),
            f"{name}：第 {look} 次查看（{what}{'，只做规划，不会在这次停' if step.planning else ''}）。"
            f"决定：{'增加 ' + str(added) + ' 条重复（先补跑到同样长度），' if added > 0 else ''}"
-           f"每条跑到 {step.ns:g} ns，共 {plan}。理由：{why_zh}。",
+           f"每条跑到 {_ns(step.ns)} ns，共 {plan}。理由：{why_zh}。",
            f"{name}: look {look} at {what}{' (planning only: this look may not stop)' if step.planning else ''}. "
            f"Decision: {'add ' + str(added) + ' replicas (they first catch up), ' if added > 0 else ''}"
-           f"run every replica to {step.ns:g} ns, {plan} in total. Reason: {step.reason}.")
+           f"run every replica to {_ns(step.ns)} ns, {plan} in total. Reason: {step.reason}.")
     return round(step.ns - ns, 6)
