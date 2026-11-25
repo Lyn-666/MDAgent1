@@ -258,9 +258,10 @@ def _start(root, backend, ui, lang, port, open_browser, read, out) -> int:
     if backend is None:
         found = backends.available()
         if not found:
-            out("没有找到语言模型。请先安装并登录 Claude Code（claude）或 Codex（codex）。\n"
+            out("没有找到语言模型。在 MDAgent1 文件夹里运行 bash scripts/install.sh，它会安装并登录 Claude Code 或 Codex。\n"
                 "不用语言模型也可以直接用命令行：python -m mdagent run --help" if zh else
-                "No language model found. Install and log in to Claude Code (claude) or Codex (codex) first.\n"
+                "No language model found. In the MDAgent1 folder, run: bash scripts/install.sh. It installs and logs in "
+                "Claude Code or Codex.\n"
                 "You can also use the command line without a language model: python -m mdagent run --help")
             return 2
         if len(found) == 1:
@@ -271,6 +272,15 @@ def _start(root, backend, ui, lang, port, open_browser, read, out) -> int:
         backend = _choose("用哪个语言模型？它只把你的话填进设置表，不执行任何命令。" if zh else
                           "Which language model? It only fills in the settings form and runs nothing.",
                           [(b, BACKEND_NAMES[b]) for b in found], saved.get("backend"), read, out)
+
+    login = backends.login_problem(backend)
+    if login:
+        out(f"{BACKEND_NAMES.get(backend, backend)} 还没有登录。请先运行：{login}\n"
+            "它会显示一个链接，在任何一台电脑或手机的浏览器里打开、登录，需要时把代码贴回终端。然后再运行 mdagent start。" if zh else
+            f"{BACKEND_NAMES.get(backend, backend)} is not logged in. First run: {login}\n"
+            "It shows a link: open it in a browser on any computer or phone, sign in, and paste the code back if "
+            "asked. Then run mdagent start again.")
+        return 2
 
     if ui is None:
         ui = _choose("在哪里对话？" if zh else "Where do you want to talk?",

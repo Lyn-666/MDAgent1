@@ -14,6 +14,13 @@ from mdagent.terminal import run_terminal, start  # noqa: E402
 REPO = Path(__file__).resolve().parents[1]
 
 
+@pytest.fixture(autouse=True)
+def _no_login_check(monkeypatch, request):
+    """start() checks the login of the chosen backend; tests have no real login."""
+    if "login_problem" not in request.node.name:
+        monkeypatch.setattr(backends, "login_problem", lambda b: None)
+
+
 @pytest.fixture
 def project(tmp_path):
     (tmp_path / "examples").mkdir()
@@ -172,3 +179,34 @@ def test_the_report_can_be_read_in_the_chat(project):
     (run / "report.zh.md").write_text("# 结果报告\n结论", encoding="utf-8")
     run_terminal(a, "zh", read=_scripted(["/report r1", "/quit"]), out=out.append, pager=paged.append)
     assert paged and "结论" in paged[0]
+
+
+def test_start_stops_with_the_login_command_when_not_logged_in(tmp_path, monkeypatch):
+    from mdagent import backends
+    from mdagent.terminal import start
+
+    monkeypatch.setattr(backends, "available", lambda: ["codex"])
+    monkeypatch.setattr(backends, "login_problem", lambda b: "codex login --device-auth")
+    out = []
+    assert start(tmp_path, lang="en", read=_scripted([]), out=out.append) == 2
+    assert any("codex login --device-auth" in line for line in out)
+
+
+def test_login_problem_reads_the_status_commands(monkeypatch):
+    import subprocess
+
+    from mdagent import backends
+
+    monkeypatch.setattr(backends.shutil, "which", lambda exe: "/usr/bin/" + exe)
+    seen = []
+
+    def runner(code):
+        def run(cmd, **kw):
+            seen.append(cmd)
+            return subprocess.CompletedProcess(cmd, code, "", "")
+        return run
+    assert backends.login_problem("claude", runner(0)) is None
+    assert backends.login_problem("claude", runner(1)) == "claude auth login"
+    assert backends.login_problem("codex", runner(1)) == "codex login --device-auth"
+    assert seen[0] == ["claude", "auth", "status"] and seen[-1] == ["codex", "login", "status"]
+    assert backends.login_problem("api") is None

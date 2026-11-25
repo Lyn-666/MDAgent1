@@ -13,7 +13,7 @@ This test asks three questions:
 **You need:**
 
 - a Linux computer with an NVIDIA GPU and conda. The NVIDIA driver must support CUDA 12.6 or newer: `nvidia-smi` shows "CUDA Version: 12.6" or higher in its top line (driver 560 or newer). Step 1 checks this for you;
-- Claude Code or Codex, installed and logged in with your own account;
+- a Claude account (Pro, Max, Team or Enterprise plan) or a ChatGPT account (Plus, Pro, Team or Enterprise plan). You do not need to install anything for it yourself: the install script in step 1 installs Claude Code or Codex and helps you log in;
 - a GitHub account. Send your username to the person who invited you. You need it to accept the invitation and to send feedback.
 
 **New in 0.1.0b2** (if you tested 0.1.0b1, update as in "Update before each test"):
@@ -58,6 +58,8 @@ bash scripts/install.sh && conda activate mdagent
 ```
 
 It reads your NVIDIA driver, installs one of two fixed and tested combinations (CUDA 12.9 + OpenMM 8.6.1, or for drivers 560 to 574: CUDA 12.6/12.8 + OpenMM 8.4.0), and checks at the end that OpenMM really runs on the GPU. Please mention which combination you got when you send feedback.
+
+At the end it asks whether you use Claude or ChatGPT, installs that program (Claude Code or Codex) into the environment, and starts the login. On a server without a browser, the login shows a link: open it in a browser on your own computer or phone, sign in, and paste the code back into the terminal if you are asked for one.
 
 ## Step 2: Check the installation
 
@@ -155,6 +157,7 @@ If the chat is still running, stop it with Ctrl+C and run `mdagent start` again.
 
 ## Troubleshooting
 
+- **"is not logged in"** when you run `mdagent start`: run the command it shows (`claude auth login` or `codex login --device-auth`) after `conda activate mdagent`, then start again. To install the other program later, run `bash scripts/install.sh` again and choose it.
 - **CUDA does not work** (for example `CUDA_ERROR_UNSUPPORTED_PTX_VERSION`, or the CUDA line of `python -m openmm.testInstallation` fails): in the MDAgent1 folder, run `bash scripts/install.sh` again. It reads the CUDA version of your NVIDIA driver (`nvidia-smi`) and installs matching CUDA components into the existing environment. If it says your driver is too old, update the NVIDIA driver and run it once more.
 - **`No module named 'mdagent'`:** reinstall in the current folder with `python -m pip install -e .`.
 - **conda hangs at "Collecting package metadata":** add `--solver=libmamba`.

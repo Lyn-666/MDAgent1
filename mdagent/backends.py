@@ -62,6 +62,26 @@ def available() -> list[str]:
     return found
 
 
+LOGIN_COMMANDS = {"claude": "claude auth login", "codex": "codex login --device-auth"}
+
+
+def login_problem(backend: str, runner=subprocess.run) -> str | None:
+    """None when the backend is logged in (or cannot be checked); otherwise the command that logs it in.
+
+    `claude auth status` and `codex login status` exit 0 when logged in. They only read the saved login, so the
+    check is fast and uses no tokens. The API key that the claude backend removes is removed here too."""
+    exe = {"claude": "claude", "codex": "codex"}.get(backend)
+    if exe is None or shutil.which(exe) is None:
+        return None
+    cmd = [exe, "auth", "status"] if exe == "claude" else [exe, "login", "status"]
+    env = {k: v for k, v in os.environ.items() if k not in API_KEY_VARS}
+    try:
+        done = runner(cmd, capture_output=True, text=True, timeout=30, env=env, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.TimeoutExpired):
+        return None                      # cannot tell; the first real call will report a problem
+    return None if done.returncode == 0 else LOGIN_COMMANDS[backend]
+
+
 def choose(backend: str) -> str:
     if backend != "auto":
         return backend

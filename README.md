@@ -68,9 +68,9 @@ MDAgent currently does not support binding free-energy calculations.
 - Linux
 - NVIDIA GPU with CUDA support
 - Conda
-- [Claude Code](https://claude.com/claude-code) or [Codex](https://chatgpt.com/) with an authenticated account
+- A Claude account (Pro, Max, Team or Enterprise plan) or a ChatGPT account (Plus, Pro, Team or Enterprise plan)
 
-No separate API key is required when using the supported authenticated CLI backends.
+You do not need an API key, and you do not need to install the terminal programs yourself. The install script asks which account you use, installs Claude Code or Codex into the MDAgent environment, and helps you log in. Login works on a server without a browser: it shows a link that you open on any computer or phone.
 
 ### 1. Clone the Repository
 

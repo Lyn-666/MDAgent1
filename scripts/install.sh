@@ -14,7 +14,11 @@
 # Blackwell (RTX 50). Left alone, conda only checks the major version and installs parts newer than the driver
 # (for example 13.5 on a 13.3 driver), and OpenMM then fails with CUDA_ERROR_UNSUPPORTED_PTX_VERSION.
 # If the environment exists, it is repaired in place; otherwise it is created from environment.yml.
-# Options (environment variables): MDAGENT_ENV (default mdagent).
+# Last, the language model for the chat: Claude Code (claude) or Codex (codex), installed into the environment with
+# its own Node.js (no admin rights, no PATH changes) unless already on this computer, and logged in. Login works
+# without a browser on this computer: it shows a link to open on any computer or phone.
+# Options (environment variables): MDAGENT_ENV (default mdagent); MDAGENT_LLM = claude, codex, both or none
+# (otherwise the script asks).
 set -euo pipefail
 
 ENV_NAME="${MDAGENT_ENV:-mdagent}"
@@ -118,16 +122,91 @@ error = try_platform('$1')
 print('$1 works.' if error is None else '$1 does not work: ' + error)
 sys.exit(0 if error is None else 1)"
 }
+gpu_ok=1
 if [ "$use_cuda" = 1 ] && platform_ok CUDA; then
-    say "Done. Start MDAgent with:  conda activate $ENV_NAME && mdagent start"
+    :
 elif [ -n "$cuda" ]; then
+    gpu_ok=0
     say "OpenMM is installed, but CUDA does not work on this computer."
     if platform_ok OpenCL; then
         echo "The OpenCL platform works on this GPU (slower than CUDA). Short tests can use it:"
         echo "    mdagent run ... --platform OpenCL"
     fi
     echo "Please send this whole output and the output of nvidia-smi to the person who invited you."
-    exit 1
+fi
+
+# --- 6. The language model for the chat. Its program lives in the environment's bin folder (on PATH after
+# 'conda activate'), unless it is already on this computer.
+ENV_PREFIX="$(conda run -n "$ENV_NAME" python -c 'import sys; print(sys.prefix)')"
+BIN="$ENV_PREFIX/bin"
+exe() { if [ -x "$BIN/$1" ]; then echo "$BIN/$1"; else command -v "$1" 2>/dev/null || true; fi; }
+logged_in() {   # claude auth status / codex login status: exit 0 when logged in
+    local path; path="$(exe "$1")"
+    [ -n "$path" ] || return 1
+    if [ "$1" = claude ]; then env -u ANTHROPIC_API_KEY "$path" auth status >/dev/null 2>&1
+    else "$path" login status >/dev/null 2>&1; fi
+}
+install_cli() {
+    if [ -n "$(exe "$1")" ]; then return 0; fi
+    if [ ! -x "$BIN/npm" ] || ! "$BIN/node" -e 'process.exit(+process.versions.node.split(".")[0] >= 22 ? 0 : 1)' 2>/dev/null; then
+        say "Installing Node.js into '$ENV_NAME' (needed by the $1 program)."
+        conda install -y -n "$ENV_NAME" -c conda-forge "nodejs>=22"
+    fi
+    say "Installing $1 into '$ENV_NAME'."
+    if [ "$1" = claude ]; then "$BIN/npm" install -g --prefix "$ENV_PREFIX" @anthropic-ai/claude-code
+    else "$BIN/npm" install -g --prefix "$ENV_PREFIX" @openai/codex; fi
+}
+log_in() {
+    if logged_in "$1"; then echo "$1 is logged in."; return 0; fi
+    if [ ! -t 0 ]; then
+        echo "$1 is not logged in. Log in later with:  conda activate $ENV_NAME && $2"
+        return 0
+    fi
+    say "Log in to $1 with your own account. A link appears: open it in a browser on any computer or phone,"
+    echo "sign in, and paste the code back here if you are asked for one."
+    if [ "$1" = claude ]; then env -u ANTHROPIC_API_KEY "$(exe claude)" auth login || true
+    else "$(exe codex)" login --device-auth || true; fi
+    if logged_in "$1"; then echo "$1 is logged in."
+    else echo "$1 is not logged in yet. Try again later with:  conda activate $ENV_NAME && $2"; fi
+}
+
+choice="${MDAGENT_LLM:-}"
+if [ -z "$choice" ]; then
+    found=""
+    [ -n "$(exe claude)" ] && found="claude"
+    [ -n "$(exe codex)" ] && found="${found:+$found }codex"
+    if [ -n "$found" ]; then
+        choice="$found"
+        say "Language model already on this computer: $found."
+    elif [ -t 0 ]; then
+        say "The chat needs one language model, with your own account (no API key needed):"
+        echo "  1) Claude   (Claude Pro, Max, Team or Enterprise plan)"
+        echo "  2) ChatGPT  (ChatGPT Plus, Pro, Team or Enterprise plan; the program is called Codex)"
+        echo "  3) both"
+        echo "  4) skip (I will install one myself)"
+        read -r -p "Choose 1, 2, 3 or 4: " answer
+        case "$answer" in 1) choice=claude ;; 2) choice=codex ;; 3) choice="claude codex" ;; *) choice=none ;; esac
+    else
+        choice=none
+    fi
+fi
+[ "$choice" = both ] && choice="claude codex"
+llm_ok=0
+for name in $choice; do
+    case "$name" in
+        claude) install_cli claude && log_in claude "claude auth login" ;;
+        codex)  install_cli codex && log_in codex "codex login --device-auth" ;;
+        *) continue ;;
+    esac
+    logged_in "$name" && llm_ok=1
+done
+
+if [ "$llm_ok" = 0 ]; then
+    say "No logged-in language model yet: the chat (mdagent start) needs Claude Code or Codex."
+    echo "Run this script again and choose one, or log in later as shown above."
+fi
+if [ "$gpu_ok" = 1 ] && [ "$llm_ok" = 1 ]; then
+    say "Done. Start MDAgent with:  conda activate $ENV_NAME && mdagent start"
 else
-    say "Done (without a GPU). Start MDAgent with:  conda activate $ENV_NAME && mdagent start"
+    exit 1
 fi
