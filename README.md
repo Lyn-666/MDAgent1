@@ -34,7 +34,7 @@ python -m openmm.testInstallation
 
 The CUDA line of the last command should say "Successfully computed forces".
 
-## Use
+## Example
 
 ```bash
 conda activate mdagent && mdagent start
@@ -61,13 +61,6 @@ You can also set these in your sentence: precision, limits, a fixed plan ("exact
 Each run has a folder, `runs/<run name>/`. The report `report.en.md` gives every result with its error, whether it met your precision, each decision the agent made, why it stopped, and the compute it used. The Chinese version is `report.zh.md`. The folder also holds the trajectories (`replica_*.dcd`, with `protein.pdb` as topology), plots and data tables.
 
 "Insufficient evidence" is a valid answer. It means your limits did not give enough data for the precision you asked for, and the report suggests what to do next.
-
-## Troubleshooting
-
-- **`No module named 'mdagent'`:** reinstall in the current folder with `python -m pip install -e .`.
-- **`CUDA_ERROR_UNSUPPORTED_PTX_VERSION`:** your driver is older than the CUDA packages. Run `conda install -c conda-forge cuda-version=X.Y --solver=libmamba`, where X.Y is the CUDA version that `nvidia-smi` shows.
-- **conda hangs at "Collecting package metadata":** add `--solver=libmamba`.
-- **Random segmentation faults:** some CPU cores may be unstable. `python scripts/find_bad_cores.py` finds them and prints a `taskset` command that avoids them.
 
 ## More
 

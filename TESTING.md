@@ -54,7 +54,7 @@ The CUDA line should say "Successfully computed forces".
 pytest -q tests -m "not slow"
 ```
 
-This takes about 4 minutes, and all tests should pass. If a step fails, look at the "Troubleshooting" section of the [README](README.md) first. If that does not help, report it as in step 6. A failed step is a useful test result too.
+This takes about 4 minutes, and all tests should pass. If a step fails, look at "Troubleshooting" at the end of this file first. If that does not help, report it as in step 6. A failed step is a useful test result too.
 
 ## Step 3: Workflow test (about 10 minutes)
 
@@ -135,3 +135,10 @@ If the chat is still running, stop it with Ctrl+C and run `mdagent start` again.
 - Replicas run one after another on one GPU. Several GPUs are not used at the same time.
 - The main target is Linux with an NVIDIA GPU. macOS is only good for tests of a few minutes. On Windows, use WSL2.
 - The chat with a ChatGPT (Codex) login has not been tried in a real setup yet. If you use it, please watch it closely and report what you see.
+
+## Troubleshooting
+
+- **`No module named 'mdagent'`:** reinstall in the current folder with `python -m pip install -e .`.
+- **`CUDA_ERROR_UNSUPPORTED_PTX_VERSION`:** your driver is older than the CUDA packages. Run `conda install -c conda-forge cuda-version=X.Y --solver=libmamba`, where X.Y is the CUDA version that `nvidia-smi` shows.
+- **conda hangs at "Collecting package metadata":** add `--solver=libmamba`.
+- **Random segmentation faults:** some CPU cores may be unstable. `python scripts/find_bad_cores.py` finds them and prints a `taskset` command that avoids them.
