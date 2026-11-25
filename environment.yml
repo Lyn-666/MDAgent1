@@ -1,12 +1,15 @@
-# Install with: bash scripts/install.sh (it adds the CUDA version that matches the NVIDIA driver).
-# OpenMM 8.3 or newer: MDAgent writes protein-only trajectories (DCDReporter atomSubset, new in 8.3).
+# Install with: bash scripts/install.sh. It checks the NVIDIA driver and keeps these two pins (combination A) or,
+# for a driver that supports only CUDA 12.6 to 12.8, replaces them with cuda-version 12.6/12.8 + openmm 8.4.0
+# (combination B). CUDA 12.9 runs on every driver that supports CUDA 12.9 or newer (all CUDA 13 drivers too) and
+# supports GPUs from Maxwell to Blackwell. MDAgent needs OpenMM 8.3 or newer (DCDReporter atomSubset).
 name: mdagent
 channels:
   - conda-forge
   - nodefaults
 dependencies:
   - python=3.11
-  - openmm>=8.3
+  - cuda-version=12.9
+  - openmm=8.6.1
   - pdbfixer
   - mdtraj
   - numpy

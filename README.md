@@ -86,7 +86,14 @@ bash scripts/install.sh
 conda activate mdagent
 ```
 
-The script reads your NVIDIA driver and GPU and installs matching CUDA components, so OpenMM can use the GPU. It needs a driver that supports CUDA 12.6 or newer. To see first what it would install, run `bash scripts/install.sh --check`. Running it again repairs an existing `mdagent` environment.
+The script checks your NVIDIA driver and installs one of two fixed, tested combinations, so everyone runs the same versions:
+
+| NVIDIA driver supports | Installed |
+|---|---|
+| CUDA 12.9 or newer (driver 575 or newer, including all CUDA 13 drivers) | CUDA 12.9 + OpenMM 8.6.1 |
+| CUDA 12.6 to 12.8 (driver 560 to 574) | CUDA 12.6 or 12.8 + OpenMM 8.4.0 |
+
+Older drivers must be updated first. Both combinations support NVIDIA GPUs from Maxwell (2014) to Blackwell (RTX 50 series). To see first what it would install, run `bash scripts/install.sh --check`. Running it again repairs an existing `mdagent` environment.
 
 ### 3. Verify the Installation
 

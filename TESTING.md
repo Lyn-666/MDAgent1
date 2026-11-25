@@ -57,7 +57,7 @@ This only looks and installs nothing. It shows your GPUs and which CUDA version 
 bash scripts/install.sh && conda activate mdagent
 ```
 
-It reads your NVIDIA driver and GPU, installs CUDA components that match them, and checks at the end that OpenMM really runs on the GPU.
+It reads your NVIDIA driver, installs one of two fixed and tested combinations (CUDA 12.9 + OpenMM 8.6.1, or for drivers 560 to 574: CUDA 12.6/12.8 + OpenMM 8.4.0), and checks at the end that OpenMM really runs on the GPU. Please mention which combination you got when you send feedback.
 
 ## Step 2: Check the installation
 
