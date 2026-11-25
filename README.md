@@ -1,6 +1,6 @@
 # MDAgent: molecular dynamics from one sentence
 
-Tell MDAgent what you want to know, for example *"Which rotamers do the side chains around this ligand take?"*. It fetches and checks the structure, builds the system, runs the simulations, and analyses them as they run. It stops as soon as the answer is reliable and writes a report.
+Tell MDAgent what you want to know, for example, *"Which rotamers do the side chains around this ligand take?"*. It fetches and checks the structure, builds the system, runs the simulations, and analyses them as they run. It stops as soon as the answer is reliable and writes a report.
 
 Its main goal is **no wasted simulation**. It starts with 3 short replicas. Then it decides whether to extend them, add replicas, or stop. If plain MD cannot answer within your limits, it says so and suggests another method. It never exceeds your limits. The default limit is 10 replicas × 2 µs.
 
@@ -14,11 +14,11 @@ Its main goal is **no wasted simulation**. It starts with 3 short replicas. Then
 | Whether a change happens | When and in which replica it is seen. The run stops once it is seen. |
 | Structural stability | RMSD and radius of gyration: whether they are steady, their means, an RMSD–Rg free-energy surface, and conformational clusters. "Stable" means the structure was watched long enough: by default, at most 10 departures per µs (about 300 ns in total). Say *"stable for 1 µs"* for a stricter check. |
 
-Plain MD is the default. When a conformation does not change, the agent can switch to enhanced sampling (metadynamics, with the bias removed afterwards). Adaptive sampling is optional. MDAgent does not compute binding free energies.
+Plain MD is the default. When a conformation does not change, the agent can switch to enhanced sampling (metadynamics, with the bias removed afterward). Adaptive sampling is optional. MDAgent does not compute binding free energies.
 
 ## Install
 
-You need Linux with an NVIDIA GPU, conda, and [Claude Code](https://claude.com/claude-code) or Codex with your own login. You do not need an API key.
+You need Linux with an NVIDIA GPU, conda, and [Claude Code](https://claude.com/claude-code) or [Codex](https://chatgpt.com/) with your own login. You do not need an API key.
 
 ```bash
 git clone https://github.com/Lyn-666/MDAgent1.git && cd MDAgent1
