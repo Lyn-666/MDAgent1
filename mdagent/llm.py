@@ -94,7 +94,7 @@ class RunPlan(BaseModel):
                           "Allowed: ASP/ASH, GLU/GLH, LYS/LYN, HIP/HID/HIE.")
     ion_conc: Optional[float] = Field(None, description="Salt concentration in M. Default 0.15.")
     stability_tolerance_nm: Optional[float] = Field(None, description="Only for 'stability', if the user gives a "
-                                                      "precision for the mean RMSD/Rg in nm. Default 0.02.")
+                                                      "precision for the mean RMSD/Rg in nm. Default 0.03.")
     rmsd_cutoff_nm: Optional[float] = Field(None, description="Only for 'stability': the RMSD (nm) above which the "
                                                               "structure counts as departed or unfolded. Default 0.3.")
     max_departure_rate_per_us: Optional[float] = Field(None, description="Only for 'stability', if the user says how "

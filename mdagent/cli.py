@@ -236,7 +236,7 @@ def _goal_from_args(args):
                          hold_ps=getattr(args, "hold_ps", 100.0), seen_in=getattr(args, "seen_in", 1),
                          rate_rel_error=getattr(args, "rate_rel_error", 0.25),
                          fes_error_kcal=getattr(args, "fes_error_kcal", 0.5),
-                         stability_tolerance_nm=getattr(args, "stability_tolerance", 0.02),
+                         stability_tolerance_nm=getattr(args, "stability_tolerance", 0.03),
                          rmsd_cutoff_nm=getattr(args, "rmsd_cutoff", 0.3),
                          cluster_cutoff_nm=getattr(args, "cluster_cutoff", 0.15),
                          max_departure_rate_per_us=getattr(args, "max_departure_rate", 10.0),
@@ -731,8 +731,8 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--stop-looks", type=int, default=3,
                    help="With --allocation projection: the agent may stop at no more than this many looks, and its "
                         "intervals are calibrated for that many (default 3).")
-    r.add_argument("--stability-tolerance", type=float, default=0.02,
-                   help="--quantity stability: interval half-width asked for the mean RMSD and Rg (nm, default 0.02).")
+    r.add_argument("--stability-tolerance", type=float, default=0.03,
+                   help="--quantity stability: interval half-width asked for the mean RMSD and Rg (nm, default 0.03).")
     r.add_argument("--rmsd-cutoff", type=float, default=0.3,
                    help="--quantity stability: above this RMSD from the start the structure counts as departed "
                         "(nm, default 0.3).")

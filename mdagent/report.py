@@ -384,14 +384,16 @@ def write(run_dir: Path) -> list[Path]:
                        f"least {goal.get('hold_ps', 100):g} ps; it stops once seen in {goal.get('seen_in', 1)} "
                        "replica(s)."))
         elif quantity == "structure_stability":
-            tol = goal.get("stability_tolerance_nm", 0.02)
+            tol = goal.get("stability_tolerance_nm", 0.03)
+            from .stability import StabilitySettings
+            drift_limit = StabilitySettings().drift_factor * tol
             L.append(T(f"- 稳定的标准：离开起始结构的速率（95% 上限）不超过每 µs {goal.get('max_departure_rate_per_us', 10.0):g} 次。",
                        f"- What counts as stable: the rate of leaving the start structure is at most "
                        f"{goal.get('max_departure_rate_per_us', 10.0):g} per µs (95 % upper bound)."))
             L.append(T(f"- 要求的精度：RMSD 和 Rg 平均值的区间半宽不超过 {tol:g} nm；稳态：后半段和前半段平均值之差加上它的区间半宽，"
-                       f"不超过 {3 * tol:g} nm。RMSD 超过 {goal.get('rmsd_cutoff_nm', 0.3):g} nm 算离开起始结构。",
+                       f"不超过 {drift_limit:g} nm。RMSD 超过 {goal.get('rmsd_cutoff_nm', 0.3):g} nm 算离开起始结构。",
                        f"- Requested precision: interval half-width of the mean RMSD and Rg at most {tol:g} nm; steady "
-                       f"state: the second-half mean minus the first-half mean, plus its half-width, at most {3 * tol:g} "
+                       f"state: the second-half mean minus the first-half mean, plus its half-width, at most {drift_limit:g} "
                        f"nm. An RMSD above {goal.get('rmsd_cutoff_nm', 0.3):g} nm counts as departed from the start."))
         else:
             L.append(T(f"- 要求的精度：{_precision(state).describe(zh=True)}。",

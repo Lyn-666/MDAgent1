@@ -220,7 +220,7 @@ class Goal:
     fes_error_kcal: float = 0.5     # backbone_basins: largest error of the phi/psi free energy where it is low.
     # structure_stability (stability.py): interval half-width asked for the mean RMSD and Rg, the RMSD above which
     # the structure counts as departed, and the clustering cutoff. cluster: cluster any run in its report.
-    stability_tolerance_nm: float = 0.02
+    stability_tolerance_nm: float = 0.03
     rmsd_cutoff_nm: float = 0.3
     cluster_cutoff_nm: float = 0.15
     max_departure_rate_per_us: float = 10.0

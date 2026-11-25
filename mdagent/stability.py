@@ -10,11 +10,11 @@ Two continuous observables are followed every round:
 For each, the run reports the mean after the non-equilibrated start (automated equilibration detection, one start
 for all replicas), with an error that allows for time correlation (block averaging inside replicas, the spread
 between replicas, Student's t when that spread is real). The item is precise enough when the interval half-width
-is at most `tolerance_nm` (default 0.02 nm).
+is at most `tolerance_nm` (default 0.03 nm).
 
 Steady state is an equivalence check, not "no significant difference": the kept frames of every replica are cut in
 two halves; the mean of the second halves minus the mean of the first halves, plus the interval half-width of that
-difference, must be at most `drift_factor` x `tolerance_nm` (default 3 x 0.02 = 0.06 nm). A short run cannot pass it
+difference, must be at most `drift_factor` x `tolerance_nm` (default 2 x 0.03 = 0.06 nm). A short run cannot pass it
 by being imprecise.
 
 Whether the structure stays native-like: the time fraction with RMSD below `rmsd_cutoff_nm` (default 0.3 nm, with a
@@ -39,10 +39,10 @@ KB_KCAL = 0.0019872041   # kcal/mol/K
 
 @dataclass
 class StabilitySettings:
-    tolerance_nm: float = 0.02       # interval half-width asked for the mean RMSD and the mean Rg
+    tolerance_nm: float = 0.03       # interval half-width asked for the mean RMSD and the mean Rg (user, 2026-11-25)
     rmsd_cutoff_nm: float = 0.3      # above this RMSD the structure counts as departed from the start
     buffer_nm: float = 0.05          # hysteresis around the cutoff
-    drift_factor: float = 3.0        # steady state: drift plus its half-width at most this x tolerance_nm
+    drift_factor: float = 2.0        # steady state: drift plus its half-width at most this x tolerance_nm (0.06 nm)
     cluster_cutoff_nm: float = 0.15  # GROMOS clustering cutoff (clustering.py)
     min_ca: int = 5                  # fewer residues than this: use all heavy atoms of the region
     max_departure_rate_per_us: float = 10.0   # stop only when the 95 % upper bound of the departure rate is this low
