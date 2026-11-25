@@ -722,25 +722,6 @@ A local web page. The interface has two languages, Chinese and English; switch a
 
 If `ANTHROPIC_API_KEY` is set, Claude Code uses this key instead of your subscription login. The Codex backend has not been tested in a real environment yet.
 
-## Using `/md` in Claude Code (mainly for developers)
-
-This way is not MDAgent's own chat program. Claude Code itself does the work: we wrote instructions in `.claude/commands/`, and Claude Code follows them to run commands, read files and ask for your confirmation. So it uses more Claude Code quota, and the steps depend on Claude Code following the instructions, not on the program. For normal use, use `start` above.
-
-On your own computer, activate the environment first, then open Claude Code in the MDAgent1 folder:
-
-```bash
-conda activate mdagent
-cd ~/Desktop/MDAgent1
-claude
-```
-
-Then type in Claude Code:
-
-- `/md Use Amber, look at the pocket around benzene, check protonation first, development test`: Claude Code reads the PDB summary, turns the request into an `mdagent run` command, lists the settings for you to confirm, and after confirmation starts it in the background with `nohup`.
-- `/md-status`: shows progress. When a run stopped midway, it asks whether to resume it.
-
-The simulation runs in the background. Closing Claude Code or the terminal does not stop it. The text of the commands is in `.claude/commands/`.
-
 ## Describing a run in one sentence (`ask`, one-off command)
 
 ```bash
