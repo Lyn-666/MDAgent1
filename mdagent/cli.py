@@ -297,13 +297,15 @@ def _chain_list(text):
     return [c.strip() for c in text.split(",") if c.strip()] if text else None
 
 
-def _structure_check(args):
+def _structure_check(args, show: bool = True):
     from .check import check_structure
 
-    print("Checking the structure ...")
+    if show:
+        print("Checking the structure ...")
     check = check_structure(args.pdb, chains=_chain_list(args.chains), keep_tags=args.keep_tags,
                             uniprot=args.uniprot, root=Path.cwd())
-    print(check.report())
+    if show:
+        print(check.report())
     termini = getattr(args, "termini", "auto")
     if termini != "auto":
         print(f"  note: chain ends: --termini {termini} replaces the suggestion above.")
@@ -475,20 +477,24 @@ def cmd_run(args) -> int:
 
     check = None
     if not amber:
-        check = _structure_check(args)
+        check = _structure_check(args, show=peptide is None)
         out.mkdir(parents=True, exist_ok=True)
-        (out / "structure_check.txt").write_text(check.report() + "\n")
         if peptide is not None:
             # Built here from the sequence: there is no reference sequence to check against, and the ends are
             # what the user wrote (Ac- / -NH2 become ACE / NME caps; otherwise charged).
             check.cap_ends = {c: (peptide.n_cap, peptide.c_cap) for c in check.cap_ends or {"A": None}}
-            print("  note: built from the sequence, so no reference-sequence check is needed; chain ends: "
-                  + ("Ac" if peptide.n_cap else "NH3+") + " / " + ("NH2" if peptide.c_cap else "COO-") + ".")
-        elif not check.clean and not args.accept_problems:
+            note = (f"Peptide {peptide.text} built from its sequence: no reference-sequence check is needed. Chain "
+                    "ends: " + ("Ac (ACE cap)" if peptide.n_cap else "NH3+") + " / "
+                    + ("NH2 (NME cap)" if peptide.c_cap else "COO-") + ".")
+            print(note)
+            (out / "structure_check.txt").write_text(note + "\n")
+        else:
+            (out / "structure_check.txt").write_text(check.report() + "\n")
+        if peptide is None and not check.clean and not args.accept_problems:
             print("\nThe run did not start. Deal with the problems above and run the command again (add the "
                   "options named under 'What to do'), or add --accept-problems to go on anyway.")
             return 4
-        if not check.clean:
+        if peptide is None and not check.clean:
             print("Going on despite the problems above (--accept-problems).")
 
     target = _target_from_args(args)
