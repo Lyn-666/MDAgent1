@@ -44,6 +44,9 @@ The default computational limit is 10 replicas, each with a maximum simulation l
 | Which backbone conformations are sampled? | Ramachandran basin populations, transition rate estimates, and φ/ψ free-energy surfaces, where sampling is sufficient. |
 | Does a specific conformational transition occur? | The first observed transition time and the corresponding replica. Sampling can terminate once the predefined event is observed. |
 | Does the structure remain stable? | RMSD, radius of gyration, structural stability assessment, RMSD–Rg free-energy surfaces, and conformational clustering. |
+| How much helix or strand does a peptide or region form? | Helix, strand and coil populations of each residue (DSSP) with uncertainty estimates. |
+
+**Peptides** can be given as a sequence instead of a structure file, for example `Ac-AAKAAAAKAA-NH2`. `Ac-` and `-NH2` give capped ends; without them the ends are charged. MDAgent builds the peptide in an extended conformation (or a helix, if you ask) and then treats it like a protein. Only the 20 standard amino acids are supported; modified residues, D-amino acids and cyclic peptides need a prepared Amber system.
 
 For structural stability assessments, MDAgent evaluates both structural fluctuations and the amount of accumulated sampling. By default, the stability criterion corresponds to a target upper departure rate of 10 events per µs, requiring approximately 300 ns of aggregate observation when no departures are detected under the assumed event-rate model.
 
@@ -136,7 +139,11 @@ To start a simulation, describe your molecular system and scientific question in
 
 > Download 1YRF and assess whether the protein remains structurally stable throughout the simulation.
 
-### Example 4: Automated Sampling Strategy
+### Example 4: Peptide Helicity
+
+> Simulate the peptide Ac-AAKAAAAKAA-NH2 and tell me the helix content of each residue. Use at most 3 replicas of 200 ns each.
+
+### Example 5: Automated Sampling Strategy
 
 > Investigate the conformational populations of the selected residues using conventional MD. If sampling is insufficient, recommend an alternative sampling strategy before exceeding the computational budget.
 

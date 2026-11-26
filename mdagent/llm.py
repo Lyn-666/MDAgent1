@@ -28,7 +28,7 @@ MODEL = "claude-opus-5-5"
 class RunPlan(BaseModel):
     """Settings for one `mdagent run`. Leave a field null to keep its default."""
 
-    target_kind: Literal["ligand", "residues", "distance", "backbone", "change", "stability"] = Field(
+    target_kind: Literal["ligand", "residues", "distance", "backbone", "change", "stability", "secondary"] = Field(
         description="'ligand': the target is all protein residues near a ligand in the PDB file. "
                     "'residues': the target is a list of residues. Both study side-chain conformations (chi1). "
                     "'distance': the user wants to know about distances between atoms (a pocket opening, a "
@@ -41,9 +41,17 @@ class RunPlan(BaseModel):
                     "'stability': the user wants to know whether the structure stays stable (backbone RMSD from the "
                     "start, radius of gyration, steady state, unfolding, an RMSD-Rg free-energy surface, "
                     "conformational clusters); the whole protein, or a region in `residues`. "
+                    "'secondary': the user wants the secondary structure (helix, strand or coil content, helicity, "
+                    "folding of a peptide); every residue except the chain ends, or `residues`. "
                     "'backbone': the user wants backbone results (Ramachandran / phi-psi basin populations, transitions "
                     "between basins, a phi/psi free-energy landscape, the type of a beta turn); give the items in "
                     "`backbone`, or only the residues in `residues` (each becomes a rama item).")
+    sequence: Optional[str] = Field(
+        None, description="Only when the user wants a peptide built from its sequence instead of a structure file: "
+                          "one-letter code with optional end groups, e.g. 'Ac-AAKAAAAKAA-NH2' (Ac-/-NH2 = capped "
+                          "ends) or 'GSWTWENGKWTWK' (charged ends). Standard amino acids only.")
+    start_conformation: Optional[Literal["extended", "helix"]] = Field(
+        None, description="Only with `sequence`, if the user asks to start from a helix. Default extended.")
     backbone: Optional[str] = Field(
         None, description="Only for target_kind 'backbone', separated by ';': 'rama:A:73' for the phi/psi basins of "
                           "residue 73 ('rama:A:70-74' for a range), 'turn:A:52' for the beta turn whose residue i+1 "
@@ -172,8 +180,15 @@ MDAgent builds a solvated system from a protein PDB file and runs MD until the q
 precise enough: side-chain conformations (chi1), distances between atoms, backbone conformations (phi/psi
 basins, transitions between them, the phi/psi free-energy landscape, beta-turn types), or structure stability
 (backbone RMSD from the start and radius of gyration followed every round, stopping once they are steady and
-precise, with the time spent native-like, an RMSD-Rg free-energy surface and conformational clusters). For side chains that
-plain MD cannot sample it runs enhanced sampling.
+precise, with the time spent native-like, an RMSD-Rg free-energy surface and conformational clusters), or the
+secondary structure of each residue (helix / strand / coil populations, target_kind "secondary"). For side chains
+that plain MD cannot sample it runs enhanced sampling.
+
+Peptides: when the user gives a peptide as a sequence instead of a structure file (for example "simulate
+Ac-AAKAAAAKAA-NH2"), put it in `sequence` in one-letter code, keeping Ac-/-NH2 if written (capped ends; without
+them the ends are charged). Standard amino acids only; for modified or D-amino acids or cyclic peptides, ask for a
+prepared Amber system instead. Peptide questions are usually about helicity or folding (target_kind "secondary"),
+end-to-end distance ("distance") or backbone conformations ("backbone").
 
 By default MDAgent plans how many replicas, how long and when to stop, for the least compute, within at most 10
 replicas of at most 2 us, and stops as soon as the results are precise enough: leave allocation, replicas,
@@ -240,6 +255,7 @@ FLAGS = [  # RunPlan field -> command line option
     ("allocation", "--allocation"), ("budget_ns", "--budget-ns"), ("max_replicas", "--max-replicas"),
     ("basins", "--basins"), ("rate_rel_error", "--rate-rel-error"), ("fes_error_kcal", "--fes-error-kcal"),
     ("chains", "--chains"), ("uniprot", "--uniprot"), ("termini", "--termini"),
+    ("start_conformation", "--start-conformation"),
 ]
 SWITCHES = [("check_protonation", "--check-protonation"), ("no_enhanced_sampling", "--no-enhanced-sampling"),
             ("keep_tags", "--keep-tags"), ("accept_problems", "--accept-problems"), ("cluster", "--cluster")]
@@ -251,7 +267,11 @@ def to_argv(plan: RunPlan, pdb: str | None, out: str, prmtop: str | None = None,
 
     Input is either a PDB file, or a prepared Amber system (prmtop and inpcrd).
     """
-    if prmtop:
+    if plan.sequence:
+        from .peptide import parse_sequence
+
+        argv = ["run", "--sequence", parse_sequence(plan.sequence).text, "--out", str(out)]
+    elif prmtop:
         if not inpcrd:
             raise ValueError("A prepared Amber system needs both the prmtop and the inpcrd file.")
         argv = ["run", "--prmtop", str(prmtop), "--inpcrd", str(inpcrd), "--out", str(out)]
@@ -283,10 +303,14 @@ def to_argv(plan: RunPlan, pdb: str | None, out: str, prmtop: str | None = None,
             raise ValueError("The plan studies backbone basins but names none.")
     elif plan.target_kind == "stability":
         argv += ["--quantity", "stability"] + (["--residues", plan.residues] if plan.residues else [])
+    elif plan.target_kind == "secondary":
+        argv += ["--quantity", "secondary"] + (["--residues", plan.residues] if plan.residues else [])
     elif plan.target_kind == "ligand":
         if not plan.ligand:
             raise ValueError("The plan targets a ligand but names none.")
         argv += ["--around-ligand", plan.ligand]
+    elif not plan.residues and plan.sequence:
+        pass                                          # a peptide: every residue is the target
     else:
         if not plan.residues:
             raise ValueError("The plan targets residues but lists none.")

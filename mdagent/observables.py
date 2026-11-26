@@ -17,6 +17,10 @@ Supported quantities:
   phi/psi landscape are reported, each judged on its own (backbone.diagnose_backbone). Enhanced
   sampling: metadynamics on the two dihedrals of each item (enhanced.py, reweight.py).
 
+- "secondary" (goal quantity "secondary_structure"): the secondary structure of each target residue in every
+  frame, from DSSP (mdtraj, simplified to helix / strand / coil). The population of each state per residue, with
+  errors, judged like the other states. For peptides (built from a sequence, peptide.py) and protein regions.
+
 A distance is written as "A:88:OH-A:111:CG1@0.6": chain, residue number and atom name
 of each atom, then the cutoff in nm. The chain may be left out ("88:OH-111:CG1@0.6"),
 for example for Amber files, which have no chain names.
@@ -40,7 +44,7 @@ from .diagnose import (ResidueReport, count_transitions, error_split, judge, occ
                        populations_with_errors, rank)
 
 QUANTITIES = {"chi1": "chi1_populations", "distance": "distance_states", "event": "event_seen",
-              "backbone": "backbone_basins", "stability": "structure_stability"}   # stability: stability.py   # backbone: phi/psi basins of any residue (backbone.py)
+              "backbone": "backbone_basins", "stability": "structure_stability", "secondary": "secondary_structure"}   # stability: stability.py   # backbone: phi/psi basins of any residue (backbone.py)
 DISTANCE_STATES = ["near", "far"]
 _ATOM = r"(?:([A-Za-z0-9]):)?(-?\d+):([A-Za-z0-9']+)"
 _SPEC = re.compile(rf"^\s*{_ATOM}\s*-\s*{_ATOM}\s*@\s*([0-9.]+)\s*$")
@@ -250,5 +254,54 @@ def diagnose_events(series: list[list[np.ndarray]], specs: list[EventSpec], ns_p
             rep.verdict = "not_yet"
             rep.reason = (f"Changes state ({rep.transitions} per replica), but has not stayed in {spec.state} for "
                           f"{hold_ps:g} ps yet" + (f" in {seen_in} replicas" if seen_in > 1 else "") + ".")
+        reports.append(rep)
+    return rank(reports)
+
+
+SS_STATES = ["helix", "strand", "coil"]
+_SS_CODE = {"H": 0, "E": 1, "C": 2}     # mdtraj DSSP, simplified: H (helices: alpha, 3-10, pi), E (strand, bridge), C
+
+
+def secondary_series(trajs: list[md.Trajectory], keys: list[tuple]) -> dict:
+    """Per target residue (chain, resseq): one state array (0 helix, 1 strand, 2 coil) per replica.
+
+    DSSP needs the whole backbone (hydrogen-bond partners can be anywhere), so `trajs` hold all backbone atoms;
+    the hydrogen positions are placed by DSSP itself."""
+    wanted = {tuple(k): None for k in keys}
+    top = trajs[0].topology
+    columns = {}
+    for i, r in enumerate(top.residues):
+        key = (r.chain.chain_id, r.resSeq)
+        if key in wanted:
+            columns[key] = i
+    out = {k: [] for k in columns}
+    for traj in trajs:
+        codes = md.compute_dssp(traj, simplified=True)
+        for k, i in columns.items():
+            out[k].append(np.array([_SS_CODE.get(c, 2) for c in codes[:, i]], dtype=int))
+    return out
+
+
+def diagnose_secondary(trajs: list[md.Trajectory], keys: list[tuple], ns_per_replica: float,
+                       min_flips_per_replica: int = 4, precision: float | None = None,
+                       burn_in: str = "none") -> list[ResidueReport]:
+    """One report per residue: helix / strand / coil populations, judged like a side chain (diagnose.judge)."""
+    from .basins import trim
+
+    reports = []
+    names = {(r.chain.chain_id, r.resSeq): r.name for r in trajs[0].topology.residues}
+    for (chain, resseq), states in secondary_series(trajs, keys).items():
+        frames = len(states[0]) if states else 1
+        states, _, kept_from = trim(states, None, len(SS_STATES), burn_in)
+        occ = [occupancy(s, SS_STATES) for s in states]
+        rep = ResidueReport(chain=chain, resseq=resseq, resname=names.get((chain, resseq), ""),
+                            quantity="secondary", transitions=[count_transitions(s) for s in states],
+                            occupancies=occ, dominant=[max(o, key=o.get) for o in occ],
+                            ns_per_replica=ns_per_replica,
+                            burn_in_ns=float(np.mean(kept_from)) * ns_per_replica / max(1, frames))
+        (rep.populations, rep.standard_error, rep.replicas_differ,
+         rep.error_from_replicas) = populations_with_errors(states, SS_STATES)
+        rep.error_within, rep.error_between = error_split(states, SS_STATES)
+        judge(rep, min_flips_per_replica, precision)
         reports.append(rep)
     return rank(reports)

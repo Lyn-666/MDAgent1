@@ -99,6 +99,8 @@ Choose a question **that you care about and whose answer you partly know**. Then
 
 > Download XXXX and check the stability of the whole protein (backbone RMSD, radius of gyration, free-energy surface and clusters). At most 3 replicas of 100 ns.
 
+> Simulate the peptide Ac-XXXXXXXX-NH2 (your sequence) and tell me the helix content of each residue. At most 3 replicas of 100 ns.
+
 Tips:
 
 - **For the first test, add "at most 3 replicas of 100 ns".** That is at most 300 ns, which is less than a day on a recent GPU. Without it, the default limit is 10 replicas × 2 µs, and slow questions can run for a long time.

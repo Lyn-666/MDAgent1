@@ -373,6 +373,9 @@ def write(run_dir: Path) -> list[Path]:
                   "steady state, their means and errors, the time spent native-like, the RMSD-Rg free-energy surface "
                   "and conformational clusters")
                 if quantity == "structure_stability" else
+                T("每个残基的二级结构（螺旋、β 链、无规卷曲；DSSP）的比例",
+                  "populations of the secondary structure (helix, strand, coil; DSSP) of each residue")
+                if quantity == "secondary_structure" else
                 T("目标区域侧链的 chi1 构象（g+、t、g-）的比例", "populations of the chi1 states (g+, t, g-) of the target side chains"))
         L.append(T(f"- 目标量：{what}。", f"- Quantity: {what}."))
         if goal.get("description"):

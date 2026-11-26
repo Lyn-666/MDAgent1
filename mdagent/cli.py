@@ -59,8 +59,26 @@ def _whole_protein(args) -> Target:
     return Target(residues=tuple(res))
 
 
+def _interior_residues(args) -> Target:
+    """Every protein residue except the first and last of each chain: DSSP cannot give them a helix or a strand,
+    so their secondary structure would always be coil."""
+    import mdtraj as md
+
+    top = md.load_topology(args.pdb)
+    res = []
+    for chain in top.chains:
+        prot = [r for r in chain.residues if r.is_protein and r.name not in ("ACE", "NME")]
+        res += [(chain.chain_id, r.resSeq) for r in prot[1:-1]]
+    return Target(residues=tuple(res))
+
+
 def _target_from_args(args) -> Target:
     if getattr(args, "quantity", "") == "stability" and not args.residues and not args.around_ligand:
+        return _whole_protein(args)
+    if getattr(args, "quantity", "") == "secondary" and not args.residues and not args.around_ligand:
+        return _interior_residues(args)
+    if getattr(args, "sequence", None) and not (args.residues or args.around_ligand or getattr(args, "backbone", None)
+                                                or getattr(args, "observe", None) or getattr(args, "distances", None)):
         return _whole_protein(args)
     if args.around_ligand:
         return Target(ligand=args.around_ligand, cutoff_nm=args.cutoff_angstrom / 10.0)
@@ -354,6 +372,19 @@ def cmd_run(args) -> int:
         print(f"error: {out} already has a run. Use 'resume --run {out}' to continue it.",
               file=sys.stderr)
         return 2
+    peptide = None
+    if getattr(args, "sequence", None):
+        # A peptide from its sequence: write its backbone to structures/, then go on as with --pdb.
+        from .peptide import default_path, parse_sequence, write_pdb
+
+        try:
+            peptide = parse_sequence(args.sequence)
+        except ValueError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 2
+        path = write_pdb(peptide, default_path(peptide, args.start_conformation), args.start_conformation)
+        print(f"Peptide {peptide.text} ({len(peptide.residues)} residues), {args.start_conformation} start: {path}")
+        args.pdb = str(path)
     if args.observe:
         if args.quantity not in ("chi1", "event") or args.distances:
             print("error: --observe is a goal of its own; do not combine it with --quantity distance or --distances. "
@@ -364,7 +395,7 @@ def cmd_run(args) -> int:
         from .observables import parse_events
         try:
             events = parse_events(args.observe)
-            if args.pdb:
+            if args.pdb and not peptide:   # a peptide has only its backbone until it is built; checked after
                 _check_events(events, args.pdb)
         except ValueError as e:
             print(f"error: {e}", file=sys.stderr)
@@ -396,7 +427,7 @@ def cmd_run(args) -> int:
         if not (0 < args.rate_rel_error < 1) or args.fes_error_kcal <= 0:
             print("error: --rate-rel-error must be between 0 and 1, and --fes-error-kcal above 0.", file=sys.stderr)
             return 2
-        if args.pdb and args.backbone:
+        if args.pdb and args.backbone and not peptide:
             _check_backbone(args, args.pdb)  # Fail before building if an atom is not there.
     if args.quantity == "stability":
         if args.sampling == "adaptive":
@@ -420,7 +451,7 @@ def cmd_run(args) -> int:
         if args.sampling == "adaptive":
             print("error: adaptive sampling does not support --quantity distance yet.", file=sys.stderr)
             return 2
-        if args.pdb:
+        if args.pdb and not peptide:
             _check_distances(args, args.pdb)  # Fail before building if an atom is not there.
     if args.enhanced_max_residues < 1:
         print("error: --enhanced-max-residues must be 1 or more.", file=sys.stderr)
@@ -447,7 +478,13 @@ def cmd_run(args) -> int:
         check = _structure_check(args)
         out.mkdir(parents=True, exist_ok=True)
         (out / "structure_check.txt").write_text(check.report() + "\n")
-        if not check.clean and not args.accept_problems:
+        if peptide is not None:
+            # Built here from the sequence: there is no reference sequence to check against, and the ends are
+            # what the user wrote (Ac- / -NH2 become ACE / NME caps; otherwise charged).
+            check.cap_ends = {c: (peptide.n_cap, peptide.c_cap) for c in check.cap_ends or {"A": None}}
+            print("  note: built from the sequence, so no reference-sequence check is needed; chain ends: "
+                  + ("Ac" if peptide.n_cap else "NH3+") + " / " + ("NH2" if peptide.c_cap else "COO-") + ".")
+        elif not check.clean and not args.accept_problems:
             print("\nThe run did not start. Deal with the problems above and run the command again (add the "
                   "options named under 'What to do'), or add --accept-problems to go on anyway.")
             return 4
@@ -696,6 +733,11 @@ def build_parser() -> argparse.ArgumentParser:
                                      "(if it is not there yet) and uses that file like --pdb.")
     src.add_argument("--prmtop", help="A prepared, solvated Amber system (.parm7/.prmtop), for example from "
                                      "tleap with GAFF ligand parameters. Use it as it is; needs --inpcrd.")
+    src.add_argument("--sequence", help="A peptide built from its sequence in one-letter code, for example "
+                                        "'Ac-AAKAAAAKAA-NH2' (Ac- and -NH2: capped ends; without them: charged ends). "
+                                        "Standard amino acids only.")
+    r.add_argument("--start-conformation", choices=["extended", "helix"], default="extended",
+                   help="--sequence: the starting backbone (default extended, which favours no secondary structure).")
     r.add_argument("--inpcrd", help="Coordinates and box for --prmtop (.rst7/.inpcrd).")
     _add_check_options(r)
     r.add_argument("--termini", default="auto", choices=["auto", "charged", "capped"],
@@ -745,14 +787,17 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--cluster", action="store_true",
                    help="Also cluster the conformations of this run in its report (always done for "
                         "--quantity stability).")
-    r.add_argument("--quantity", default="chi1", choices=["chi1", "distance", "backbone", "event", "stability"],
+    r.add_argument("--quantity", default="chi1",
+                   choices=["chi1", "distance", "backbone", "event", "stability", "secondary"],
                    help="What you want to know. chi1 (default): the rotamer states of the target side chains. "
                         "distance: how often atom distances are near or far (give them with --distances). "
                         "backbone: backbone basins, with transition statistics and the free-energy landscape (give "
                         "them with --backbone, or the residues with --residues). event: stop once a change is seen "
                         "(give it with --observe). stability: whether the structure stays as it is: backbone RMSD from "
                         "the start and the radius of gyration, steady state and errors, a free-energy surface and "
-                        "conformational clusters (the whole protein, or a region with --residues).")
+                        "conformational clusters (the whole protein, or a region with --residues). secondary: the "
+                        "helix / strand / coil populations of each residue (DSSP; all residues except the chain ends, "
+                        "or --residues).")
     r.add_argument("--rama-basins", default="boxes", choices=["boxes", "centres"],
                    help="--quantity backbone: how Ramachandran basins are defined. boxes (default): regions that "
                         "cover the whole map (alpha_R, beta with PPII, alpha_L, other). centres: three centres "

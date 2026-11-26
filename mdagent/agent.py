@@ -456,6 +456,8 @@ def diagnose_run(run_dir: Path, state: RunState) -> list[ResidueReport]:
         return _diagnose_backbone(run_dir, state)
     if state.quantity == "structure_stability":
         return _diagnose_stability(run_dir, state)
+    if state.quantity == "secondary_structure":
+        return _diagnose_secondary(run_dir, state)
     fixed = fixed_chi1_residues(run_dir / "protein.pdb")
     if state.sampling == "adaptive":
         # Segments start from different frames on purpose, so judge the pooled flips.
@@ -528,6 +530,19 @@ def _diagnose_distances(run_dir: Path, state: RunState) -> list[ResidueReport]:
     where = {a: k for k, a in enumerate(atoms)}
     trajs = load_run(run_dir, state.target, len(state.rounds_ns), atoms=atoms)
     return diagnose_distances(trajs, specs, [(where[i], where[j]) for i, j in pairs], state.ns_done,
+                              state.loop.min_flips_per_replica, state.precision(), state.loop.burn_in)
+
+
+def _diagnose_secondary(run_dir: Path, state: RunState) -> list[ResidueReport]:
+    """Secondary structure of each target residue (DSSP on the whole backbone, observables.diagnose_secondary)."""
+    import mdtraj as md
+
+    from .observables import diagnose_secondary
+
+    top = md.load_topology(str(run_dir / "protein.pdb"))
+    backbone = [a.index for a in top.atoms if a.residue.is_protein and a.name in ("N", "CA", "C", "O")]
+    trajs = load_run(run_dir, state.target, len(state.rounds_ns), atoms=backbone)
+    return diagnose_secondary(trajs, [tuple(k) for k in state.target], state.ns_done,
                               state.loop.min_flips_per_replica, state.precision(), state.loop.burn_in)
 
 

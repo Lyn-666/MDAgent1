@@ -105,6 +105,12 @@ most 10 per µs (about 300 ns in all; "stable for T" sets 1/T per µs in max_dep
 spent native-like (RMSD below 0.3 nm), an RMSD-Rg free-energy surface and GROMOS clusters (0.15 nm).
 Conformational clusters can also be added to any other run (cluster true).
 
+Peptides and secondary structure: a peptide can be built from its sequence without a structure file: put the
+sequence in plan.sequence in one-letter code ("Ac-AAKAAAAKAA-NH2": Ac-/-NH2 give capped ends; without them the ends
+are charged; standard amino acids only), and leave pdb null. Start extended by default (start_conformation "helix"
+only if asked). target_kind "secondary" gives the helix / strand / coil populations of each residue (DSSP; all
+residues except the chain ends, or plan.residues); it also works for protein regions.
+
 Defaults: 300 K, 0.15 M NaCl, CHARMM36m with TIP3P water, pH 7, a cubic box with 1.0 nm of water around the
 protein. The user may change each of them (temperature_k, ion_conc, cation, forcefield, ph, box_shape,
 padding_nm). When the request asks for a default value, say in `reply` that it is met; never say a default
@@ -597,6 +603,11 @@ class Assistant:
                 return None
             name = _clean_name(a.run_name, names + [p.name for p in self.runs.dir.glob("*")]
                                if self.runs.dir.exists() else names)
+            if a.plan.sequence:
+                from .peptide import parse_sequence
+
+                parse_sequence(a.plan.sequence)   # a clear reason if the sequence cannot be built
+                a.pdb = a.prmtop = a.inpcrd = None
             argv = to_argv(a.plan, a.pdb, f"runs/{name}", prmtop=a.prmtop, inpcrd=a.inpcrd)
             for f in [a.pdb, a.prmtop, a.inpcrd]:
                 if f and not (self.root / f).exists():
@@ -638,6 +649,9 @@ class Assistant:
 
                 _check_events(parse_events(a.plan.observe), self.root / a.pdb)
             check_text = None
+            if a.plan.sequence:
+                check_text = ("Built from the sequence " + a.plan.sequence + ": no structure file and no reference-"
+                              "sequence check needed.")
             if a.pdb and not a.prmtop:
                 from .check import check_structure
 
